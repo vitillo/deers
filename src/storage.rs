@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::error::Result;
+use crate::{dtype::DType, error::Result};
 
 pub trait UnaryOp {
     fn f32(v: f32) -> f32;
@@ -24,17 +24,27 @@ pub trait BinaryOp {
     fn f64(v: f64, w: f64) -> f64;
 }
 
-pub struct Add;
+macro_rules! impl_binary_op {
+    ($id:ident, $op:ident) => {
+        pub struct $id;
 
-impl BinaryOp for Add {
-    fn f32(v: f32, w: f32) -> f32 {
-        v + w
-    }
+        impl BinaryOp for $id {
+            fn f32(v: f32, w: f32) -> f32 {
+                use std::ops::*;
+                v.$op(w)
+            }
 
-    fn f64(v: f64, w: f64) -> f64 {
-        v + w
-    }
+            fn f64(v: f64, w: f64) -> f64 {
+                use std::ops::*;
+                v.$op(w)
+            }
+        }
+    };
 }
+
+impl_binary_op!(Add, add);
+impl_binary_op!(Sub, sub);
+impl_binary_op!(Mul, mul);
 
 #[derive(Debug, PartialEq, PartialOrd)]
 pub enum Storage {
@@ -61,6 +71,14 @@ impl Storage {
     }
 }
 
+impl Storage {
+    pub fn dtype(&self) -> DType {
+        match self {
+            Storage::Cpu(storage) => storage.dtype(),
+        }
+    }
+}
+
 trait BackendStorage: Sized {
     fn unary_op<O: UnaryOp>(&self) -> Result<Self>;
     fn binary_op<O: BinaryOp>(&self, other: &Self) -> Result<Self>;
@@ -70,6 +88,27 @@ trait BackendStorage: Sized {
 pub enum CpuStorage {
     F32(Vec<f32>),
     F64(Vec<f64>),
+}
+
+impl CpuStorage {
+    fn dtype(&self) -> DType {
+        match self {
+            CpuStorage::F32(_) => DType::F32,
+            CpuStorage::F64(_) => DType::F64,
+        }
+    }
+}
+
+impl From<Vec<f32>> for CpuStorage {
+    fn from(v: Vec<f32>) -> Self {
+        Self::F32(v)
+    }
+}
+
+impl From<Vec<f64>> for CpuStorage {
+    fn from(v: Vec<f64>) -> Self {
+        Self::F64(v)
+    }
 }
 
 impl BackendStorage for CpuStorage {
@@ -137,5 +176,20 @@ mod tests {
         let storage = storage.binary_op::<Add>(&other).unwrap();
 
         assert_eq!(storage, Storage::Cpu(CpuStorage::F32(vec![5.0, 7.0, 9.0])));
+    }
+
+    #[test]
+    fn test_mul() {
+        let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
+        let storage = Storage::Cpu(storage);
+        let other = CpuStorage::F32(vec![4.0, 5.0, 6.0]);
+        let other = Storage::Cpu(other);
+
+        let storage = storage.binary_op::<Mul>(&other).unwrap();
+
+        assert_eq!(
+            storage,
+            Storage::Cpu(CpuStorage::F32(vec![4.0, 10.0, 18.0]))
+        );
     }
 }
