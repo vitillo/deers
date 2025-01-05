@@ -8,18 +8,28 @@ use crate::tensor::{Tensor, TensorId};
 #[derive(Debug)]
 pub enum BackpropOp {
     Neg(Tensor),
-    Add(Tensor, Tensor),
-    Sub(Tensor, Tensor),
-    Mul(Tensor, Tensor),
+    EWiseAdd(Tensor, Tensor),
+    ScalarAdd(Tensor, f64),
+    ScalarMul(Tensor, f64),
+    EWiseSub(Tensor, Tensor),
+    EWiseMul(Tensor, Tensor),
+    EWisePow(Tensor, Tensor),
+    EWiseLog(Tensor),
+    Powf(Tensor, f64),
 }
 
 impl BackpropOp {
     fn dependencies(&self) -> Vec<&Tensor> {
         match self {
-            BackpropOp::Neg(node) => vec![node],
-            BackpropOp::Add(left, right)
-            | BackpropOp::Sub(left, right)
-            | BackpropOp::Mul(left, right) => vec![left, right],
+            BackpropOp::Neg(node)
+            | BackpropOp::ScalarAdd(node, _)
+            | BackpropOp::ScalarMul(node, _)
+            | BackpropOp::Powf(node, _)
+            | BackpropOp::EWiseLog(node) => vec![node],
+            BackpropOp::EWiseAdd(left, right)
+            | BackpropOp::EWiseSub(left, right)
+            | BackpropOp::EWiseMul(left, right)
+            | BackpropOp::EWisePow(left, right) => vec![left, right],
         }
     }
 }
@@ -54,41 +64,83 @@ impl Tensor {
                 Some(BackpropOp::Neg(node)) => {
                     let grad = store
                         .get_or_insert_with(node.id(), || self.zeros_like())
-                        .add(&parent_grad.neg()?)?;
+                        .ewise_add(&parent_grad.neg()?)?;
                     store.insert(node.id(), grad);
                 }
-                Some(BackpropOp::Add(left, right)) => {
+                Some(BackpropOp::EWiseAdd(left, right)) => {
                     let left_grad = store
                         .get_or_insert_with(left.id(), || self.zeros_like())
-                        .add(&parent_grad)?;
+                        .ewise_add(&parent_grad)?;
                     store.insert(left.id(), left_grad);
 
                     let right_grad = store
                         .get_or_insert_with(right.id(), || self.zeros_like())
-                        .add(&parent_grad)?;
+                        .ewise_add(&parent_grad)?;
                     store.insert(right.id(), right_grad);
                 }
-                Some(BackpropOp::Sub(left, right)) => {
+                Some(BackpropOp::ScalarAdd(arg, _)) => {
+                    let arg_grad = store
+                        .get_or_insert_with(arg.id(), || self.zeros_like())
+                        .ewise_add(&parent_grad)?;
+                    store.insert(arg.id(), arg_grad);
+                }
+                Some(BackpropOp::ScalarMul(arg, scalar)) => {
+                    let arg_grad = parent_grad.scalar_mul(*scalar)?;
+                    let sum_grad = store
+                        .get_or_insert_with(arg.id(), || self.zeros_like())
+                        .ewise_add(&arg_grad)?;
+                    store.insert(arg.id(), sum_grad);
+                }
+                Some(BackpropOp::EWiseSub(left, right)) => {
                     let left_grad = store
                         .get_or_insert_with(left.id(), || self.zeros_like())
-                        .add(&parent_grad)?;
+                        .ewise_add(&parent_grad)?;
                     store.insert(left.id(), left_grad);
 
                     let right_grad = store
                         .get_or_insert_with(right.id(), || self.zeros_like())
-                        .sub(&parent_grad)?;
+                        .ewise_sub(&parent_grad)?;
                     store.insert(right.id(), right_grad);
                 }
-                Some(BackpropOp::Mul(left, right)) => {
+                Some(BackpropOp::EWiseMul(left, right)) => {
                     let left_grad = store
                         .get_or_insert_with(left.id(), || self.zeros_like())
-                        .add(right)?;
+                        .ewise_add(&parent_grad.ewise_mul(right)?)?;
                     store.insert(left.id(), left_grad);
 
                     let right_grad = store
                         .get_or_insert_with(right.id(), || self.zeros_like())
-                        .add(left)?;
+                        .ewise_add(&parent_grad.ewise_mul(left)?)?;
                     store.insert(right.id(), right_grad);
+                }
+                Some(BackpropOp::EWisePow(arg, e)) => {
+                    let arg_grad = parent_grad
+                        .ewise_mul(e)?
+                        .ewise_mul(&arg.ewise_powf(&e.scalar_add(-1.0)?)?)?;
+                    let sum_grad = store
+                        .get_or_insert_with(arg.id(), || self.zeros_like())
+                        .ewise_add(&arg_grad)?;
+                    store.insert(arg.id(), sum_grad);
+
+                    let e_grad =
+                        parent_grad.ewise_mul(&arg.ewise_powf(e)?.ewise_mul(&e.ewise_log()?)?)?;
+                    let sum_grad = store
+                        .get_or_insert_with(e.id(), || self.zeros_like())
+                        .ewise_add(&e_grad)?;
+                    store.insert(e.id(), sum_grad);
+                }
+                Some(BackpropOp::EWiseLog(arg)) => {
+                    todo!()
+                }
+                Some(BackpropOp::Powf(arg, e)) => {
+                    let arg_grad = parent_grad
+                        .ewise_mul(arg)?
+                        .scalar_mul(*e)?
+                        .scalar_powf(*e - 1.0)?;
+                    let sum_grad = store
+                        .get_or_insert_with(arg.id(), || self.zeros_like())
+                        .ewise_add(&arg_grad)?;
+                    store.insert(arg.id(), sum_grad);
                 }
                 None => {
                     // No dependencies
@@ -154,10 +206,10 @@ mod tests {
     }
 
     #[test]
-    fn test_backward_add() {
+    fn test_backward_ewise_add() {
         let a = Tensor::ones((3,), DType::F32, Device::Cpu);
         let b = Tensor::ones((3,), DType::F32, Device::Cpu);
-        let c = a.add(&b).unwrap();
+        let c = a.ewise_add(&b).unwrap();
 
         let grads = c.backward().unwrap();
 
@@ -167,10 +219,10 @@ mod tests {
     }
 
     #[test]
-    fn test_backward_sub() {
+    fn test_backward_ewise_sub() {
         let a = Tensor::ones((3,), DType::F32, Device::Cpu);
         let b = Tensor::ones((3,), DType::F32, Device::Cpu);
-        let c = a.sub(&b).unwrap();
+        let c = a.ewise_sub(&b).unwrap();
 
         let grads = c.backward().unwrap();
 
@@ -180,14 +232,60 @@ mod tests {
     }
 
     #[test]
-    fn test_mul() {
+    fn test_backward_ewise_mul() {
         let a = Tensor::load_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu);
         let b = Tensor::load_vec(vec![4.0, 5.0, 6.0], (3,), Device::Cpu);
-        let c = a.mul(&b).unwrap();
+        let c = a.ewise_mul(&b).unwrap();
 
         let grads = c.backward().unwrap();
 
         assert_eq!(grads.get(a.id()).unwrap(), b);
         assert_eq!(grads.get(b.id()).unwrap(), a);
+    }
+
+    #[test]
+    fn test_backward_ewise_powf() {
+        let a = Tensor::load_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu);
+        let b = Tensor::load_vec(vec![2.0, 3.0, 4.0], (3,), Device::Cpu);
+        let c = a.ewise_powf(&b).unwrap();
+
+        let grads = c.backward().unwrap();
+
+        let expected = Tensor::load_vec(vec![2.0, 12.0, 108.0], (3,), Device::Cpu);
+        assert_eq!(grads.get(a.id()).unwrap(), expected);
+        // TODO: check *b* be with numerical differentiation
+    }
+
+    #[test]
+    fn test_backward_scalar_add() {
+        let a = Tensor::ones((3,), DType::F32, Device::Cpu);
+        let b = a.scalar_add(2.0).unwrap();
+
+        let grads = b.backward().unwrap();
+
+        let expected = Tensor::ones((3,), DType::F32, Device::Cpu);
+        assert_eq!(grads.get(a.id()).unwrap(), expected);
+    }
+
+    #[test]
+    fn test_backward_scalar_mul() {
+        let a = Tensor::load_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu);
+        let b = a.scalar_mul(2.0).unwrap();
+
+        let grads = b.backward().unwrap();
+
+        let expected = Tensor::load_vec(vec![2.0, 2.0, 2.0], (3,), Device::Cpu);
+        assert_eq!(grads.get(a.id()).unwrap(), expected);
+    }
+
+    #[test]
+    fn test_backward_scalar_powf() {
+        let a = Tensor::load_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu);
+        let b = a.scalar_powf(2.0).unwrap();
+
+        let grads = b.backward().unwrap();
+
+        let expected = Tensor::load_vec(vec![2.0, 4.0, 6.0], (3,), Device::Cpu);
+        assert_eq!(grads.get(a.id()).unwrap(), expected);
     }
 }

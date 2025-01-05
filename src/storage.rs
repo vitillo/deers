@@ -3,19 +3,43 @@
 use crate::{dtype::DType, error::Result};
 
 pub trait UnaryOp {
-    fn f32(v: f32) -> f32;
-    fn f64(v: f64) -> f64;
+    fn f32(&self, v: f32) -> f32;
+    fn f64(&self, v: f64) -> f64;
 }
 
 pub struct Neg;
 
 impl UnaryOp for Neg {
-    fn f32(v: f32) -> f32 {
+    fn f32(&self, v: f32) -> f32 {
         -v
     }
 
-    fn f64(v: f64) -> f64 {
+    fn f64(&self, v: f64) -> f64 {
         -v
+    }
+}
+
+pub struct ScalarAdd(pub f64);
+
+impl UnaryOp for ScalarAdd {
+    fn f32(&self, v: f32) -> f32 {
+        v + self.0 as f32
+    }
+
+    fn f64(&self, v: f64) -> f64 {
+        v + self.0
+    }
+}
+
+pub struct ScalarMul(pub f64);
+
+impl UnaryOp for ScalarMul {
+    fn f64(&self, v: f64) -> f64 {
+        v * self.0
+    }
+
+    fn f32(&self, v: f32) -> f32 {
+        v * self.0 as f32
     }
 }
 
@@ -30,11 +54,13 @@ macro_rules! impl_binary_op {
 
         impl BinaryOp for $id {
             fn f32(v: f32, w: f32) -> f32 {
+                #[allow(unused_imports)]
                 use std::ops::*;
                 v.$op(w)
             }
 
             fn f64(v: f64, w: f64) -> f64 {
+                #[allow(unused_imports)]
                 use std::ops::*;
                 v.$op(w)
             }
@@ -42,9 +68,10 @@ macro_rules! impl_binary_op {
     };
 }
 
-impl_binary_op!(Add, add);
-impl_binary_op!(Sub, sub);
-impl_binary_op!(Mul, mul);
+impl_binary_op!(EWiseAdd, add);
+impl_binary_op!(EWiseSub, sub);
+impl_binary_op!(EWiseMul, mul);
+impl_binary_op!(EWisePow, powf);
 
 #[derive(Debug, PartialEq, PartialOrd)]
 pub enum Storage {
@@ -52,10 +79,28 @@ pub enum Storage {
 }
 
 impl Storage {
-    pub fn unary_op<O: UnaryOp>(&self) -> Result<Self> {
+    pub fn powf(&self, e: f64) -> Result<Self> {
         match self {
             Storage::Cpu(storage) => {
-                let storage = storage.unary_op::<O>()?;
+                let storage = storage.powf(e)?;
+                Ok(Self::Cpu(storage))
+            }
+        }
+    }
+
+    pub fn ewise_log(&self) -> Result<Self> {
+        match self {
+            Storage::Cpu(storage) => {
+                let storage = storage.log()?;
+                Ok(Self::Cpu(storage))
+            }
+        }
+    }
+
+    pub fn unary_op<O: UnaryOp>(&self, op: O) -> Result<Self> {
+        match self {
+            Storage::Cpu(storage) => {
+                let storage = storage.unary_op(op)?;
                 Ok(Self::Cpu(storage))
             }
         }
@@ -80,7 +125,9 @@ impl Storage {
 }
 
 trait BackendStorage: Sized {
-    fn unary_op<O: UnaryOp>(&self) -> Result<Self>;
+    fn powf(&self, e: f64) -> Result<Self>;
+    fn log(&self) -> Result<Self>;
+    fn unary_op<O: UnaryOp>(&self, op: O) -> Result<Self>;
     fn binary_op<O: BinaryOp>(&self, other: &Self) -> Result<Self>;
 }
 
@@ -112,14 +159,40 @@ impl From<Vec<f64>> for CpuStorage {
 }
 
 impl BackendStorage for CpuStorage {
-    fn unary_op<O: UnaryOp>(&self) -> Result<Self> {
+    fn powf(&self, e: f64) -> Result<Self> {
         match self {
             CpuStorage::F32(data) => {
-                let array = data.iter().map(|v| O::f32(*v)).collect::<Vec<_>>();
+                let array = data.iter().map(|v| v.powf(e as f32)).collect::<Vec<_>>();
                 Ok(CpuStorage::F32(array))
             }
             CpuStorage::F64(data) => {
-                let array = data.iter().map(|v| O::f64(*v)).collect::<Vec<_>>();
+                let array = data.iter().map(|v| v.powf(e)).collect::<Vec<_>>();
+                Ok(CpuStorage::F64(array))
+            }
+        }
+    }
+
+    fn log(&self) -> Result<Self> {
+        match self {
+            CpuStorage::F32(data) => {
+                let array = data.iter().map(|v| v.ln()).collect::<Vec<_>>();
+                Ok(CpuStorage::F32(array))
+            }
+            CpuStorage::F64(data) => {
+                let array = data.iter().map(|v| v.ln()).collect::<Vec<_>>();
+                Ok(CpuStorage::F64(array))
+            }
+        }
+    }
+
+    fn unary_op<O: UnaryOp>(&self, op: O) -> Result<Self> {
+        match self {
+            CpuStorage::F32(data) => {
+                let array = data.iter().map(|v| op.f32(*v)).collect::<Vec<_>>();
+                Ok(CpuStorage::F32(array))
+            }
+            CpuStorage::F64(data) => {
+                let array = data.iter().map(|v| op.f64(*v)).collect::<Vec<_>>();
                 Ok(CpuStorage::F64(array))
             }
         }
@@ -158,7 +231,7 @@ mod tests {
         let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
         let storage = Storage::Cpu(storage);
 
-        let storage = storage.unary_op::<Neg>().unwrap();
+        let storage = storage.unary_op(Neg).unwrap();
 
         assert_eq!(
             storage,
@@ -167,29 +240,81 @@ mod tests {
     }
 
     #[test]
-    fn test_add() {
+    fn test_ewise_add() {
         let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
         let storage = Storage::Cpu(storage);
         let other = CpuStorage::F32(vec![4.0, 5.0, 6.0]);
         let other = Storage::Cpu(other);
 
-        let storage = storage.binary_op::<Add>(&other).unwrap();
+        let storage = storage.binary_op::<EWiseAdd>(&other).unwrap();
 
         assert_eq!(storage, Storage::Cpu(CpuStorage::F32(vec![5.0, 7.0, 9.0])));
     }
 
     #[test]
-    fn test_mul() {
+    fn test_ewise_sub() {
         let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
         let storage = Storage::Cpu(storage);
         let other = CpuStorage::F32(vec![4.0, 5.0, 6.0]);
         let other = Storage::Cpu(other);
 
-        let storage = storage.binary_op::<Mul>(&other).unwrap();
+        let storage = storage.binary_op::<EWiseSub>(&other).unwrap();
+
+        assert_eq!(
+            storage,
+            Storage::Cpu(CpuStorage::F32(vec![-3.0, -3.0, -3.0]))
+        );
+    }
+
+    #[test]
+    fn test_ewise_mul() {
+        let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
+        let storage = Storage::Cpu(storage);
+        let other = CpuStorage::F32(vec![4.0, 5.0, 6.0]);
+        let other = Storage::Cpu(other);
+
+        let storage = storage.binary_op::<EWiseMul>(&other).unwrap();
 
         assert_eq!(
             storage,
             Storage::Cpu(CpuStorage::F32(vec![4.0, 10.0, 18.0]))
         );
+    }
+
+    #[test]
+    fn test_ewise_pow() {
+        let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
+        let storage = Storage::Cpu(storage);
+        let other = CpuStorage::F32(vec![4.0, 5.0, 6.0]);
+        let other = Storage::Cpu(other);
+
+        let storage = storage.binary_op::<EWisePow>(&other).unwrap();
+
+        assert_eq!(
+            storage,
+            Storage::Cpu(CpuStorage::F32(vec![1.0, 32.0, 729.0]))
+        );
+    }
+
+    #[test]
+    fn test_scalar_add() {
+        let storage = Storage::Cpu(CpuStorage::F32(vec![1.0, 2.0, 3.0]));
+
+        let storage = storage.unary_op(ScalarAdd(10.0)).unwrap();
+
+        assert_eq!(
+            storage,
+            Storage::Cpu(CpuStorage::F32(vec![11.0, 12.0, 13.0]))
+        );
+    }
+
+    #[test]
+    fn test_powf() {
+        let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
+        let storage = Storage::Cpu(storage);
+
+        let storage = storage.powf(2.0).unwrap();
+
+        assert_eq!(storage, Storage::Cpu(CpuStorage::F32(vec![1.0, 4.0, 9.0])));
     }
 }
