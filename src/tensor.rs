@@ -1,15 +1,16 @@
 #![allow(dead_code)]
 
-use std::ops::Deref;
+use std::borrow::Borrow;
+use std::ops::{Add, Deref, Mul, Neg, Sub};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crate::backprop::BackpropOp;
 use crate::device::Device;
 use crate::dtype::DType;
 use crate::error::Result;
 use crate::layout::{Layout, Shape};
-use crate::storage::{CpuStorage, EWiseAdd, Neg, ScalarAdd, ScalarMul, Storage};
+use crate::ops::{self, TensorOp};
+use crate::storage::{CpuStorage, Storage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TensorId(usize);
@@ -21,7 +22,7 @@ pub struct TensorInternal {
     layout: Layout,
     device: Device,
     dtype: DType,
-    op: Option<BackpropOp>,
+    op: Option<Box<dyn TensorOp>>,
 }
 
 impl TensorInternal {
@@ -30,7 +31,7 @@ impl TensorInternal {
         layout: Layout,
         device: Device,
         dtype: DType,
-        op: Option<BackpropOp>,
+        op: Option<Box<dyn TensorOp>>,
     ) -> Self {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let id = TensorId(COUNTER.fetch_add(1, Ordering::Relaxed));
@@ -75,7 +76,7 @@ impl Deref for Tensor {
 }
 
 impl Tensor {
-    pub fn op(&self) -> &Option<BackpropOp> {
+    pub fn op(&self) -> &Option<Box<dyn TensorOp>> {
         &self.op
     }
 
@@ -83,23 +84,37 @@ impl Tensor {
         self.id
     }
 
+    pub fn storage(&self) -> &Storage {
+        &self.storage
+    }
+
+    pub fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
+    pub fn dtype(&self) -> DType {
+        self.dtype
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
     pub fn zeros(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
         let storage = device.zeros(shape.size(), dtype);
         let layout: Layout = shape.into();
-        let op = None;
-        TensorInternal::new(storage, layout, device, dtype, op).into()
+        TensorInternal::new(storage, layout, device, dtype, None).into()
     }
 
     pub fn ones(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
         let storage = device.ones(shape.size(), dtype);
         let layout: Layout = shape.into();
-        let op = None;
-        TensorInternal::new(storage, layout, device, dtype, op).into()
+        TensorInternal::new(storage, layout, device, dtype, None).into()
     }
 
-    pub fn load_vec(vec: impl Into<CpuStorage>, shape: impl Into<Shape>, device: Device) -> Tensor {
+    pub fn from_vec(vec: impl Into<CpuStorage>, shape: impl Into<Shape>, device: Device) -> Tensor {
         assert_eq!(
             device,
             Device::Cpu,
@@ -109,8 +124,7 @@ impl Tensor {
         let storage = Storage::Cpu(vec.into());
         let layout: Layout = shape.into();
         let dtype = storage.dtype();
-        let op = None;
-        TensorInternal::new(storage, layout, device, dtype, op).into()
+        TensorInternal::new(storage, layout, device, dtype, None).into()
     }
 
     pub fn ones_like(&self) -> Tensor {
@@ -135,75 +149,138 @@ impl Tensor {
         .into()
     }
 
-    pub fn neg(&self) -> Result<Tensor> {
-        let storage = self.storage.unary_op(Neg)?;
-        let layout = self.layout.clone();
-        let op = Some(BackpropOp::Neg(self.clone()));
-        Ok(TensorInternal::new(storage, layout, self.device, self.dtype, op).into())
+    pub fn powf<B: Borrow<Tensor>>(&self, e: B) -> Tensor {
+        ops::EWisePowf(self.clone(), e.borrow().clone())
+            .forward()
+            .unwrap()
     }
 
-    pub fn ewise_add(&self, rhs: &Self) -> Result<Tensor> {
-        let storage = self
-            .storage
-            .binary_op::<crate::storage::EWiseAdd>(&rhs.storage)?;
-        let layout = self.layout.clone();
-        let op = Some(BackpropOp::EWiseAdd(self.clone(), rhs.clone()));
-        Ok(TensorInternal::new(storage, layout, self.device, self.dtype, op).into())
-    }
-
-    pub fn ewise_sub(&self, rhs: &Self) -> Result<Tensor> {
-        let storage = self
-            .storage
-            .binary_op::<crate::storage::EWiseSub>(&rhs.storage)?;
-        let layout = self.layout.clone();
-        let op = Some(BackpropOp::EWiseSub(self.clone(), rhs.clone()));
-        Ok(TensorInternal::new(storage, layout, self.device, self.dtype, op).into())
-    }
-
-    pub fn ewise_mul(&self, rhs: &Self) -> Result<Tensor> {
-        let storage = self
-            .storage
-            .binary_op::<crate::storage::EWiseMul>(&rhs.storage)?;
-        let layout = self.layout.clone();
-        let op = Some(BackpropOp::EWiseMul(self.clone(), rhs.clone()));
-        Ok(TensorInternal::new(storage, layout, self.device, self.dtype, op).into())
-    }
-
-    pub fn ewise_powf(&self, e: &Self) -> Result<Tensor> {
-        let storage = self
-            .storage
-            .binary_op::<crate::storage::EWisePow>(&e.storage)?;
-        let layout = self.layout.clone();
-        let op = Some(BackpropOp::EWisePow(self.clone(), e.clone()));
-        Ok(TensorInternal::new(storage, layout, self.device, self.dtype, op).into())
-    }
-
-    pub fn ewise_log(&self) -> Result<Tensor> {
-        let storage = self.storage.ewise_log()?;
-        let layout = self.layout.clone();
-        let op = Some(BackpropOp::EWiseLog(self.clone()));
-        Ok(TensorInternal::new(storage, layout, self.device, self.dtype, op).into())
-    }
-
-    pub fn scalar_add(&self, scalar: f64) -> Result<Tensor> {
-        let storage = self.storage.unary_op(ScalarAdd(scalar))?;
-        let layout = self.layout.clone();
-        let op = Some(BackpropOp::ScalarAdd(self.clone(), scalar));
-        Ok(TensorInternal::new(storage, layout, self.device, self.dtype, op).into())
-    }
-
-    pub fn scalar_mul(&self, scalar: f64) -> Result<Tensor> {
-        let storage = self.storage.unary_op(ScalarMul(scalar))?;
-        let layout = self.layout.clone();
-        let op = Some(BackpropOp::ScalarMul(self.clone(), scalar));
-        Ok(TensorInternal::new(storage, layout, self.device, self.dtype, op).into())
+    pub fn log(&self) -> Tensor {
+        ops::EWiseLog(self.clone()).forward().unwrap()
     }
 
     pub fn scalar_powf(&self, e: f64) -> Result<Tensor> {
-        let storage = self.storage.powf(e)?;
-        let layout = self.layout.clone();
-        let op = Some(BackpropOp::Powf(self.clone(), e));
-        Ok(TensorInternal::new(storage, layout, self.device, self.dtype, op).into())
+        ops::ScalarPowf(self.clone(), e).forward()
+    }
+}
+
+impl Neg for Tensor {
+    type Output = Tensor;
+
+    fn neg(self) -> Self::Output {
+        ops::Neg(self.clone()).forward().unwrap()
+    }
+}
+
+impl Neg for &Tensor {
+    type Output = Tensor;
+
+    fn neg(self) -> Self::Output {
+        ops::Neg(self.clone()).forward().unwrap()
+    }
+}
+
+impl<B: Borrow<Tensor>> Add<B> for Tensor {
+    type Output = Tensor;
+
+    fn add(self, rhs: B) -> Self::Output {
+        ops::EWiseAdd(self.clone(), rhs.borrow().clone())
+            .forward()
+            .unwrap()
+    }
+}
+
+impl<B: Borrow<Tensor>> Add<B> for &Tensor {
+    type Output = Tensor;
+
+    fn add(self, rhs: B) -> Self::Output {
+        ops::EWiseAdd(self.clone(), rhs.borrow().clone())
+            .forward()
+            .unwrap()
+    }
+}
+
+impl Add<f64> for Tensor {
+    type Output = Tensor;
+
+    fn add(self, rhs: f64) -> Self::Output {
+        ops::ScalarAdd(self.clone(), rhs).forward().unwrap()
+    }
+}
+
+impl Add<f64> for &Tensor {
+    type Output = Tensor;
+
+    fn add(self, rhs: f64) -> Self::Output {
+        ops::ScalarAdd(self.clone(), rhs).forward().unwrap()
+    }
+}
+
+impl<B: Borrow<Tensor>> Sub<B> for Tensor {
+    type Output = Tensor;
+
+    fn sub(self, rhs: B) -> Self::Output {
+        self + (-rhs.borrow())
+    }
+}
+
+impl<B: Borrow<Tensor>> Sub<B> for &Tensor {
+    type Output = Tensor;
+
+    fn sub(self, rhs: B) -> Self::Output {
+        self + -rhs.borrow()
+    }
+}
+
+impl Sub<f64> for Tensor {
+    type Output = Tensor;
+
+    fn sub(self, rhs: f64) -> Self::Output {
+        self + -rhs
+    }
+}
+
+impl Sub<f64> for &Tensor {
+    type Output = Tensor;
+
+    fn sub(self, rhs: f64) -> Self::Output {
+        self + -rhs
+    }
+}
+
+impl<B: Borrow<Tensor>> Mul<B> for Tensor {
+    type Output = Tensor;
+
+    fn mul(self, rhs: B) -> Self::Output {
+        ops::EWiseMul(self.clone(), rhs.borrow().clone())
+            .forward()
+            .unwrap()
+    }
+}
+
+impl<B: Borrow<Tensor>> Mul<B> for &Tensor {
+    type Output = Tensor;
+
+    fn mul(self, rhs: B) -> Self::Output {
+        ops::EWiseMul(self.clone(), rhs.borrow().clone())
+            .forward()
+            .unwrap()
+    }
+}
+
+impl Mul<f64> for Tensor {
+    type Output = Tensor;
+
+    fn mul(self, rhs: f64) -> Self::Output {
+        ops::ScalarMul(self.clone(), rhs).forward().unwrap()
+    }
+}
+
+impl Mul<f64> for &Tensor {
+    type Output = Tensor;
+
+    fn mul(self, rhs: f64) -> Self::Output {
+        ops::ScalarMul(self.clone(), rhs).forward().unwrap()
     }
 }
 
@@ -255,7 +332,7 @@ mod tests {
     fn test_neg() {
         let tensor = Tensor::ones((2, 3), DType::F32, Device::Cpu);
 
-        let tensor = tensor.neg().unwrap();
+        let tensor = tensor.neg();
 
         assert_eq!(tensor.layout.shape, (2, 3).into());
         assert_eq!(tensor.layout.strides, vec![3, 1].into());
@@ -267,7 +344,7 @@ mod tests {
         let a = Tensor::ones((2, 3), DType::F32, Device::Cpu);
         let b = Tensor::ones((2, 3), DType::F32, Device::Cpu);
 
-        let c = a.ewise_add(&b).unwrap();
+        let c = a + b;
 
         assert_eq!(c.layout.shape, (2, 3).into());
         assert_eq!(c.layout.strides, vec![3, 1].into());
@@ -279,7 +356,7 @@ mod tests {
         let a = Tensor::ones((2, 3), DType::F32, Device::Cpu);
         let b = Tensor::ones((2, 3), DType::F32, Device::Cpu);
 
-        let c = a.ewise_sub(&b).unwrap();
+        let c = a - b;
 
         assert_eq!(c.layout.shape, (2, 3).into());
         assert_eq!(c.layout.strides, vec![3, 1].into());
@@ -288,10 +365,10 @@ mod tests {
 
     #[test]
     fn test_ewise_mul() {
-        let a = Tensor::load_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
-        let b = Tensor::load_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+        let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+        let b = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
 
-        let c = a.ewise_mul(&b).unwrap();
+        let c = a * b;
 
         assert_eq!(
             c.storage,
@@ -301,10 +378,10 @@ mod tests {
 
     #[test]
     fn test_ewise_powf() {
-        let a = Tensor::load_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
-        let b = Tensor::load_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+        let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+        let b = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
 
-        let c = a.ewise_powf(&b).unwrap();
+        let c = a.powf(b);
 
         assert_eq!(
             c.storage,
@@ -316,9 +393,9 @@ mod tests {
 
     #[test]
     fn test_ewise_log() {
-        let a = Tensor::load_vec(vec![1.0f32, 1.0, 1.0], (3,), Device::Cpu);
+        let a = Tensor::from_vec(vec![1.0f32, 1.0, 1.0], (3,), Device::Cpu);
 
-        let b = a.ewise_log().unwrap();
+        let b = a.log();
 
         assert_eq!(
             b.storage,
@@ -330,7 +407,7 @@ mod tests {
     fn test_scalar_add() {
         let a = Tensor::ones((2, 3), DType::F32, Device::Cpu);
 
-        let b = a.scalar_add(2.0).unwrap();
+        let b = a + 2.0;
 
         assert_eq!(b.storage, Storage::Cpu(CpuStorage::F32(vec![3.0; 6])));
     }
@@ -339,7 +416,7 @@ mod tests {
     fn test_scalar_sub() {
         let a = Tensor::ones((2, 3), DType::F32, Device::Cpu);
 
-        let b = a.scalar_add(-2.0).unwrap();
+        let b = a - 2.0;
 
         assert_eq!(b.storage, Storage::Cpu(CpuStorage::F32(vec![-1.0; 6])));
     }
@@ -348,14 +425,14 @@ mod tests {
     fn test_scalar_mul() {
         let a = Tensor::ones((2, 3), DType::F32, Device::Cpu);
 
-        let b = a.scalar_mul(2.0).unwrap();
+        let b = a * 2.0;
 
         assert_eq!(b.storage, Storage::Cpu(CpuStorage::F32(vec![2.0; 6])));
     }
 
     #[test]
     fn test_scalar_powf() {
-        let a = Tensor::load_vec(vec![1.0f32, 2.0, 3.0], (2, 3), Device::Cpu);
+        let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (2, 3), Device::Cpu);
 
         let b = a.scalar_powf(2.0).unwrap();
 
