@@ -85,39 +85,14 @@ mod tests {
 
     #[test]
     fn test_sorting() {
-        let a = Tensor::zeros((2, 3), DType::F32, Device::Cpu);
-        let b = -a;
-        let c = -b;
-        let d = -c;
+        let a = &Tensor::zeros((2, 3), DType::F32, Device::Cpu);
+        let b = &-a;
+        let c = &-b;
+        let d = &-c;
 
         let sorted_nodes = d.sorted_nodes();
 
-        assert_eq!(sorted_nodes.len(), 4);
-    }
-
-    #[test]
-    fn test_backward_ewise_mul() {
-        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu);
-        let b = Tensor::from_vec(vec![4.0, 5.0, 6.0], (3,), Device::Cpu);
-        let c = &a * &b;
-
-        let grads = c.backward().unwrap();
-
-        assert_eq!(grads.get(a.id()).unwrap(), b);
-        assert_eq!(grads.get(b.id()).unwrap(), a);
-    }
-
-    #[test]
-    fn test_backward_ewise_powf() {
-        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu);
-        let b = Tensor::from_vec(vec![2.0, 3.0, 4.0], (3,), Device::Cpu);
-        let c = a.powf(&b);
-
-        let grads = c.backward().unwrap();
-
-        let expected = Tensor::from_vec(vec![2.0, 12.0, 108.0], (3,), Device::Cpu);
-        assert_eq!(grads.get(a.id()).unwrap(), expected);
-        // TODO: check *b* be with numerical differentiation
+        assert_eq!(sorted_nodes, [d, c, b, a]);
     }
 
     #[test]

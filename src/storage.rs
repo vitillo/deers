@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 
-use crate::{dtype::DType, error::Result};
+use crate::{
+    dtype::{DType, WithDType},
+    error::Result,
+};
 
 pub trait UnaryOp {
     fn f32(&self, v: f32) -> f32;
@@ -71,9 +74,10 @@ macro_rules! impl_binary_op {
 impl_binary_op!(EWiseAdd, add);
 impl_binary_op!(EWiseSub, sub);
 impl_binary_op!(EWiseMul, mul);
+impl_binary_op!(EWiseDiv, div);
 impl_binary_op!(EWisePow, powf);
 
-#[derive(Debug, PartialEq, PartialOrd)]
+#[derive(Debug, PartialEq, PartialOrd, Clone)]
 pub enum Storage {
     Cpu(CpuStorage),
 }
@@ -114,6 +118,11 @@ impl Storage {
             }
         }
     }
+    pub fn to_vec<D: WithDType>(&self) -> Vec<D> {
+        match self {
+            Storage::Cpu(cpu_storage) => cpu_storage.to_vec(),
+        }
+    }
 }
 
 impl Storage {
@@ -131,7 +140,7 @@ trait BackendStorage: Sized {
     fn binary_op<O: BinaryOp>(&self, other: &Self) -> Result<Self>;
 }
 
-#[derive(Debug, PartialEq, PartialOrd)]
+#[derive(Debug, PartialEq, PartialOrd, Clone)]
 pub enum CpuStorage {
     F32(Vec<f32>),
     F64(Vec<f64>),
@@ -143,6 +152,10 @@ impl CpuStorage {
             CpuStorage::F32(_) => DType::F32,
             CpuStorage::F64(_) => DType::F64,
         }
+    }
+
+    fn to_vec<D: WithDType>(&self) -> Vec<D> {
+        D::to_vec(self)
     }
 }
 
@@ -224,6 +237,10 @@ impl BackendStorage for CpuStorage {
 
 #[cfg(test)]
 mod tests {
+    use core::f32;
+
+    use crate::tests::Approx;
+
     use super::*;
 
     #[test]
@@ -294,6 +311,30 @@ mod tests {
             storage,
             Storage::Cpu(CpuStorage::F32(vec![1.0, 32.0, 729.0]))
         );
+    }
+
+    #[test]
+    fn test_ewise_div() {
+        let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
+        let storage = Storage::Cpu(storage);
+        let other = CpuStorage::F32(vec![4.0, 5.0, 6.0]);
+        let other = Storage::Cpu(other);
+
+        let storage = storage.binary_op::<EWiseDiv>(&other).unwrap();
+
+        assert_eq!(storage, Storage::Cpu(CpuStorage::F32(vec![0.25, 0.4, 0.5])));
+    }
+
+    #[test]
+    fn test_ewise_log() {
+        let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
+        let storage = Storage::Cpu(storage);
+
+        let storage = storage.ewise_log().unwrap();
+
+        assert!(storage
+            .to_vec::<f32>()
+            .approx_eq(&vec![0.0, f32::consts::LN_2, 1.0986]));
     }
 
     #[test]
