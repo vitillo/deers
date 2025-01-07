@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
 use std::borrow::Borrow;
-use std::ops::{Add, Deref, Mul, Neg, Sub};
+use std::ops::{Add, Deref, Div, Mul, Neg, Sub};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::device::Device;
-use crate::dtype::DType;
+use crate::dtype::{DType, WithDType};
 use crate::error::Result;
 use crate::layout::{Layout, Shape};
 use crate::ops::{self, TensorOp};
@@ -127,6 +127,10 @@ impl Tensor {
         TensorInternal::new(storage, layout, device, dtype, None).into()
     }
 
+    pub fn to_vec<S: WithDType>(&self) -> Result<Vec<S>> {
+        Ok(self.storage.to_vec())
+    }
+
     pub fn ones_like(&self) -> Tensor {
         TensorInternal::new(
             self.device.ones(self.layout.size(), self.dtype),
@@ -159,8 +163,8 @@ impl Tensor {
         ops::EWiseLog(self.clone()).forward().unwrap()
     }
 
-    pub fn scalar_powf(&self, e: f64) -> Result<Tensor> {
-        ops::ScalarPowf(self.clone(), e).forward()
+    pub fn scalar_powf(&self, e: f64) -> Tensor {
+        ops::ScalarPowf(self.clone(), e).forward().unwrap()
     }
 }
 
@@ -268,6 +272,26 @@ impl<B: Borrow<Tensor>> Mul<B> for &Tensor {
     }
 }
 
+impl<B: Borrow<Tensor>> Div<B> for Tensor {
+    type Output = Tensor;
+
+    fn div(self, rhs: B) -> Self::Output {
+        ops::EWiseDiv(self.clone(), rhs.borrow().clone())
+            .forward()
+            .unwrap()
+    }
+}
+
+impl<B: Borrow<Tensor>> Div<B> for &Tensor {
+    type Output = Tensor;
+
+    fn div(self, rhs: B) -> Self::Output {
+        ops::EWiseDiv(self.clone(), rhs.borrow().clone())
+            .forward()
+            .unwrap()
+    }
+}
+
 impl Mul<f64> for Tensor {
     type Output = Tensor;
 
@@ -286,61 +310,67 @@ impl Mul<f64> for &Tensor {
 
 #[cfg(test)]
 mod tests {
+    use crate::error::Result;
     use crate::storage::CpuStorage;
 
     use super::*;
 
     #[test]
-    fn test_zeros() {
+    fn test_zeros() -> Result<()> {
         let tensor = Tensor::zeros((2, 3), DType::F32, Device::Cpu);
 
         assert_eq!(tensor.layout.shape, (2, 3).into());
         assert_eq!(tensor.layout.strides, vec![3, 1].into());
-        assert_eq!(tensor.storage, Storage::Cpu(CpuStorage::F32(vec![0.0; 6])));
+        assert_eq!(tensor.to_vec::<f32>()?, vec![0.0f32; 6]);
+        Ok(())
     }
 
     #[test]
-    fn test_ones() {
+    fn test_ones() -> Result<()> {
         let tensor = Tensor::ones((2, 3), DType::F32, Device::Cpu);
 
         assert_eq!(tensor.layout.shape, (2, 3).into());
         assert_eq!(tensor.layout.strides, vec![3, 1].into());
-        assert_eq!(tensor.storage, Storage::Cpu(CpuStorage::F32(vec![1.0; 6])));
+        assert_eq!(tensor.to_vec::<f32>()?, vec![1.0f32; 6]);
+        Ok(())
     }
 
     #[test]
-    fn test_ones_like() {
+    fn test_ones_like() -> Result<()> {
         let tensor = Tensor::zeros((2, 3), DType::F32, Device::Cpu);
         let tensor = tensor.ones_like();
 
         assert_eq!(tensor.layout.shape, (2, 3).into());
         assert_eq!(tensor.layout.strides, vec![3, 1].into());
-        assert_eq!(tensor.storage, Storage::Cpu(CpuStorage::F32(vec![1.0; 6])));
+        assert_eq!(tensor.to_vec::<f32>()?, vec![1.0f32; 6]);
+        Ok(())
     }
 
     #[test]
-    fn test_zeros_like() {
+    fn test_zeros_like() -> Result<()> {
         let tensor = Tensor::ones((2, 3), DType::F32, Device::Cpu);
         let tensor = tensor.zeros_like();
 
         assert_eq!(tensor.layout.shape, (2, 3).into());
         assert_eq!(tensor.layout.strides, vec![3, 1].into());
-        assert_eq!(tensor.storage, Storage::Cpu(CpuStorage::F32(vec![0.0; 6])));
+        assert_eq!(tensor.to_vec::<f32>()?, vec![0.0f32; 6]);
+        Ok(())
     }
 
     #[test]
-    fn test_neg() {
+    fn test_neg() -> Result<()> {
         let tensor = Tensor::ones((2, 3), DType::F32, Device::Cpu);
 
         let tensor = tensor.neg();
 
         assert_eq!(tensor.layout.shape, (2, 3).into());
         assert_eq!(tensor.layout.strides, vec![3, 1].into());
-        assert_eq!(tensor.storage, Storage::Cpu(CpuStorage::F32(vec![-1.0; 6])));
+        assert_eq!(tensor.to_vec::<f32>()?, vec![-1.0f32; 6]);
+        Ok(())
     }
 
     #[test]
-    fn test_ewise_add() {
+    fn test_ewise_add() -> Result<()> {
         let a = Tensor::ones((2, 3), DType::F32, Device::Cpu);
         let b = Tensor::ones((2, 3), DType::F32, Device::Cpu);
 
@@ -348,7 +378,8 @@ mod tests {
 
         assert_eq!(c.layout.shape, (2, 3).into());
         assert_eq!(c.layout.strides, vec![3, 1].into());
-        assert_eq!(c.storage, Storage::Cpu(CpuStorage::F32(vec![2.0; 6])));
+        assert_eq!(c.to_vec::<f32>()?, vec![2.0f32; 6]);
+        Ok(())
     }
 
     #[test]
@@ -434,7 +465,7 @@ mod tests {
     fn test_scalar_powf() {
         let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (2, 3), Device::Cpu);
 
-        let b = a.scalar_powf(2.0).unwrap();
+        let b = a.scalar_powf(2.0);
 
         assert_eq!(
             b.storage,

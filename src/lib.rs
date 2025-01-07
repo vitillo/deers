@@ -6,3 +6,4 @@ mod layout;
 mod ops;
 mod storage;
 mod tensor;
+mod tests;
