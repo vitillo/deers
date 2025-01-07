@@ -10,7 +10,7 @@ use crate::dtype::{DType, WithDType};
 use crate::error::Result;
 use crate::layout::{Layout, Shape};
 use crate::ops::{self, TensorOp};
-use crate::storage::{CpuStorage, Storage};
+use crate::storage::{BackendStorage, CpuStorage, Storage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TensorId(usize);
@@ -163,6 +163,10 @@ impl Tensor {
         ops::EWiseLog(self.clone()).forward().unwrap()
     }
 
+    pub fn exp(&self) -> Tensor {
+        ops::EWiseExp(self.clone()).forward().unwrap()
+    }
+
     pub fn scalar_powf(&self, e: f64) -> Tensor {
         ops::ScalarPowf(self.clone(), e).forward().unwrap()
     }
@@ -311,7 +315,6 @@ impl Mul<f64> for &Tensor {
 #[cfg(test)]
 mod tests {
     use crate::error::Result;
-    use crate::storage::CpuStorage;
 
     use super::*;
 

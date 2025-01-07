@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::backprop::GradientStore;
 use crate::error::Result;
-use crate::storage;
+use crate::storage::{self, BackendStorage};
 use crate::tensor::{Tensor, TensorInternal};
 
 pub trait TensorOp: fmt::Debug + Send + Sync {
@@ -187,7 +187,7 @@ pub struct EWiseLog(pub Tensor);
 impl TensorOp for EWiseLog {
     fn forward(self) -> Result<Tensor> {
         Ok(TensorInternal::new(
-            self.0.storage().ewise_log()?,
+            self.0.storage().unary_op(storage::Log)?,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
@@ -199,6 +199,32 @@ impl TensorOp for EWiseLog {
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let arg1_grad_sum = grads.get_or_insert_zero(&self.0);
         *arg1_grad_sum = &*arg1_grad_sum + out_grad / &self.0;
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.0]
+    }
+}
+
+#[derive(Debug)]
+pub struct EWiseExp(pub Tensor);
+
+impl TensorOp for EWiseExp {
+    fn forward(self) -> Result<Tensor> {
+        Ok(TensorInternal::new(
+            self.0.storage().unary_op(storage::Exp)?,
+            self.0.layout().clone(),
+            self.0.device(),
+            self.0.dtype(),
+            Some(Box::new(self)),
+        )
+        .into())
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let arg1_grad_sum = grads.get_or_insert_zero(&self.0);
+        *arg1_grad_sum = &*arg1_grad_sum + out_grad * &self.0.exp();
         Ok(())
     }
 
@@ -268,7 +294,7 @@ pub struct ScalarPowf(pub Tensor, pub f64);
 impl TensorOp for ScalarPowf {
     fn forward(self) -> Result<Tensor> {
         Ok(TensorInternal::new(
-            self.0.storage().powf(self.1)?,
+            self.0.storage().ewise_powf(self.1)?,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
@@ -291,6 +317,8 @@ impl TensorOp for ScalarPowf {
 
 #[cfg(test)]
 mod tests {
+    use core::f64;
+
     use crate::{device::Device, dtype::DType, error::Result, tests::Approx};
 
     use super::*;
@@ -373,6 +401,21 @@ mod tests {
             .to_vec()
             .unwrap()
             .approx_eq(vec![1.0, 0.5, 1.0 / 3.0]));
+    }
+
+    #[test]
+    fn test_backward_ewise_exp() {
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu);
+        let b = &a.exp();
+
+        let grads = b.backward().unwrap();
+
+        dbg!(grads.get(a.id()).unwrap().to_vec::<f64>().unwrap());
+        assert!(grads.get(a.id()).unwrap().to_vec().unwrap().approx_eq(vec![
+            f64::consts::E,
+            7.3891,
+            20.0855
+        ]));
     }
 
     #[test]

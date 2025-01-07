@@ -1,11 +1,17 @@
 #![allow(dead_code)]
 
+mod cpu;
+
 use crate::{
     dtype::{DType, WithDType},
     error::Result,
 };
 
+pub use cpu::*;
+
 pub trait UnaryOp {
+    const KERNEL: &'static str;
+
     fn f32(&self, v: f32) -> f32;
     fn f64(&self, v: f64) -> f64;
 }
@@ -13,6 +19,8 @@ pub trait UnaryOp {
 pub struct Neg;
 
 impl UnaryOp for Neg {
+    const KERNEL: &'static str = "Neg";
+
     fn f32(&self, v: f32) -> f32 {
         -v
     }
@@ -22,86 +30,108 @@ impl UnaryOp for Neg {
     }
 }
 
-pub struct ScalarAdd(pub f64);
+macro_rules! unary_op {
+    ($op:ident, $name:literal, $a:ident, $e:expr) => {
+        pub struct $op;
 
-impl UnaryOp for ScalarAdd {
-    fn f32(&self, v: f32) -> f32 {
-        v + self.0 as f32
-    }
-
-    fn f64(&self, v: f64) -> f64 {
-        v + self.0
-    }
-}
-
-pub struct ScalarMul(pub f64);
-
-impl UnaryOp for ScalarMul {
-    fn f64(&self, v: f64) -> f64 {
-        v * self.0
-    }
-
-    fn f32(&self, v: f32) -> f32 {
-        v * self.0 as f32
-    }
-}
-
-pub trait BinaryOp {
-    fn f32(v: f32, w: f32) -> f32;
-    fn f64(v: f64, w: f64) -> f64;
-}
-
-macro_rules! impl_binary_op {
-    ($id:ident, $op:ident) => {
-        pub struct $id;
-
-        impl BinaryOp for $id {
-            fn f32(v: f32, w: f32) -> f32 {
-                #[allow(unused_imports)]
-                use std::ops::*;
-                v.$op(w)
+        impl UnaryOp for $op {
+            const KERNEL: &'static str = $name;
+            fn f32(&self, $a: f32) -> f32 {
+                $e
             }
 
-            fn f64(v: f64, w: f64) -> f64 {
-                #[allow(unused_imports)]
-                use std::ops::*;
-                v.$op(w)
+            fn f64(&self, $a: f64) -> f64 {
+                $e
             }
         }
     };
 }
 
-impl_binary_op!(EWiseAdd, add);
-impl_binary_op!(EWiseSub, sub);
-impl_binary_op!(EWiseMul, mul);
-impl_binary_op!(EWiseDiv, div);
-impl_binary_op!(EWisePow, powf);
+unary_op!(Exp, "exp", v, v.exp());
+unary_op!(Log, "log", v, v.ln());
+
+macro_rules! scalar_op {
+    ($op:ident, $name:literal, $e:tt) => {
+        pub struct $op(pub f64);
+
+        impl UnaryOp for $op {
+            const KERNEL: &'static str = $name;
+            fn f32(&self, v: f32) -> f32 {
+                v $e self.0 as f32
+            }
+
+            fn f64(&self, v: f64) -> f64 {
+                v $e self.0
+            }
+        }
+    };
+}
+
+scalar_op!(ScalarAdd, "scalar_add", +);
+scalar_op!(ScalarMul, "scalar_mul", *);
+scalar_op!(ScalarDiv, "scalar_div", /);
+
+pub trait BinaryOp {
+    const KERNEL: &'static str;
+
+    fn f32(v: f32, w: f32) -> f32;
+    fn f64(v: f64, w: f64) -> f64;
+}
+
+macro_rules! impl_binary_op {
+    ($op:ident, $name: literal, $e:ident) => {
+        pub struct $op;
+
+        impl BinaryOp for $op {
+            const KERNEL: &'static str = $name;
+
+            fn f32(v: f32, w: f32) -> f32 {
+                #[allow(unused_imports)]
+                use std::ops::*;
+                v.$e(w)
+            }
+
+            fn f64(v: f64, w: f64) -> f64 {
+                #[allow(unused_imports)]
+                use std::ops::*;
+                v.$e(w)
+            }
+        }
+    };
+}
+
+impl_binary_op!(EWiseAdd, "add", add);
+impl_binary_op!(EWiseSub, "sub", sub);
+impl_binary_op!(EWiseMul, "mul", mul);
+impl_binary_op!(EWiseDiv, "div", div);
+impl_binary_op!(EWisePow, "powf", powf);
+
+pub trait BackendStorage: Sized {
+    fn ewise_powf(&self, e: f64) -> Result<Self>;
+    //fn ewise_log(&self) -> Result<Self>;
+    //fn ewise_exp(&self) -> Result<Self>;
+    fn unary_op<O: UnaryOp>(&self, op: O) -> Result<Self>;
+    fn binary_op<O: BinaryOp>(&self, other: &Self) -> Result<Self>;
+    fn dtype(&self) -> DType;
+    fn to_vec<D: WithDType>(&self) -> Vec<D>;
+}
 
 #[derive(Debug, PartialEq, PartialOrd, Clone)]
 pub enum Storage {
     Cpu(CpuStorage),
 }
 
-impl Storage {
-    pub fn powf(&self, e: f64) -> Result<Self> {
+impl BackendStorage for Storage {
+    fn ewise_powf(&self, e: f64) -> Result<Self> {
         match self {
             Storage::Cpu(storage) => {
-                let storage = storage.powf(e)?;
+                let storage = storage.ewise_powf(e)?;
                 Ok(Self::Cpu(storage))
             }
         }
     }
 
-    pub fn ewise_log(&self) -> Result<Self> {
-        match self {
-            Storage::Cpu(storage) => {
-                let storage = storage.log()?;
-                Ok(Self::Cpu(storage))
-            }
-        }
-    }
-
-    pub fn unary_op<O: UnaryOp>(&self, op: O) -> Result<Self> {
+    fn unary_op<O: UnaryOp>(&self, op: O) -> Result<Self> {
         match self {
             Storage::Cpu(storage) => {
                 let storage = storage.unary_op(op)?;
@@ -110,7 +140,7 @@ impl Storage {
         }
     }
 
-    pub fn binary_op<O: BinaryOp>(&self, other: &Self) -> Result<Self> {
+    fn binary_op<O: BinaryOp>(&self, other: &Self) -> Result<Self> {
         match (self, other) {
             (Storage::Cpu(storage), Storage::Cpu(other)) => {
                 let storage = storage.binary_op::<O>(other)?;
@@ -118,119 +148,16 @@ impl Storage {
             }
         }
     }
-    pub fn to_vec<D: WithDType>(&self) -> Vec<D> {
-        match self {
-            Storage::Cpu(cpu_storage) => cpu_storage.to_vec(),
-        }
-    }
-}
 
-impl Storage {
-    pub fn dtype(&self) -> DType {
+    fn dtype(&self) -> DType {
         match self {
             Storage::Cpu(storage) => storage.dtype(),
         }
     }
-}
-
-trait BackendStorage: Sized {
-    fn powf(&self, e: f64) -> Result<Self>;
-    fn log(&self) -> Result<Self>;
-    fn unary_op<O: UnaryOp>(&self, op: O) -> Result<Self>;
-    fn binary_op<O: BinaryOp>(&self, other: &Self) -> Result<Self>;
-}
-
-#[derive(Debug, PartialEq, PartialOrd, Clone)]
-pub enum CpuStorage {
-    F32(Vec<f32>),
-    F64(Vec<f64>),
-}
-
-impl CpuStorage {
-    fn dtype(&self) -> DType {
-        match self {
-            CpuStorage::F32(_) => DType::F32,
-            CpuStorage::F64(_) => DType::F64,
-        }
-    }
 
     fn to_vec<D: WithDType>(&self) -> Vec<D> {
-        D::to_vec(self)
-    }
-}
-
-impl From<Vec<f32>> for CpuStorage {
-    fn from(v: Vec<f32>) -> Self {
-        Self::F32(v)
-    }
-}
-
-impl From<Vec<f64>> for CpuStorage {
-    fn from(v: Vec<f64>) -> Self {
-        Self::F64(v)
-    }
-}
-
-impl BackendStorage for CpuStorage {
-    fn powf(&self, e: f64) -> Result<Self> {
         match self {
-            CpuStorage::F32(data) => {
-                let array = data.iter().map(|v| v.powf(e as f32)).collect::<Vec<_>>();
-                Ok(CpuStorage::F32(array))
-            }
-            CpuStorage::F64(data) => {
-                let array = data.iter().map(|v| v.powf(e)).collect::<Vec<_>>();
-                Ok(CpuStorage::F64(array))
-            }
-        }
-    }
-
-    fn log(&self) -> Result<Self> {
-        match self {
-            CpuStorage::F32(data) => {
-                let array = data.iter().map(|v| v.ln()).collect::<Vec<_>>();
-                Ok(CpuStorage::F32(array))
-            }
-            CpuStorage::F64(data) => {
-                let array = data.iter().map(|v| v.ln()).collect::<Vec<_>>();
-                Ok(CpuStorage::F64(array))
-            }
-        }
-    }
-
-    fn unary_op<O: UnaryOp>(&self, op: O) -> Result<Self> {
-        match self {
-            CpuStorage::F32(data) => {
-                let array = data.iter().map(|v| op.f32(*v)).collect::<Vec<_>>();
-                Ok(CpuStorage::F32(array))
-            }
-            CpuStorage::F64(data) => {
-                let array = data.iter().map(|v| op.f64(*v)).collect::<Vec<_>>();
-                Ok(CpuStorage::F64(array))
-            }
-        }
-    }
-
-    fn binary_op<O: BinaryOp>(&self, other: &Self) -> Result<Self> {
-        match (self, other) {
-            (CpuStorage::F32(v), CpuStorage::F32(w)) => {
-                let array = v
-                    .iter()
-                    .zip(w.iter())
-                    .map(|(v, w)| O::f32(*v, *w))
-                    .collect::<Vec<_>>();
-                Ok(CpuStorage::F32(array))
-            }
-            (CpuStorage::F64(v), CpuStorage::F64(w)) => {
-                let array = v
-                    .iter()
-                    .zip(w.iter())
-                    .map(|(v, w)| O::f64(*v, *w))
-                    .collect::<Vec<_>>();
-                Ok(CpuStorage::F64(array))
-            }
-            (CpuStorage::F32(_), CpuStorage::F64(_)) => unreachable!(),
-            (CpuStorage::F64(_), CpuStorage::F32(_)) => unreachable!(),
+            Storage::Cpu(cpu_storage) => cpu_storage.to_vec(),
         }
     }
 }
@@ -330,11 +257,23 @@ mod tests {
         let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
         let storage = Storage::Cpu(storage);
 
-        let storage = storage.ewise_log().unwrap();
+        let storage = storage.unary_op(Log).unwrap();
 
         assert!(storage
             .to_vec::<f32>()
-            .approx_eq(&vec![0.0, f32::consts::LN_2, 1.0986]));
+            .approx_eq(vec![0.0, f32::consts::LN_2, 1.0986]));
+    }
+
+    #[test]
+    fn test_ewise_exp() {
+        let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
+        let storage = Storage::Cpu(storage);
+
+        let storage = storage.unary_op(Exp).unwrap();
+
+        assert!(storage
+            .to_vec::<f32>()
+            .approx_eq(vec![f32::consts::E, 7.3891, 20.0855]));
     }
 
     #[test]
@@ -354,7 +293,7 @@ mod tests {
         let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
         let storage = Storage::Cpu(storage);
 
-        let storage = storage.powf(2.0).unwrap();
+        let storage = storage.ewise_powf(2.0).unwrap();
 
         assert_eq!(storage, Storage::Cpu(CpuStorage::F32(vec![1.0, 4.0, 9.0])));
     }
