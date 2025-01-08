@@ -1,10 +1,12 @@
 #![allow(dead_code)]
 
 use std::fmt;
+use std::iter::zip;
 use std::sync::{Arc, RwLock};
 
 use crate::backprop::GradientStore;
 use crate::error::Result;
+use crate::layout::{Layout, Shape};
 use crate::storage::{self, BackendStorage};
 use crate::tensor::{Tensor, TensorInternal};
 
@@ -364,6 +366,7 @@ pub struct Permute(pub Tensor, pub Vec<usize>);
 
 impl TensorOp for Permute {
     fn forward(self) -> Result<Tensor> {
+        assert_eq!(self.0.layout().ndim(), self.1.len());
         let storage = self.0.storage.clone();
         let layout = self.0.layout().permute(&self.1);
         Ok(TensorInternal::new(
@@ -386,5 +389,54 @@ impl TensorOp for Permute {
 
     fn dependencies(&self) -> Vec<&Tensor> {
         vec![&self.0]
+    }
+}
+
+#[derive(Debug)]
+pub struct Broadcast {
+    pub arg: Tensor,
+    pub new_shape: Shape,
+}
+
+impl TensorOp for Broadcast {
+    fn forward(self) -> Result<Tensor> {
+        assert!(self.new_shape.ndim() >= self.arg.layout().ndim());
+        let shape_diff = self.new_shape.ndim() - self.arg.layout().ndim();
+
+        let mut old_shape = Vec::with_capacity(self.new_shape.ndim());
+        old_shape.extend((0..shape_diff).map(|_| 1));
+        old_shape.extend(self.arg.layout().shape().iter());
+
+        let mut new_strides = Vec::with_capacity(self.new_shape.ndim());
+        new_strides.extend((0..shape_diff).map(|_| 0));
+        new_strides.extend(self.arg.layout().strides().iter());
+
+        for (i, (new_dim, old_dim)) in zip(self.new_shape.iter(), old_shape.iter()).enumerate() {
+            if *old_dim == 1 {
+                new_strides[i] = 0;
+            } else if old_dim != new_dim {
+                panic!("Invalid shape");
+            }
+        }
+
+        let layout = Layout::new(self.new_shape.clone(), new_strides, 0);
+        let storage = self.arg.storage.clone();
+        Ok(TensorInternal::new(
+            storage,
+            layout,
+            self.arg.device(),
+            self.arg.dtype(),
+            false,
+            Some(Box::new(self)),
+        )
+        .into())
+    }
+
+    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        todo!()
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
     }
 }

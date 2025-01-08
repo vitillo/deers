@@ -184,6 +184,15 @@ impl Tensor {
             .unwrap()
     }
 
+    pub fn broadcast(&self, new_shape: impl Into<Shape>) -> Tensor {
+        ops::Broadcast {
+            arg: self.clone(),
+            new_shape: new_shape.into(),
+        }
+        .forward()
+        .unwrap()
+    }
+
     pub fn is_compact(&self) -> bool {
         self.layout.is_compact()
     }
