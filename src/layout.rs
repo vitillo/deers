@@ -29,6 +29,10 @@ impl Shape {
     pub fn ndim(&self) -> usize {
         self.shape.len()
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = &usize> {
+        self.shape.iter()
+    }
 }
 
 impl Index<usize> for Shape {
@@ -36,6 +40,12 @@ impl Index<usize> for Shape {
 
     fn index(&self, index: usize) -> &Self::Output {
         &self.shape[index]
+    }
+}
+
+impl From<Vec<usize>> for Shape {
+    fn from(value: Vec<usize>) -> Self {
+        Shape::new(value)
     }
 }
 
@@ -110,6 +120,14 @@ impl Layout {
             strides: strides.into(),
             offset,
         }
+    }
+
+    pub fn shape(&self) -> &Shape {
+        &self.shape
+    }
+
+    pub fn strides(&self) -> &Strides {
+        &self.strides
     }
 
     pub fn size(&self) -> usize {

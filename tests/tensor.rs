@@ -310,3 +310,16 @@ fn test_permute_backward() {
         vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
     )
 }
+
+#[test]
+fn test_broadcast() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu);
+
+    let b = a.broadcast((2, 3));
+
+    assert_eq!(b.layout().shape, (2, 3).into());
+    assert_eq!(
+        b.to_vec::<f32>().unwrap(),
+        vec![1.0f32, 2.0, 3.0, 1.0, 2.0, 3.0]
+    );
+}
