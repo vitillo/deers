@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::fmt;
+use std::sync::{Arc, RwLock};
 
 use crate::backprop::GradientStore;
 use crate::error::Result;
@@ -21,7 +22,9 @@ pub struct Neg(pub Tensor);
 
 impl TensorOp for Neg {
     fn forward(self) -> Result<Tensor> {
-        let storage = self.0.storage().unary_op(storage::Neg)?;
+        let storage = Arc::new(RwLock::new(
+            self.0.storage().unary_op(storage::Neg, self.0.layout())?,
+        ));
         let layout = self.0.layout().clone();
         Ok(TensorInternal::new(
             storage,
@@ -49,10 +52,13 @@ pub struct EWiseAdd(pub Tensor, pub Tensor);
 
 impl TensorOp for EWiseAdd {
     fn forward(self) -> Result<Tensor> {
-        let storage = self
-            .0
-            .storage()
-            .binary_op::<storage::EWiseAdd>(self.1.storage())?;
+        let storage = Arc::new(RwLock::new(
+            self.0.storage().binary_op::<storage::EWiseAdd>(
+                self.0.layout(),
+                &self.1.storage(),
+                self.1.layout(),
+            )?,
+        ));
         Ok(TensorInternal::new(
             storage,
             self.0.layout().clone(),
@@ -83,10 +89,13 @@ pub struct EWiseMul(pub Tensor, pub Tensor);
 
 impl TensorOp for EWiseMul {
     fn forward(self) -> Result<Tensor> {
-        let storage = self
-            .0
-            .storage()
-            .binary_op::<storage::EWiseMul>(self.1.storage())?;
+        let storage = Arc::new(RwLock::new(
+            self.0.storage().binary_op::<storage::EWiseMul>(
+                self.0.layout(),
+                &self.1.storage(),
+                self.1.layout(),
+            )?,
+        ));
         Ok(TensorInternal::new(
             storage,
             self.0.layout().clone(),
@@ -117,10 +126,13 @@ pub struct EWiseDiv(pub Tensor, pub Tensor);
 
 impl TensorOp for EWiseDiv {
     fn forward(self) -> Result<Tensor> {
-        let storage = self
-            .0
-            .storage()
-            .binary_op::<storage::EWiseDiv>(self.1.storage())?;
+        let storage = Arc::new(RwLock::new(
+            self.0.storage().binary_op::<storage::EWiseDiv>(
+                self.0.layout(),
+                &self.1.storage(),
+                self.1.layout(),
+            )?,
+        ));
         Ok(TensorInternal::new(
             storage,
             self.0.layout().clone(),
@@ -150,10 +162,13 @@ pub struct EWisePowf(pub Tensor, pub Tensor);
 
 impl TensorOp for EWisePowf {
     fn forward(self) -> Result<Tensor> {
-        let storage = self
-            .0
-            .storage()
-            .binary_op::<storage::EWisePow>(self.1.storage())?;
+        let storage = Arc::new(RwLock::new(
+            self.0.storage().binary_op::<storage::EWisePow>(
+                self.0.layout(),
+                &self.1.storage(),
+                self.1.layout(),
+            )?,
+        ));
         Ok(TensorInternal::new(
             storage,
             self.0.layout().clone(),
@@ -186,8 +201,11 @@ pub struct EWiseLog(pub Tensor);
 
 impl TensorOp for EWiseLog {
     fn forward(self) -> Result<Tensor> {
+        let storage = Arc::new(RwLock::new(
+            self.0.storage().unary_op(storage::Log, self.0.layout())?,
+        ));
         Ok(TensorInternal::new(
-            self.0.storage().unary_op(storage::Log)?,
+            storage,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
@@ -212,8 +230,11 @@ pub struct EWiseExp(pub Tensor);
 
 impl TensorOp for EWiseExp {
     fn forward(self) -> Result<Tensor> {
+        let storage = Arc::new(RwLock::new(
+            self.0.storage().unary_op(storage::Exp, self.0.layout())?,
+        ));
         Ok(TensorInternal::new(
-            self.0.storage().unary_op(storage::Exp)?,
+            storage,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
@@ -238,8 +259,13 @@ pub struct ScalarAdd(pub Tensor, pub f64);
 
 impl TensorOp for ScalarAdd {
     fn forward(self) -> Result<Tensor> {
+        let storage = Arc::new(RwLock::new(
+            self.0
+                .storage()
+                .unary_op(storage::ScalarAdd(self.1), self.0.layout())?,
+        ));
         Ok(TensorInternal::new(
-            self.0.storage().unary_op(storage::ScalarAdd(self.1))?,
+            storage,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
@@ -265,8 +291,13 @@ pub struct ScalarMul(pub Tensor, pub f64);
 
 impl TensorOp for ScalarMul {
     fn forward(self) -> Result<Tensor> {
+        let storage = Arc::new(RwLock::new(
+            self.0
+                .storage()
+                .unary_op(storage::ScalarMul(self.1), self.0.layout())?,
+        ));
         Ok(TensorInternal::new(
-            self.0.storage().unary_op(storage::ScalarMul(self.1))?,
+            storage,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
@@ -293,8 +324,11 @@ pub struct ScalarPowf(pub Tensor, pub f64);
 
 impl TensorOp for ScalarPowf {
     fn forward(self) -> Result<Tensor> {
+        let storage = Arc::new(RwLock::new(
+            self.0.storage().ewise_powf(self.1, self.0.layout())?,
+        ));
         Ok(TensorInternal::new(
-            self.0.storage().ewise_powf(self.1)?,
+            storage,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
@@ -354,18 +388,14 @@ mod tests {
 
         let grads = c.backward().unwrap();
 
-        assert!(grads
-            .get(a.id())
-            .unwrap()
-            .to_vec()
-            .unwrap()
-            .approx_eq(vec![0.2500, 0.2000, 0.1667]));
-        assert!(grads
-            .get(b.id())
-            .unwrap()
-            .to_vec()
-            .unwrap()
-            .approx_eq(vec![-0.0625, -0.0800, -0.0833]));
+        Vec::<_>::assert_approx_eq(
+            grads.get(a.id()).unwrap().to_vec().unwrap(),
+            vec![0.2500, 0.2000, 0.1667],
+        );
+        Vec::<_>::assert_approx_eq(
+            grads.get(b.id()).unwrap().to_vec().unwrap(),
+            vec![-0.0625, -0.0800, -0.0833],
+        );
     }
 
     #[test]
@@ -380,11 +410,10 @@ mod tests {
             grads.get(a.id()).unwrap(),
             Tensor::from_vec(vec![4.0, 80., 1458.], (3,), Device::Cpu)
         );
-        assert!(grads
-            .get(b.id())
-            .unwrap()
-            .to_vec()?
-            .approx_eq(vec![0., 22.1807, 800.8884]));
+        Vec::<_>::assert_approx_eq(
+            grads.get(b.id()).unwrap().to_vec().unwrap(),
+            vec![0., 22.1807, 800.8884],
+        );
         Ok(())
     }
 
@@ -395,12 +424,10 @@ mod tests {
 
         let grads = b.backward().unwrap();
 
-        assert!(grads
-            .get(a.id())
-            .unwrap()
-            .to_vec()
-            .unwrap()
-            .approx_eq(vec![1.0, 0.5, 1.0 / 3.0]));
+        Vec::<_>::assert_approx_eq(
+            grads.get(a.id()).unwrap().to_vec().unwrap(),
+            vec![1.0, 0.5, 1.0 / 3.0],
+        );
     }
 
     #[test]
@@ -410,12 +437,10 @@ mod tests {
 
         let grads = b.backward().unwrap();
 
-        dbg!(grads.get(a.id()).unwrap().to_vec::<f64>().unwrap());
-        assert!(grads.get(a.id()).unwrap().to_vec().unwrap().approx_eq(vec![
-            f64::consts::E,
-            7.3891,
-            20.0855
-        ]));
+        Vec::<_>::assert_approx_eq(
+            grads.get(a.id()).unwrap().to_vec().unwrap(),
+            vec![f64::consts::E, 7.3891, 20.0855],
+        );
     }
 
     #[test]

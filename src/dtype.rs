@@ -9,8 +9,9 @@ pub enum DType {
     F64,
 }
 
-pub trait WithDType: Sized {
+pub trait WithDType: Sized + Copy {
     fn to_vec(storage: &CpuStorage) -> Vec<Self>;
+    fn as_slice(storage: &CpuStorage) -> &[Self];
 }
 
 impl WithDType for f32 {
@@ -20,12 +21,26 @@ impl WithDType for f32 {
             _ => todo!(), // type mismatch error
         }
     }
+
+    fn as_slice(storage: &CpuStorage) -> &[Self] {
+        match storage {
+            CpuStorage::F32(vec) => vec.as_slice(),
+            _ => todo!(), // type mismatch error
+        }
+    }
 }
 
 impl WithDType for f64 {
     fn to_vec(storage: &CpuStorage) -> Vec<Self> {
         match storage {
             CpuStorage::F64(vec) => vec.clone(),
+            _ => todo!(),
+        }
+    }
+
+    fn as_slice(storage: &CpuStorage) -> &[Self] {
+        match storage {
+            CpuStorage::F64(vec) => vec.as_slice(),
             _ => todo!(),
         }
     }

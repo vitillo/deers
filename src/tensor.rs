@@ -3,7 +3,7 @@
 use std::borrow::Borrow;
 use std::ops::{Add, Deref, Div, Mul, Neg, Sub};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use crate::device::Device;
 use crate::dtype::{DType, WithDType};
@@ -18,7 +18,7 @@ pub struct TensorId(usize);
 #[derive(Debug)]
 pub struct TensorInternal {
     id: TensorId,
-    storage: Storage,
+    storage: Arc<RwLock<Storage>>,
     layout: Layout,
     device: Device,
     dtype: DType,
@@ -27,7 +27,7 @@ pub struct TensorInternal {
 
 impl TensorInternal {
     pub fn new(
-        storage: Storage,
+        storage: Arc<RwLock<Storage>>,
         layout: Layout,
         device: Device,
         dtype: DType,
@@ -47,18 +47,7 @@ impl TensorInternal {
     }
 }
 
-impl PartialEq for TensorInternal {
-    fn eq(&self, other: &Self) -> bool {
-        self.storage == other.storage
-            && self.layout == other.layout
-            && self.device == other.device
-            && self.dtype == other.dtype
-    }
-}
-
-impl Eq for TensorInternal {}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Tensor(Arc<TensorInternal>);
 
 impl From<TensorInternal> for Tensor {
@@ -84,8 +73,8 @@ impl Tensor {
         self.id
     }
 
-    pub fn storage(&self) -> &Storage {
-        &self.storage
+    pub fn storage(&self) -> RwLockReadGuard<'_, Storage> {
+        self.storage.read().unwrap()
     }
 
     pub fn layout(&self) -> &Layout {
@@ -102,14 +91,14 @@ impl Tensor {
 
     pub fn zeros(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
-        let storage = device.zeros(shape.size(), dtype);
+        let storage = Arc::new(RwLock::new(device.zeros(shape.size(), dtype)));
         let layout: Layout = shape.into();
         TensorInternal::new(storage, layout, device, dtype, None).into()
     }
 
     pub fn ones(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
-        let storage = device.ones(shape.size(), dtype);
+        let storage = Arc::new(RwLock::new(device.ones(shape.size(), dtype)));
         let layout: Layout = shape.into();
         TensorInternal::new(storage, layout, device, dtype, None).into()
     }
@@ -124,16 +113,19 @@ impl Tensor {
         let storage = Storage::Cpu(vec.into());
         let layout: Layout = shape.into();
         let dtype = storage.dtype();
+        let storage = Arc::new(RwLock::new(storage));
         TensorInternal::new(storage, layout, device, dtype, None).into()
     }
 
     pub fn to_vec<S: WithDType>(&self) -> Result<Vec<S>> {
-        Ok(self.storage.to_vec())
+        Ok(self.storage().to_vec(&self.layout))
     }
 
     pub fn ones_like(&self) -> Tensor {
         TensorInternal::new(
-            self.device.ones(self.layout.size(), self.dtype),
+            Arc::new(RwLock::new(
+                self.device.ones(self.layout.size(), self.dtype),
+            )),
             self.layout.clone(),
             self.device,
             self.dtype,
@@ -144,13 +136,43 @@ impl Tensor {
 
     pub fn zeros_like(&self) -> Tensor {
         TensorInternal::new(
-            self.device.zeros(self.layout.size(), self.dtype),
+            Arc::new(RwLock::new(
+                self.device.zeros(self.layout.size(), self.dtype),
+            )),
             self.layout.clone(),
             self.device,
             self.dtype,
             None,
         )
         .into()
+    }
+
+    pub fn permute(&self, axis: impl AsRef<[usize]>) -> Result<Tensor> {
+        let axis = axis.as_ref();
+        let storage = self.storage.clone();
+        let layout = self.layout.permute(axis);
+        Ok(TensorInternal::new(storage, layout, self.device, self.dtype, None).into())
+    }
+
+    pub fn is_compact(&self) -> bool {
+        self.layout.is_compact()
+    }
+
+    pub fn compact(&self) -> Result<Tensor> {
+        if self.is_compact() {
+            return Ok(self.clone());
+        }
+
+        let mut storage = self.device().zeros(self.layout.size(), self.dtype);
+        self.storage().copy_compact(&self.layout, &mut storage)?;
+        Ok(TensorInternal::new(
+            Arc::new(RwLock::new(storage)),
+            self.layout.clone(),
+            self.device,
+            self.dtype,
+            None,
+        )
+        .into())
     }
 
     pub fn powf<B: Borrow<Tensor>>(&self, e: B) -> Tensor {
@@ -171,6 +193,23 @@ impl Tensor {
         ops::ScalarPowf(self.clone(), e).forward().unwrap()
     }
 }
+
+impl PartialEq for Tensor {
+    fn eq(&self, other: &Self) -> bool {
+        self.layout().shape == other.layout().shape
+            && match (self.dtype(), other.dtype()) {
+                (DType::F32, DType::F32) => {
+                    self.to_vec::<f32>().unwrap() == other.to_vec::<f32>().unwrap()
+                }
+                (DType::F64, DType::F64) => {
+                    self.to_vec::<f64>().unwrap() == other.to_vec::<f64>().unwrap()
+                }
+                _ => false,
+            }
+    }
+}
+
+impl Eq for Tensor {}
 
 impl Neg for Tensor {
     type Output = Tensor;
@@ -323,7 +362,7 @@ mod tests {
         let tensor = Tensor::zeros((2, 3), DType::F32, Device::Cpu);
 
         assert_eq!(tensor.layout.shape, (2, 3).into());
-        assert_eq!(tensor.layout.strides, vec![3, 1].into());
+        assert_eq!(tensor.layout.strides, (3, 1).into());
         assert_eq!(tensor.to_vec::<f32>()?, vec![0.0f32; 6]);
         Ok(())
     }
@@ -333,7 +372,7 @@ mod tests {
         let tensor = Tensor::ones((2, 3), DType::F32, Device::Cpu);
 
         assert_eq!(tensor.layout.shape, (2, 3).into());
-        assert_eq!(tensor.layout.strides, vec![3, 1].into());
+        assert_eq!(tensor.layout.strides, (3, 1).into());
         assert_eq!(tensor.to_vec::<f32>()?, vec![1.0f32; 6]);
         Ok(())
     }
@@ -344,7 +383,7 @@ mod tests {
         let tensor = tensor.ones_like();
 
         assert_eq!(tensor.layout.shape, (2, 3).into());
-        assert_eq!(tensor.layout.strides, vec![3, 1].into());
+        assert_eq!(tensor.layout.strides, (3, 1).into());
         assert_eq!(tensor.to_vec::<f32>()?, vec![1.0f32; 6]);
         Ok(())
     }
@@ -355,7 +394,7 @@ mod tests {
         let tensor = tensor.zeros_like();
 
         assert_eq!(tensor.layout.shape, (2, 3).into());
-        assert_eq!(tensor.layout.strides, vec![3, 1].into());
+        assert_eq!(tensor.layout.strides, (3, 1).into());
         assert_eq!(tensor.to_vec::<f32>()?, vec![0.0f32; 6]);
         Ok(())
     }
@@ -366,8 +405,6 @@ mod tests {
 
         let tensor = tensor.neg();
 
-        assert_eq!(tensor.layout.shape, (2, 3).into());
-        assert_eq!(tensor.layout.strides, vec![3, 1].into());
         assert_eq!(tensor.to_vec::<f32>()?, vec![-1.0f32; 6]);
         Ok(())
     }
@@ -379,8 +416,6 @@ mod tests {
 
         let c = a + b;
 
-        assert_eq!(c.layout.shape, (2, 3).into());
-        assert_eq!(c.layout.strides, vec![3, 1].into());
         assert_eq!(c.to_vec::<f32>()?, vec![2.0f32; 6]);
         Ok(())
     }
@@ -392,9 +427,7 @@ mod tests {
 
         let c = a - b;
 
-        assert_eq!(c.layout.shape, (2, 3).into());
-        assert_eq!(c.layout.strides, vec![3, 1].into());
-        assert_eq!(c.storage, Storage::Cpu(CpuStorage::F32(vec![0.0; 6])));
+        assert_eq!(c.to_vec::<f32>().unwrap(), vec![0.0; 6]);
     }
 
     #[test]
@@ -405,8 +438,8 @@ mod tests {
         let c = a * b;
 
         assert_eq!(
-            c.storage,
-            Storage::Cpu(CpuStorage::F32(vec![1.0, 4.0, 9.0, 16.0, 25.0, 36.0]))
+            c.to_vec::<f32>().unwrap(),
+            vec![1.0, 4.0, 9.0, 16.0, 25.0, 36.0]
         );
     }
 
@@ -418,10 +451,8 @@ mod tests {
         let c = a.powf(b);
 
         assert_eq!(
-            c.storage,
-            Storage::Cpu(CpuStorage::F32(vec![
-                1.0, 4.0, 27.0, 256.0, 3125.0, 46656.0
-            ]))
+            c.to_vec::<f32>().unwrap(),
+            vec![1.0, 4.0, 27.0, 256.0, 3125.0, 46656.0]
         );
     }
 
@@ -431,10 +462,7 @@ mod tests {
 
         let b = a.log();
 
-        assert_eq!(
-            b.storage,
-            Storage::Cpu(CpuStorage::F32(vec![0.0f32, 0.0, 0.0]))
-        );
+        assert_eq!(b.to_vec::<f32>().unwrap(), vec![0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -443,7 +471,7 @@ mod tests {
 
         let b = a + 2.0;
 
-        assert_eq!(b.storage, Storage::Cpu(CpuStorage::F32(vec![3.0; 6])));
+        assert_eq!(b.to_vec::<f32>().unwrap(), vec![3.0; 6]);
     }
 
     #[test]
@@ -452,7 +480,7 @@ mod tests {
 
         let b = a - 2.0;
 
-        assert_eq!(b.storage, Storage::Cpu(CpuStorage::F32(vec![-1.0; 6])));
+        assert_eq!(b.to_vec::<f32>().unwrap(), vec![-1.0; 6]);
     }
 
     #[test]
@@ -461,18 +489,27 @@ mod tests {
 
         let b = a * 2.0;
 
-        assert_eq!(b.storage, Storage::Cpu(CpuStorage::F32(vec![2.0; 6])));
+        assert_eq!(b.to_vec::<f32>().unwrap(), vec![2.0; 6]);
     }
 
     #[test]
     fn test_scalar_powf() {
-        let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (2, 3), Device::Cpu);
+        let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu);
 
         let b = a.scalar_powf(2.0);
 
+        assert_eq!(b.to_vec::<f32>().unwrap(), vec![1.0, 4.0, 9.0]);
+    }
+
+    #[test]
+    fn test_permute() {
+        let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+
+        let b = a.permute(vec![1, 0]).unwrap();
+
         assert_eq!(
-            b.storage,
-            Storage::Cpu(CpuStorage::F32(vec![1.0f32, 4.0, 9.0]))
-        );
+            b.to_vec::<f32>().unwrap(),
+            vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+        )
     }
 }
