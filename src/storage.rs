@@ -2,9 +2,12 @@
 
 mod cpu;
 
+use std::borrow::Borrow;
+
 use crate::{
     dtype::{DType, WithDType},
     error::Result,
+    layout::Layout,
 };
 
 pub use cpu::*;
@@ -107,43 +110,52 @@ impl_binary_op!(EWiseDiv, "div", div);
 impl_binary_op!(EWisePow, "powf", powf);
 
 pub trait BackendStorage: Sized {
-    fn ewise_powf(&self, e: f64) -> Result<Self>;
-    //fn ewise_log(&self) -> Result<Self>;
-    //fn ewise_exp(&self) -> Result<Self>;
-    fn unary_op<O: UnaryOp>(&self, op: O) -> Result<Self>;
-    fn binary_op<O: BinaryOp>(&self, other: &Self) -> Result<Self>;
+    fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self>;
+    fn unary_op<O: UnaryOp>(&self, op: O, l: &Layout) -> Result<Self>;
+    fn binary_op<O: BinaryOp>(
+        &self,
+        layout: &Layout,
+        other: &Self,
+        layout_other: &Layout,
+    ) -> Result<Self>;
     fn dtype(&self) -> DType;
-    fn to_vec<D: WithDType>(&self) -> Vec<D>;
+    fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D>;
+    fn copy_compact(&self, src_layout: &Layout, dst: &mut Self) -> Result<()>;
 }
 
-#[derive(Debug, PartialEq, PartialOrd, Clone)]
+#[derive(Debug, Clone)]
 pub enum Storage {
     Cpu(CpuStorage),
 }
 
 impl BackendStorage for Storage {
-    fn ewise_powf(&self, e: f64) -> Result<Self> {
+    fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self> {
         match self {
             Storage::Cpu(storage) => {
-                let storage = storage.ewise_powf(e)?;
+                let storage = storage.ewise_powf(e, l)?;
                 Ok(Self::Cpu(storage))
             }
         }
     }
 
-    fn unary_op<O: UnaryOp>(&self, op: O) -> Result<Self> {
+    fn unary_op<O: UnaryOp>(&self, op: O, l: &Layout) -> Result<Self> {
         match self {
             Storage::Cpu(storage) => {
-                let storage = storage.unary_op(op)?;
+                let storage = storage.unary_op(op, l)?;
                 Ok(Self::Cpu(storage))
             }
         }
     }
 
-    fn binary_op<O: BinaryOp>(&self, other: &Self) -> Result<Self> {
+    fn binary_op<O: BinaryOp>(
+        &self,
+        layout: &Layout,
+        other: &Self,
+        other_layout: &Layout,
+    ) -> Result<Self> {
         match (self, other) {
             (Storage::Cpu(storage), Storage::Cpu(other)) => {
-                let storage = storage.binary_op::<O>(other)?;
+                let storage = storage.binary_op::<O>(layout, other, other_layout)?;
                 Ok(Self::Cpu(storage))
             }
         }
@@ -155,9 +167,18 @@ impl BackendStorage for Storage {
         }
     }
 
-    fn to_vec<D: WithDType>(&self) -> Vec<D> {
+    fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D> {
         match self {
-            Storage::Cpu(cpu_storage) => cpu_storage.to_vec(),
+            Storage::Cpu(cpu_storage) => cpu_storage.to_vec(layout),
+        }
+    }
+
+    fn copy_compact(&self, src_layout: &Layout, dst: &mut Self) -> Result<()> {
+        match (self, dst) {
+            (Storage::Cpu(src), Storage::Cpu(dst)) => {
+                src.copy_compact(src_layout, dst)?;
+                Ok(())
+            }
         }
     }
 }
@@ -166,21 +187,21 @@ impl BackendStorage for Storage {
 mod tests {
     use core::f32;
 
-    use crate::tests::Approx;
+    use crate::{
+        layout::{Shape, Strides},
+        tests::Approx,
+    };
 
     use super::*;
 
     #[test]
     fn test_neg() {
-        let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
-        let storage = Storage::Cpu(storage);
+        let storage = Storage::Cpu(CpuStorage::F32(vec![1.0, 2.0, 3.0]));
+        let layout = Layout::from(Shape::from((3,)));
 
-        let storage = storage.unary_op(Neg).unwrap();
+        let storage = storage.unary_op(Neg, &layout).unwrap();
 
-        assert_eq!(
-            storage,
-            Storage::Cpu(CpuStorage::F32(vec![-1.0, -2.0, -3.0]))
-        );
+        assert_eq!(storage.to_vec::<f32>(&layout), vec![-1.0, -2.0, -3.0]);
     }
 
     #[test]
@@ -189,10 +210,13 @@ mod tests {
         let storage = Storage::Cpu(storage);
         let other = CpuStorage::F32(vec![4.0, 5.0, 6.0]);
         let other = Storage::Cpu(other);
+        let layout = Layout::from(Shape::from((3,)));
 
-        let storage = storage.binary_op::<EWiseAdd>(&other).unwrap();
+        let storage = storage
+            .binary_op::<EWiseAdd>(&layout, &other, &layout)
+            .unwrap();
 
-        assert_eq!(storage, Storage::Cpu(CpuStorage::F32(vec![5.0, 7.0, 9.0])));
+        assert_eq!(storage.to_vec::<f32>(&layout), vec![5.0, 7.0, 9.0]);
     }
 
     #[test]
@@ -201,13 +225,13 @@ mod tests {
         let storage = Storage::Cpu(storage);
         let other = CpuStorage::F32(vec![4.0, 5.0, 6.0]);
         let other = Storage::Cpu(other);
+        let layout = Layout::from(Shape::from((3,)));
 
-        let storage = storage.binary_op::<EWiseSub>(&other).unwrap();
+        let storage = storage
+            .binary_op::<EWiseSub>(&layout, &other, &layout)
+            .unwrap();
 
-        assert_eq!(
-            storage,
-            Storage::Cpu(CpuStorage::F32(vec![-3.0, -3.0, -3.0]))
-        );
+        assert_eq!(storage.to_vec::<f32>(&layout), vec![-3.0, -3.0, -3.0]);
     }
 
     #[test]
@@ -216,13 +240,13 @@ mod tests {
         let storage = Storage::Cpu(storage);
         let other = CpuStorage::F32(vec![4.0, 5.0, 6.0]);
         let other = Storage::Cpu(other);
+        let layout = Layout::from(Shape::from((3,)));
 
-        let storage = storage.binary_op::<EWiseMul>(&other).unwrap();
+        let storage = storage
+            .binary_op::<EWiseMul>(&layout, &other, &layout)
+            .unwrap();
 
-        assert_eq!(
-            storage,
-            Storage::Cpu(CpuStorage::F32(vec![4.0, 10.0, 18.0]))
-        );
+        assert_eq!(storage.to_vec::<f32>(&layout), vec![4.0, 10.0, 18.0]);
     }
 
     #[test]
@@ -231,13 +255,13 @@ mod tests {
         let storage = Storage::Cpu(storage);
         let other = CpuStorage::F32(vec![4.0, 5.0, 6.0]);
         let other = Storage::Cpu(other);
+        let layout = Layout::from(Shape::from((3,)));
 
-        let storage = storage.binary_op::<EWisePow>(&other).unwrap();
+        let storage = storage
+            .binary_op::<EWisePow>(&layout, &other, &layout)
+            .unwrap();
 
-        assert_eq!(
-            storage,
-            Storage::Cpu(CpuStorage::F32(vec![1.0, 32.0, 729.0]))
-        );
+        assert_eq!(storage.to_vec::<f32>(&layout), vec![1.0, 32.0, 729.0]);
     }
 
     #[test]
@@ -246,55 +270,82 @@ mod tests {
         let storage = Storage::Cpu(storage);
         let other = CpuStorage::F32(vec![4.0, 5.0, 6.0]);
         let other = Storage::Cpu(other);
+        let layout = Layout::from(Shape::from((3,)));
 
-        let storage = storage.binary_op::<EWiseDiv>(&other).unwrap();
+        let storage = storage
+            .binary_op::<EWiseDiv>(&layout, &other, &layout)
+            .unwrap();
 
-        assert_eq!(storage, Storage::Cpu(CpuStorage::F32(vec![0.25, 0.4, 0.5])));
+        assert_eq!(storage.to_vec::<f32>(&layout), vec![0.25, 0.4, 0.5]);
     }
 
     #[test]
     fn test_ewise_log() {
-        let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
-        let storage = Storage::Cpu(storage);
+        let storage = Storage::Cpu(CpuStorage::F32(vec![1.0, 2.0, 3.0]));
+        let layout = Layout::from(Shape::from((3,)));
 
-        let storage = storage.unary_op(Log).unwrap();
+        let storage = storage.unary_op(Log, &layout).unwrap();
 
-        assert!(storage
-            .to_vec::<f32>()
-            .approx_eq(vec![0.0, f32::consts::LN_2, 1.0986]));
+        Vec::<_>::assert_approx_eq(
+            storage.to_vec::<f32>(&layout),
+            vec![0.0, f32::consts::LN_2, 1.0986],
+        );
     }
 
     #[test]
     fn test_ewise_exp() {
-        let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
-        let storage = Storage::Cpu(storage);
+        let storage = Storage::Cpu(CpuStorage::F32(vec![1.0, 2.0, 3.0]));
+        let layout = Layout::from(Shape::from((3,)));
 
-        let storage = storage.unary_op(Exp).unwrap();
+        let storage = storage.unary_op(Exp, &layout).unwrap();
 
-        assert!(storage
-            .to_vec::<f32>()
-            .approx_eq(vec![f32::consts::E, 7.3891, 20.0855]));
+        Vec::<_>::assert_approx_eq(
+            storage.to_vec::<f32>(&layout),
+            vec![f32::consts::E, 7.3891, 20.0855],
+        );
     }
 
     #[test]
     fn test_scalar_add() {
         let storage = Storage::Cpu(CpuStorage::F32(vec![1.0, 2.0, 3.0]));
+        let layout = Layout::from(Shape::from((3,)));
 
-        let storage = storage.unary_op(ScalarAdd(10.0)).unwrap();
+        let storage = storage.unary_op(ScalarAdd(10.0), &layout).unwrap();
 
-        assert_eq!(
-            storage,
-            Storage::Cpu(CpuStorage::F32(vec![11.0, 12.0, 13.0]))
-        );
+        assert_eq!(storage.to_vec::<f32>(&layout), vec![11.0, 12.0, 13.0]);
     }
 
     #[test]
     fn test_powf() {
-        let storage = CpuStorage::F32(vec![1.0, 2.0, 3.0]);
-        let storage = Storage::Cpu(storage);
+        let storage = Storage::Cpu(CpuStorage::F32(vec![1.0, 2.0, 3.0]));
+        let layout = Layout::from(Shape::from((3,)));
 
-        let storage = storage.ewise_powf(2.0).unwrap();
+        let storage = storage.ewise_powf(2.0, &layout).unwrap();
 
-        assert_eq!(storage, Storage::Cpu(CpuStorage::F32(vec![1.0, 4.0, 9.0])));
+        assert_eq!(storage.to_vec::<f32>(&layout), vec![1.0, 4.0, 9.0]);
+    }
+
+    #[test]
+    fn test_copy_strided_src() {
+        let src = Storage::Cpu(CpuStorage::F32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
+        let mut dst = Storage::Cpu(CpuStorage::F32(vec![0.0; 6]));
+        let layout = Layout::new(Shape::from((3, 2)), Strides(vec![1, 3]), 0);
+
+        src.copy_compact(&layout, &mut dst).unwrap();
+
+        assert_eq!(
+            dst.to_vec::<f32>(Layout::from(Shape::from((3, 2)))),
+            vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn test_to_vec() {
+        let storage = Storage::Cpu(CpuStorage::F32(vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]));
+        let layout = Layout::new(Shape::from((3, 2)), Strides(vec![1, 3]), 0);
+
+        let result = storage.to_vec::<f32>(&layout);
+
+        assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }
 }

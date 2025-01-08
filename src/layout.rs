@@ -1,55 +1,97 @@
 #![allow(dead_code)]
 
+use std::ops::Index;
+
 #[derive(Debug, PartialEq, PartialOrd, Clone)]
-pub struct Shape(pub Vec<i32>);
+pub struct Shape {
+    shape: Vec<usize>,
+    size: usize,
+}
 
 impl Shape {
-    pub fn contiguous_strides(&self) -> Strides {
-        let mut strides = vec![1; self.0.len()];
-        for i in (0..(self.0.len() - 1)).rev() {
-            strides[i] = self.0[i + 1] * strides[i + 1];
+    pub fn new(shape: Vec<usize>) -> Self {
+        let size = shape.iter().product();
+        Self { shape, size }
+    }
+
+    pub fn compact_strides(&self) -> Strides {
+        let mut strides = vec![1isize; self.shape.len()];
+        for i in (0..(self.shape.len() - 1)).rev() {
+            strides[i] = self.shape[i + 1] as isize * strides[i + 1];
         }
         strides.into()
     }
 
     pub fn size(&self) -> usize {
-        self.0
-            .iter()
-            .copied()
-            .map(|n| usize::try_from(n).unwrap())
-            .product()
+        self.size
+    }
+
+    pub fn ndim(&self) -> usize {
+        self.shape.len()
     }
 }
 
-impl From<()> for Shape {
-    fn from(_: ()) -> Self {
-        Self(vec![])
+impl Index<usize> for Shape {
+    type Output = usize;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.shape[index]
     }
 }
 
-impl From<(i32,)> for Shape {
-    fn from(value: (i32,)) -> Self {
-        Self(vec![value.0])
-    }
+macro_rules! impl_from_tuple {
+    ($type:tt $($idx:tt $t:ty),*) => {
+        impl From<($($t,)*)> for $type {
+            #[allow(unused_variables)]
+            fn from(value: ($($t,)*)) -> Self {
+                $type::new(vec![$(value.$idx),*])
+            }
+        }
+    };
 }
 
-impl From<(i32, i32)> for Shape {
-    fn from(value: (i32, i32)) -> Self {
-        Self(vec![value.0, value.1])
-    }
-}
-
-impl From<(i32, i32, i32)> for Shape {
-    fn from(value: (i32, i32, i32)) -> Self {
-        Self(vec![value.0, value.1, value.2])
-    }
-}
+impl_from_tuple!(Shape);
+impl_from_tuple!(Shape 0 usize);
+impl_from_tuple!(Shape 0 usize, 1 usize);
+impl_from_tuple!(Shape 0 usize, 1 usize, 2 usize);
 
 #[derive(Debug, PartialEq, PartialOrd, Clone)]
-pub struct Strides(pub Vec<i32>);
+pub struct Strides(pub Vec<isize>);
 
-impl From<Vec<i32>> for Strides {
-    fn from(value: Vec<i32>) -> Self {
+impl Strides {
+    pub fn new(strides: Vec<isize>) -> Self {
+        Self(strides)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &isize> {
+        self.0.iter()
+    }
+}
+
+impl_from_tuple!(Strides);
+impl_from_tuple!(Strides 0 isize);
+impl_from_tuple!(Strides 0 isize, 1 isize);
+impl_from_tuple!(Strides 0 isize, 1 isize, 2 isize);
+
+impl<'a> IntoIterator for &'a Strides {
+    type Item = &'a isize;
+    type IntoIter = std::slice::Iter<'a, isize>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl Index<usize> for Strides {
+    type Output = isize;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.0[index]
+    }
+}
+
+impl From<Vec<isize>> for Strides {
+    fn from(value: Vec<isize>) -> Self {
         Self(value)
     }
 }
@@ -58,18 +100,52 @@ impl From<Vec<i32>> for Strides {
 pub struct Layout {
     pub shape: Shape,
     pub strides: Strides,
+    pub offset: usize,
 }
 
 impl Layout {
+    pub fn new(shape: impl Into<Shape>, strides: impl Into<Strides>, offset: usize) -> Self {
+        Self {
+            shape: shape.into(),
+            strides: strides.into(),
+            offset,
+        }
+    }
+
     pub fn size(&self) -> usize {
         self.shape.size()
+    }
+
+    pub fn ndim(&self) -> usize {
+        self.shape.ndim()
+    }
+
+    pub fn permute(&self, axis: impl AsRef<[usize]>) -> Self {
+        let axis = axis.as_ref();
+        assert!(axis.iter().all(|x| *x < self.ndim()));
+
+        let shape = axis.iter().map(|&i| self.shape[i]).collect();
+        let strides = axis.iter().map(|&i| self.strides.0[i]).collect();
+        Self {
+            shape: Shape::new(shape),
+            strides: Strides(strides),
+            offset: self.offset,
+        }
+    }
+
+    pub fn is_compact(&self) -> bool {
+        self.shape.compact_strides() == self.strides
     }
 }
 
 impl From<Shape> for Layout {
     fn from(shape: Shape) -> Self {
-        let strides = shape.contiguous_strides();
-        Self { shape, strides }
+        let strides = shape.compact_strides();
+        Self {
+            shape,
+            strides,
+            offset: 0,
+        }
     }
 }
 
@@ -80,7 +156,24 @@ mod tests {
     #[test]
     fn test_shape_to_contiguous_strides() {
         let shape = Shape::from((2, 3, 4));
-        let strides = shape.contiguous_strides();
+        let strides = shape.compact_strides();
         assert_eq!(strides.0, vec![12, 4, 1]);
+    }
+
+    #[test]
+    fn test_shape_size() {
+        let shape = Shape::from((2, 3, 4));
+        assert_eq!(shape.size(), 24);
+    }
+
+    #[test]
+    fn test_layout_permute() {
+        let shape = Shape::from((2, 3, 4));
+        let layout = Layout::from(shape);
+
+        let layout = layout.permute([1, 2, 0]);
+
+        assert_eq!(layout.shape.shape, vec![3, 4, 2]);
+        assert_eq!(layout.strides.0, vec![4, 1, 12]);
     }
 }
