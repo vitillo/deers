@@ -7,6 +7,10 @@ use crate::tensor::{Tensor, TensorId};
 
 impl Tensor {
     fn sorted_nodes(&self) -> Vec<&Tensor> {
+        if !self.requires_grad() {
+            return vec![];
+        }
+
         let mut sorted_nodes = vec![];
         let mut queue = VecDeque::new();
         queue.push_front(self);
@@ -15,6 +19,10 @@ impl Tensor {
         while let Some(node) = queue.pop_back() {
             if let Some(op) = node.op() {
                 for dep in op.dependencies() {
+                    if !dep.requires_grad() {
+                        continue;
+                    }
+
                     sorted_nodes.push(dep);
                     queue.push_front(dep);
                 }
@@ -69,6 +77,10 @@ impl GradientStore {
     pub fn insert(&mut self, id: TensorId, tensor: Tensor) {
         self.store.insert(id, tensor);
     }
+
+    pub fn len(&self) -> usize {
+        self.store.len()
+    }
 }
 
 impl Default for GradientStore {
@@ -85,7 +97,7 @@ mod tests {
 
     #[test]
     fn test_sorting() {
-        let a = &Tensor::zeros((2, 3), DType::F32, Device::Cpu);
+        let a = &Tensor::zeros((2, 3), DType::F32, Device::Cpu).attach();
         let b = &-a;
         let c = &-b;
         let d = &-c;
@@ -93,5 +105,32 @@ mod tests {
         let sorted_nodes = d.sorted_nodes();
 
         assert_eq!(sorted_nodes, [d, c, b, a]);
+    }
+
+    #[test]
+    fn test_sorting_with_no_grad() {
+        let a = Tensor::ones((2, 3), DType::F32, Device::Cpu).attach();
+        let b = Tensor::ones((2, 3), DType::F32, Device::Cpu);
+        let c = &a + b;
+
+        let sorted_nodes = c.sorted_nodes();
+
+        assert_eq!(sorted_nodes, [&c, &a]);
+    }
+
+    #[test]
+    fn test_backward_with_no_grad() {
+        let a = Tensor::ones((2, 3), DType::F32, Device::Cpu).attach();
+        let b = Tensor::ones((2, 3), DType::F32, Device::Cpu);
+        let c = Tensor::ones((2, 3), DType::F32, Device::Cpu);
+        let d = b + c;
+        let e = &a + &d;
+
+        let grads = e.backward().unwrap();
+
+        assert_eq!(3, grads.len());
+        assert!(grads.store.contains_key(&a.id()));
+        assert!(grads.store.contains_key(&d.id()));
+        assert!(grads.store.contains_key(&e.id()));
     }
 }

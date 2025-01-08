@@ -50,7 +50,7 @@ fn test_neg() {
 
 #[test]
 fn test_neg_backward() {
-    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu);
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu).attach();
     let b = -&a;
 
     let grads = b.backward().unwrap();
@@ -70,8 +70,8 @@ fn test_ewise_add() {
 
 #[test]
 fn test_ewise_add_backward() {
-    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu);
-    let b = Tensor::from_vec(vec![4.0, 5.0, 6.0], (3,), Device::Cpu);
+    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu).attach();
+    let b = Tensor::from_vec(vec![4.0, 5.0, 6.0], (3,), Device::Cpu).attach();
     let c = &a + b;
 
     let grads = c.backward().unwrap();
@@ -104,7 +104,7 @@ fn test_ewise_mul() {
 
 #[test]
 fn test_ewise_mul_backward() {
-    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu);
+    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu).attach();
     let b = Tensor::from_vec(vec![4.0, 5.0, 6.0], (3,), Device::Cpu);
     let c = &a * &b;
 
@@ -129,8 +129,8 @@ fn test_ewise_div() {
 
 #[test]
 fn test_ewise_div_backward() {
-    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu);
-    let b = Tensor::from_vec(vec![4.0, 5.0, 6.0], (3,), Device::Cpu);
+    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu).attach();
+    let b = Tensor::from_vec(vec![4.0, 5.0, 6.0], (3,), Device::Cpu).attach();
     let c = &a / &b;
 
     let grads = c.backward().unwrap();
@@ -160,8 +160,8 @@ fn test_ewise_powf() {
 
 #[test]
 fn test_ewise_powf_backward() {
-    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu);
-    let b = Tensor::from_vec(vec![4.0, 5.0, 6.0], (3,), Device::Cpu);
+    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu).attach();
+    let b = Tensor::from_vec(vec![4.0, 5.0, 6.0], (3,), Device::Cpu).attach();
     let c = a.powf(&b);
 
     let grads = c.backward().unwrap();
@@ -190,7 +190,7 @@ fn test_ewise_log() {
 
 #[test]
 fn test_ewise_log_backward() {
-    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu);
+    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu).attach();
     let b = &a.log();
 
     let grads = b.backward().unwrap();
@@ -215,7 +215,7 @@ fn test_ewise_exp() {
 
 #[test]
 fn test_ewise_exp_backward() {
-    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu);
+    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu).attach();
     let b = &a.exp();
 
     let grads = b.backward().unwrap();
@@ -237,7 +237,7 @@ fn test_scalar_add() {
 
 #[test]
 fn test_backward_scalar_add() {
-    let a = Tensor::ones((3,), DType::F32, Device::Cpu);
+    let a = Tensor::ones((3,), DType::F32, Device::Cpu).attach();
     let b = &a + 2.0;
 
     let grads = b.backward().unwrap();
@@ -266,7 +266,7 @@ fn test_scalar_mul() {
 
 #[test]
 fn test_backward_scalar_mul() {
-    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu);
+    let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu).attach();
     let b = &a * 2.0;
 
     let grads = b.backward().unwrap();
@@ -288,10 +288,25 @@ fn test_scalar_powf() {
 fn test_permute() {
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
 
-    let b = a.permute(vec![1, 0]).unwrap();
+    let b = a.permute(vec![1, 0]);
 
     assert_eq!(
         b.to_vec::<f32>().unwrap(),
         vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+    )
+}
+
+#[test]
+fn test_permute_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu).attach();
+    let b = Tensor::from_vec(vec![1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0], (2, 3), Device::Cpu).attach();
+    let c = a * &b;
+    let d = c.permute(vec![1, 0]);
+
+    let grads = d.backward().unwrap();
+
+    assert_eq!(
+        grads.get(b.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
     )
 }
