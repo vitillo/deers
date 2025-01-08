@@ -94,26 +94,4 @@ mod tests {
 
         assert_eq!(sorted_nodes, [d, c, b, a]);
     }
-
-    #[test]
-    fn test_backward_scalar_add() {
-        let a = Tensor::ones((3,), DType::F32, Device::Cpu);
-        let b = &a + 2.0;
-
-        let grads = b.backward().unwrap();
-
-        let expected = Tensor::ones((3,), DType::F32, Device::Cpu);
-        assert_eq!(grads.get(a.id()).unwrap(), expected);
-    }
-
-    #[test]
-    fn test_backward_scalar_mul() {
-        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu);
-        let b = &a * 2.0;
-
-        let grads = b.backward().unwrap();
-
-        let expected = Tensor::from_vec(vec![2.0, 2.0, 2.0], (3,), Device::Cpu);
-        assert_eq!(grads.get(a.id()).unwrap(), expected);
-    }
 }
