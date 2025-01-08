@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 pub trait Approx {
     fn assert_approx_eq(_: impl AsRef<Self>, _: impl AsRef<Self>);
 }
