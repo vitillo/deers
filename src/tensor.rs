@@ -18,11 +18,12 @@ pub struct TensorId(usize);
 #[derive(Debug)]
 pub struct TensorInternal {
     id: TensorId,
-    storage: Arc<RwLock<Storage>>,
+    pub(crate) storage: Arc<RwLock<Storage>>,
     layout: Layout,
     device: Device,
     dtype: DType,
     op: Option<Box<dyn TensorOp>>,
+    requires_grad: bool,
 }
 
 impl TensorInternal {
@@ -31,10 +32,17 @@ impl TensorInternal {
         layout: Layout,
         device: Device,
         dtype: DType,
+        requires_grad: bool,
         op: Option<Box<dyn TensorOp>>,
     ) -> Self {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let id = TensorId(COUNTER.fetch_add(1, Ordering::Relaxed));
+
+        let requires_grad = requires_grad
+            || op
+                .as_ref()
+                .map(|o| o.dependencies().iter().any(|dep| dep.requires_grad()))
+                .unwrap_or(false);
 
         Self {
             id,
@@ -43,6 +51,7 @@ impl TensorInternal {
             device,
             dtype,
             op,
+            requires_grad,
         }
     }
 }
@@ -89,18 +98,38 @@ impl Tensor {
         self.device
     }
 
+    pub fn requires_grad(&self) -> bool {
+        self.requires_grad
+    }
+
+    pub fn attach(self) -> Tensor {
+        if self.requires_grad {
+            return self.clone();
+        }
+
+        TensorInternal::new(
+            self.storage.clone(),
+            self.layout.clone(),
+            self.device,
+            self.dtype,
+            true,
+            None,
+        )
+        .into()
+    }
+
     pub fn zeros(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
         let storage = Arc::new(RwLock::new(device.zeros(shape.size(), dtype)));
         let layout: Layout = shape.into();
-        TensorInternal::new(storage, layout, device, dtype, None).into()
+        TensorInternal::new(storage, layout, device, dtype, false, None).into()
     }
 
     pub fn ones(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
         let storage = Arc::new(RwLock::new(device.ones(shape.size(), dtype)));
         let layout: Layout = shape.into();
-        TensorInternal::new(storage, layout, device, dtype, None).into()
+        TensorInternal::new(storage, layout, device, dtype, false, None).into()
     }
 
     pub fn from_vec(vec: impl Into<CpuStorage>, shape: impl Into<Shape>, device: Device) -> Tensor {
@@ -114,7 +143,7 @@ impl Tensor {
         let layout: Layout = shape.into();
         let dtype = storage.dtype();
         let storage = Arc::new(RwLock::new(storage));
-        TensorInternal::new(storage, layout, device, dtype, None).into()
+        TensorInternal::new(storage, layout, device, dtype, false, None).into()
     }
 
     pub fn to_vec<S: WithDType>(&self) -> Result<Vec<S>> {
@@ -129,6 +158,7 @@ impl Tensor {
             self.layout.clone(),
             self.device,
             self.dtype,
+            false,
             None,
         )
         .into()
@@ -142,16 +172,16 @@ impl Tensor {
             self.layout.clone(),
             self.device,
             self.dtype,
+            false,
             None,
         )
         .into()
     }
 
-    pub fn permute(&self, axis: impl AsRef<[usize]>) -> Result<Tensor> {
-        let axis = axis.as_ref();
-        let storage = self.storage.clone();
-        let layout = self.layout.permute(axis);
-        Ok(TensorInternal::new(storage, layout, self.device, self.dtype, None).into())
+    pub fn permute(&self, axis: impl AsRef<[usize]>) -> Tensor {
+        ops::Permute(self.clone(), axis.as_ref().into())
+            .forward()
+            .unwrap()
     }
 
     pub fn is_compact(&self) -> bool {
@@ -170,6 +200,7 @@ impl Tensor {
             self.layout.clone(),
             self.device,
             self.dtype,
+            false,
             None,
         )
         .into())

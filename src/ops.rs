@@ -31,6 +31,7 @@ impl TensorOp for Neg {
             layout,
             self.0.device(),
             self.0.dtype(),
+            false,
             Some(Box::new(self)),
         )
         .into())
@@ -64,6 +65,7 @@ impl TensorOp for EWiseAdd {
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
+            false,
             Some(Box::new(self)),
         )
         .into())
@@ -101,6 +103,7 @@ impl TensorOp for EWiseMul {
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
+            false,
             Some(Box::new(self)),
         )
         .into())
@@ -138,6 +141,7 @@ impl TensorOp for EWiseDiv {
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
+            false,
             Some(Box::new(self)),
         )
         .into())
@@ -174,6 +178,7 @@ impl TensorOp for EWisePowf {
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
+            false,
             Some(Box::new(self)),
         )
         .into())
@@ -209,6 +214,7 @@ impl TensorOp for EWiseLog {
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
+            false,
             Some(Box::new(self)),
         )
         .into())
@@ -238,6 +244,7 @@ impl TensorOp for EWiseExp {
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
+            false,
             Some(Box::new(self)),
         )
         .into())
@@ -269,6 +276,7 @@ impl TensorOp for ScalarAdd {
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
+            false,
             Some(Box::new(self)),
         )
         .into())
@@ -301,6 +309,7 @@ impl TensorOp for ScalarMul {
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
+            false,
             Some(Box::new(self)),
         )
         .into())
@@ -332,6 +341,7 @@ impl TensorOp for ScalarPowf {
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
+            false,
             Some(Box::new(self)),
         )
         .into())
@@ -339,6 +349,36 @@ impl TensorOp for ScalarPowf {
 
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let arg_grad = (out_grad * &self.0 * self.1).scalar_powf(self.1 - 1.0);
+        let sum_grad = store.get_or_insert_zero(&self.0);
+        *sum_grad = &*sum_grad + arg_grad;
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.0]
+    }
+}
+
+#[derive(Debug)]
+pub struct Permute(pub Tensor, pub Vec<usize>);
+
+impl TensorOp for Permute {
+    fn forward(self) -> Result<Tensor> {
+        let storage = self.0.storage.clone();
+        let layout = self.0.layout().permute(&self.1);
+        Ok(TensorInternal::new(
+            storage,
+            layout,
+            self.0.device(),
+            self.0.dtype(),
+            false,
+            Some(Box::new(self)),
+        )
+        .into())
+    }
+
+    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let arg_grad = out_grad.permute(&self.1);
         let sum_grad = store.get_or_insert_zero(&self.0);
         *sum_grad = &*sum_grad + arg_grad;
         Ok(())
