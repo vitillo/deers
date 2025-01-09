@@ -415,3 +415,32 @@ fn test_transpose_default() {
     assert_eq!(b.layout().strides, (1, 2).into());
     assert_eq!(b.to_vec::<f32>().unwrap(), vec![1.0f32, 3.0, 2.0, 4.0]);
 }
+
+#[test]
+fn test_matmul() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);
+    let b = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);
+
+    let c = a.matmul(&b);
+
+    assert_eq!(c.layout().shape, (2, 2).into());
+    assert_eq!(c.to_vec::<f32>().unwrap(), vec![7.0, 10.0, 15.0, 22.0]);
+}
+
+#[test]
+fn test_matmul_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu).attach();
+    let b = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu).attach();
+    let c = a.matmul(&b);
+
+    let grads = c.backward().unwrap();
+
+    assert_eq!(
+        grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![3.0, 7.0, 3.0, 7.0]
+    );
+    assert_eq!(
+        grads.get(b.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![4.0, 4.0, 6.0, 6.0]
+    );
+}

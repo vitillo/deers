@@ -578,3 +578,62 @@ impl TensorOp for Reshape {
         vec![&self.arg]
     }
 }
+
+#[derive(Debug)]
+pub struct MatMul {
+    arg1: Tensor,
+    arg2: Tensor,
+}
+
+impl MatMul {
+    pub fn new(arg1: Tensor, arg2: Tensor) -> Self {
+        assert!(arg1.layout().ndim() == 2 && arg2.layout().ndim() == 2);
+        assert!(arg1.layout().shape()[1] == arg2.layout().shape()[0]);
+        Self { arg1, arg2 }
+    }
+}
+
+impl TensorOp for MatMul {
+    fn forward(self) -> Result<Tensor> {
+        let shape: Shape = (self.arg1.layout().shape[1], self.arg2.layout().shape[0]).into();
+        let storage = Arc::new(RwLock::new(self.arg1.storage().matmul(
+            self.arg1.layout(),
+            &self.arg2.storage(),
+            self.arg2.layout(),
+        )?));
+
+        Ok(TensorInternal::new(
+            storage,
+            shape.into(),
+            self.arg1.device(),
+            self.arg1.dtype(),
+            false,
+            Some(Box::new(self)),
+        )
+        .into())
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        // a * b, da = b, db = a
+        // a = n x p
+        // b = p x k
+        // out = n x k
+        // out @ b^t = n x p
+        // a^t @ out = p x k
+
+        // TODO: get rid of compactions
+        let arg1_grad = out_grad.matmul(&self.arg2.transpose(None).compact()?);
+        let sum_grad = grads.get_or_insert_zero(&self.arg1);
+        *sum_grad = &*sum_grad + arg1_grad;
+
+        let arg2_grad = self.arg1.transpose(None).compact()?.matmul(out_grad);
+        let sum_grad = grads.get_or_insert_zero(&self.arg2);
+        *sum_grad = &*sum_grad + arg2_grad;
+
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg1, &self.arg2]
+    }
+}
