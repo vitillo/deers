@@ -202,6 +202,18 @@ impl Tensor {
         .unwrap()
     }
 
+    pub fn transpose(&self, axes: Option<(usize, usize)>) -> Tensor {
+        let axes = axes.unwrap_or((self.layout().ndim() - 2, self.layout().ndim() - 1));
+        assert!(
+            axes.0 < self.layout().ndim() && axes.1 < self.layout().ndim(),
+            "Transpose axes must be less than tensor dimensions",
+        );
+        let mut reshaped_axes: Vec<_> = (0..self.layout.ndim()).collect();
+        (reshaped_axes[axes.0], reshaped_axes[axes.1]) =
+            (reshaped_axes[axes.1], reshaped_axes[axes.0]);
+        self.permute(reshaped_axes)
+    }
+
     pub fn sum(&self, axis: Vec<usize>, keep_dims: bool) -> Tensor {
         ops::Sum {
             arg: self.clone(),
