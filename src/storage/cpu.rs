@@ -99,6 +99,30 @@ impl BackendStorage for CpuStorage {
         }
     }
 
+    fn reduce_sum(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
+        assert!(layout.is_compact());
+        assert_eq!(0, layout.size() % dst.len());
+
+        let reduce_size = layout.size() / dst.len();
+
+        match (self, dst) {
+            (CpuStorage::F32(src), CpuStorage::F32(dst)) => {
+                for (i, chunk) in src.chunks(reduce_size).enumerate() {
+                    dst[i] = chunk.iter().sum();
+                }
+            }
+            (CpuStorage::F64(src), CpuStorage::F64(dst)) => {
+                for (i, chunk) in src.chunks(reduce_size).enumerate() {
+                    dst[i] = chunk.iter().sum();
+                }
+            }
+            (CpuStorage::F32(_), CpuStorage::F64(_)) => unreachable!(),
+            (CpuStorage::F64(_), CpuStorage::F32(_)) => unreachable!(),
+        };
+
+        Ok(())
+    }
+
     fn dtype(&self) -> DType {
         match self {
             CpuStorage::F32(_) => DType::F32,

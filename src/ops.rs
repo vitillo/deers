@@ -362,11 +362,18 @@ impl TensorOp for ScalarPowf {
 }
 
 #[derive(Debug)]
-pub struct Permute(pub Tensor, pub Vec<usize>);
+pub struct Permute(Tensor, Shape);
+
+impl Permute {
+    pub fn new(arg: Tensor, shape: Shape) -> Self {
+        // TODO add constructors to check pre-requisites
+        assert!(arg.layout().ndim() == shape.ndim());
+        Self(arg, shape)
+    }
+}
 
 impl TensorOp for Permute {
     fn forward(self) -> Result<Tensor> {
-        assert_eq!(self.0.layout().ndim(), self.1.len());
         let storage = self.0.storage.clone();
         let layout = self.0.layout().permute(&self.1);
         Ok(TensorInternal::new(
@@ -381,7 +388,7 @@ impl TensorOp for Permute {
     }
 
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let arg_grad = out_grad.permute(&self.1);
+        let arg_grad = out_grad.permute(self.1.clone());
         let sum_grad = store.get_or_insert_zero(&self.0);
         *sum_grad = &*sum_grad + arg_grad;
         Ok(())
@@ -432,7 +439,67 @@ impl TensorOp for Broadcast {
         .into())
     }
 
-    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+    fn backward(&self, _: &mut GradientStore, _: &Tensor) -> Result<()> {
+        todo!()
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
+#[derive(Debug)]
+pub struct Sum {
+    pub arg: Tensor,
+    pub axis: Vec<usize>,
+    pub keep_dims: bool,
+}
+
+impl TensorOp for Sum {
+    fn forward(self) -> Result<Tensor> {
+        assert!(self.axis.iter().all(|&i| i < self.arg.layout().ndim()));
+        let new_shape: Shape = if self.keep_dims {
+            self.arg
+                .layout()
+                .shape()
+                .iter()
+                .enumerate()
+                .map(|(ref i, &v)| if self.axis.contains(i) { 1 } else { v })
+                .collect::<Vec<usize>>()
+                .into()
+        } else {
+            self.arg
+                .layout()
+                .shape()
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| !self.axis.contains(&i))
+                .map(|(_, &dim)| dim)
+                .collect::<Vec<usize>>()
+                .into()
+        };
+
+        let permuted_dims: Vec<usize> = (0..self.arg.layout().ndim())
+            .filter(|i| !self.axis.contains(i))
+            .chain(self.axis.iter().copied())
+            .collect();
+
+        let view = self.arg.permute(permuted_dims).compact()?;
+        let mut out_storage = self.arg.device().zeros(new_shape.size(), self.arg.dtype());
+        view.storage().reduce_sum(view.layout(), &mut out_storage)?;
+        let storage = Arc::new(RwLock::new(out_storage));
+        Ok(TensorInternal::new(
+            storage,
+            Layout::from(new_shape),
+            self.arg.device(),
+            self.arg.dtype(),
+            false,
+            Some(Box::new(self)),
+        )
+        .into())
+    }
+
+    fn backward(&self, _: &mut GradientStore, _: &Tensor) -> Result<()> {
         todo!()
     }
 
