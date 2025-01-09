@@ -395,3 +395,23 @@ fn test_reshape_backward() {
         Tensor::ones((1, 6), DType::F32, Device::Cpu)
     );
 }
+
+#[test]
+fn test_transpose() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);
+    let b = a.transpose((0, 1).into());
+
+    assert_eq!(b.layout().shape, (2, 2).into());
+    assert_eq!(b.layout().strides, (1, 2).into());
+    assert_eq!(b.to_vec::<f32>().unwrap(), vec![1.0f32, 3.0, 2.0, 4.0]);
+}
+
+#[test]
+fn test_transpose_default() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);
+    let b = a.transpose(None);
+
+    assert_eq!(b.layout().shape, (2, 2).into());
+    assert_eq!(b.layout().strides, (1, 2).into());
+    assert_eq!(b.to_vec::<f32>().unwrap(), vec![1.0f32, 3.0, 2.0, 4.0]);
+}
