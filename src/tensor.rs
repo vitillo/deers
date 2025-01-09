@@ -265,6 +265,12 @@ impl Tensor {
     pub fn scalar_powf(&self, e: f64) -> Tensor {
         ops::ScalarPowf(self.clone(), e).forward().unwrap()
     }
+
+    pub fn matmul(&self, other: &Tensor) -> Tensor {
+        ops::MatMul::new(self.clone(), other.clone())
+            .forward()
+            .unwrap()
+    }
 }
 
 impl PartialEq for Tensor {

@@ -24,6 +24,26 @@ impl CpuStorage {
             CpuStorage::F64(data) => data.len(),
         }
     }
+
+    fn matmul_internal<
+        T: Default + Copy + std::ops::Mul + std::ops::AddAssign<<T as std::ops::Mul>::Output>,
+    >(
+        left: &[T],
+        right: &[T],
+        out: &mut [T],
+        m: usize,
+        n: usize,
+        p: usize,
+    ) {
+        // TODO: optimize loop by reordinger k with j
+        for i in 0..m {
+            for j in 0..p {
+                for k in 0..n {
+                    out[i * p + j] += left[i * n + k] * right[k * p + j];
+                }
+            }
+        }
+    }
 }
 
 impl From<Vec<f32>> for CpuStorage {
@@ -154,6 +174,28 @@ impl BackendStorage for CpuStorage {
         }
 
         Ok(())
+    }
+
+    fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self> {
+        assert!(layout.is_compact() && layout_other.is_compact());
+        let n = layout.shape[layout.shape.ndim() - 1]; // cols of self, rows of other
+        let m = layout.size() / n; // rows of self
+        let p = layout_other.size() / n; // cols of other
+
+        match (self, other) {
+            (CpuStorage::F32(left), CpuStorage::F32(right)) => {
+                let mut out = vec![0.0; m * p];
+                CpuStorage::matmul_internal(left, right, &mut out, m, n, p);
+                Ok(CpuStorage::F32(out))
+            }
+            (CpuStorage::F64(left), CpuStorage::F64(right)) => {
+                let mut out = vec![0.0; m * p];
+                CpuStorage::matmul_internal(left, right, &mut out, m, n, p);
+                Ok(CpuStorage::F64(out))
+            }
+            (CpuStorage::F32(_), CpuStorage::F64(_)) => unreachable!(),
+            (CpuStorage::F64(_), CpuStorage::F32(_)) => unreachable!(),
+        }
     }
 }
 
