@@ -118,6 +118,7 @@ pub trait BackendStorage: Sized {
         other: &Self,
         layout_other: &Layout,
     ) -> Result<Self>;
+    fn reduce_sum(&self, layout: &Layout, dst: &mut Self) -> Result<()>;
     fn dtype(&self) -> DType;
     fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D>;
     fn copy_compact(&self, src_layout: &Layout, dst: &mut Self) -> Result<()>;
@@ -158,6 +159,12 @@ impl BackendStorage for Storage {
                 let storage = storage.binary_op::<O>(layout, other, other_layout)?;
                 Ok(Self::Cpu(storage))
             }
+        }
+    }
+
+    fn reduce_sum(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
+        match (self, dst) {
+            (Storage::Cpu(storage), Storage::Cpu(dst)) => storage.reduce_sum(layout, dst),
         }
     }
 

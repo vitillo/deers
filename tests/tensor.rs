@@ -323,3 +323,23 @@ fn test_broadcast() {
         vec![1.0f32, 2.0, 3.0, 1.0, 2.0, 3.0]
     );
 }
+
+#[test]
+fn test_sum() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+
+    let b = a.sum(vec![0], false);
+
+    assert_eq!(b.layout().shape, (3,).into());
+    assert_eq!(b.to_vec::<f32>().unwrap(), vec![5.0, 7.0, 9.0]);
+}
+
+#[test]
+fn test_sum_keepdims() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+
+    let b = a.sum(vec![0], true);
+
+    assert_eq!(b.layout().shape, (1, 3).into());
+    assert_eq!(b.to_vec::<f32>().unwrap(), vec![5.0, 7.0, 9.0]);
+}

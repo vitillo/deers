@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::ops::Index;
+use std::ops::{Index, IndexMut};
 
 #[derive(Debug, PartialEq, PartialOrd, Clone)]
 pub struct Shape {
@@ -40,6 +40,12 @@ impl Index<usize> for Shape {
 
     fn index(&self, index: usize) -> &Self::Output {
         &self.shape[index]
+    }
+}
+
+impl IndexMut<usize> for Shape {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.shape[index]
     }
 }
 
@@ -138,8 +144,7 @@ impl Layout {
         self.shape.ndim()
     }
 
-    pub fn permute(&self, axis: impl AsRef<[usize]>) -> Self {
-        let axis = axis.as_ref();
+    pub fn permute(&self, axis: &Shape) -> Self {
         assert!(axis.iter().all(|x| *x < self.ndim()));
 
         let shape = axis.iter().map(|&i| self.shape[i]).collect();
@@ -189,7 +194,7 @@ mod tests {
         let shape = Shape::from((2, 3, 4));
         let layout = Layout::from(shape);
 
-        let layout = layout.permute([1, 2, 0]);
+        let layout = layout.permute(&Shape::from((1, 2, 0)));
 
         assert_eq!(layout.shape.shape, vec![3, 4, 2]);
         assert_eq!(layout.strides.0, vec![4, 1, 12]);

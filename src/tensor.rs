@@ -178,8 +178,8 @@ impl Tensor {
         .into()
     }
 
-    pub fn permute(&self, axis: impl AsRef<[usize]>) -> Tensor {
-        ops::Permute(self.clone(), axis.as_ref().into())
+    pub fn permute(&self, axis: impl Into<Shape>) -> Tensor {
+        ops::Permute::new(self.clone(), axis.into())
             .forward()
             .unwrap()
     }
@@ -188,6 +188,16 @@ impl Tensor {
         ops::Broadcast {
             arg: self.clone(),
             new_shape: new_shape.into(),
+        }
+        .forward()
+        .unwrap()
+    }
+
+    pub fn sum(&self, axis: Vec<usize>, keep_dims: bool) -> Tensor {
+        ops::Sum {
+            arg: self.clone(),
+            axis,
+            keep_dims,
         }
         .forward()
         .unwrap()
@@ -204,9 +214,11 @@ impl Tensor {
 
         let mut storage = self.device().zeros(self.layout.size(), self.dtype);
         self.storage().copy_compact(&self.layout, &mut storage)?;
+        let strides = self.layout().shape().compact_strides();
+        let layout = Layout::new(self.layout().shape().clone(), strides, 0);
         Ok(TensorInternal::new(
             Arc::new(RwLock::new(storage)),
-            self.layout.clone(),
+            layout,
             self.device,
             self.dtype,
             false,
