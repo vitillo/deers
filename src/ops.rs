@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-use std::fmt;
 use std::iter::zip;
 use std::sync::{Arc, RwLock};
+use std::{fmt, iter};
 
 use crate::backprop::GradientStore;
 use crate::error::Result;
@@ -439,8 +439,29 @@ impl TensorOp for Broadcast {
         .into())
     }
 
-    fn backward(&self, _: &mut GradientStore, _: &Tensor) -> Result<()> {
-        todo!()
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let shape_diff = self.new_shape.ndim() - self.arg.layout().ndim();
+
+        // Shape without broadcasting
+        let shape: Vec<_> = iter::repeat_n(1, shape_diff)
+            .chain(self.arg.layout().shape().iter().copied())
+            .collect();
+
+        // Find axes that were broadcasted
+        let axes: Vec<_> = zip(shape, self.new_shape.iter().copied())
+            .enumerate()
+            .filter(|(_, (o, n))| o != n)
+            .map(|(i, _)| i)
+            .collect();
+
+        // Sum out broadcasted axes
+        let out_grad = out_grad
+            .sum(axes, false)
+            .reshape(self.arg.layout().shape().clone());
+
+        let sum_grad = grads.get_or_insert_zero(&self.arg);
+        *sum_grad = &*sum_grad + out_grad;
+        Ok(())
     }
 
     fn dependencies(&self) -> Vec<&Tensor> {
@@ -499,8 +520,58 @@ impl TensorOp for Sum {
         .into())
     }
 
-    fn backward(&self, _: &mut GradientStore, _: &Tensor) -> Result<()> {
-        todo!()
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let shape: Shape = self
+            .arg
+            .layout()
+            .shape()
+            .iter()
+            .enumerate()
+            .map(|(ref i, &v)| if self.axis.contains(i) { 1 } else { v })
+            .collect::<Vec<usize>>()
+            .into();
+
+        let out_grad = out_grad
+            .reshape(shape)
+            .broadcast(self.arg.layout().shape().clone())
+            .compact()?; // TODO: support striped add
+        let sum_grad = grads.get_or_insert_zero(&self.arg);
+        *sum_grad = &*sum_grad + out_grad;
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
+#[derive(Debug)]
+pub struct Reshape {
+    pub arg: Tensor,
+    pub new_shape: Shape,
+}
+
+impl TensorOp for Reshape {
+    fn forward(self) -> Result<Tensor> {
+        assert!(self.arg.layout().size() == self.new_shape.size());
+        let storage = self.arg.storage.clone();
+
+        Ok(TensorInternal::new(
+            storage,
+            Layout::from(self.new_shape.clone()),
+            self.arg.device(),
+            self.arg.dtype(),
+            false,
+            Some(Box::new(self)),
+        )
+        .into())
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let out_grad = out_grad.reshape(self.arg.layout().shape().clone());
+        let sum_grad = grads.get_or_insert_zero(&self.arg);
+        *sum_grad = &*sum_grad + out_grad;
+        Ok(())
     }
 
     fn dependencies(&self) -> Vec<&Tensor> {

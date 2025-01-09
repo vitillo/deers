@@ -193,6 +193,15 @@ impl Tensor {
         .unwrap()
     }
 
+    pub fn reshape(&self, new_shape: impl Into<Shape>) -> Tensor {
+        ops::Reshape {
+            arg: self.clone(),
+            new_shape: new_shape.into(),
+        }
+        .forward()
+        .unwrap()
+    }
+
     pub fn sum(&self, axis: Vec<usize>, keep_dims: bool) -> Tensor {
         ops::Sum {
             arg: self.clone(),

@@ -325,6 +325,19 @@ fn test_broadcast() {
 }
 
 #[test]
+fn test_broadcast_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu).attach();
+    let b = a.broadcast((2, 3));
+
+    let grads = b.backward().unwrap();
+
+    assert_eq!(
+        grads.get(a.id()).unwrap(),
+        Tensor::from_vec(vec![2.0f32, 2.0, 2.0], (3,), Device::Cpu)
+    );
+}
+
+#[test]
 fn test_sum() {
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
 
@@ -335,6 +348,19 @@ fn test_sum() {
 }
 
 #[test]
+fn test_sum_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu).attach();
+    let b = a.sum(vec![], false);
+
+    let grads = b.backward().unwrap();
+
+    assert_eq!(
+        grads.get(a.id()).unwrap(),
+        Tensor::ones((2, 3), DType::F32, Device::Cpu)
+    );
+}
+
+#[test]
 fn test_sum_keepdims() {
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
 
@@ -342,4 +368,30 @@ fn test_sum_keepdims() {
 
     assert_eq!(b.layout().shape, (1, 3).into());
     assert_eq!(b.to_vec::<f32>().unwrap(), vec![5.0, 7.0, 9.0]);
+}
+
+#[test]
+fn test_reshape() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (1, 6), Device::Cpu);
+
+    let b = a.reshape((2, 3));
+
+    assert_eq!(b.layout().shape, (2, 3).into());
+    assert_eq!(
+        b.to_vec::<f32>().unwrap(),
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    );
+}
+
+#[test]
+fn test_reshape_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (1, 6), Device::Cpu).attach();
+    let b = a.reshape((2, 3));
+
+    let grads = b.backward().unwrap();
+
+    assert_eq!(
+        grads.get(a.id()).unwrap(),
+        Tensor::ones((1, 6), DType::F32, Device::Cpu)
+    );
 }
