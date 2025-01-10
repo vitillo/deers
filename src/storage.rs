@@ -109,6 +109,39 @@ impl_binary_op!(EWiseMul, "mul", mul);
 impl_binary_op!(EWiseDiv, "div", div);
 impl_binary_op!(EWisePow, "powf", powf);
 
+pub trait ReduceOp {
+    const KERNEL: &'static str;
+
+    fn f32(v: f32, w: f32) -> f32;
+    fn f64(v: f64, w: f64) -> f64;
+}
+
+pub struct ReduceSum;
+impl ReduceOp for ReduceSum {
+    const KERNEL: &'static str = "reduce_sum";
+
+    fn f32(acc: f32, x: f32) -> f32 {
+        acc + x
+    }
+
+    fn f64(acc: f64, x: f64) -> f64 {
+        acc + x
+    }
+}
+
+pub struct ReduceMax;
+impl ReduceOp for ReduceMax {
+    const KERNEL: &'static str = "reduce_max";
+
+    fn f32(acc: f32, x: f32) -> f32 {
+        acc.max(x)
+    }
+
+    fn f64(acc: f64, x: f64) -> f64 {
+        acc.max(x)
+    }
+}
+
 pub trait BackendStorage: Sized {
     fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self>;
     fn unary_op<O: UnaryOp>(&self, op: O, l: &Layout) -> Result<Self>;
@@ -118,7 +151,7 @@ pub trait BackendStorage: Sized {
         other: &Self,
         layout_other: &Layout,
     ) -> Result<Self>;
-    fn reduce_sum(&self, layout: &Layout, dst: &mut Self) -> Result<()>;
+    fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()>;
     fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self>;
     fn dtype(&self) -> DType;
     fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D>;
@@ -163,9 +196,9 @@ impl BackendStorage for Storage {
         }
     }
 
-    fn reduce_sum(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
+    fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
         match (self, dst) {
-            (Storage::Cpu(storage), Storage::Cpu(dst)) => storage.reduce_sum(layout, dst),
+            (Storage::Cpu(storage), Storage::Cpu(dst)) => storage.reduce::<O>(layout, dst),
         }
     }
 

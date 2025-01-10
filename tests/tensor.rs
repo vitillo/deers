@@ -444,3 +444,13 @@ fn test_matmul_backward() {
         vec![4.0, 4.0, 6.0, 6.0]
     );
 }
+
+#[test]
+fn test_max() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);
+
+    let b = a.max(vec![1], false);
+
+    assert_eq!(b.layout().shape, (2,).into());
+    assert_eq!(b.to_vec::<f32>().unwrap(), vec![2.0, 4.0]);
+}
