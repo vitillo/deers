@@ -7,6 +7,8 @@ use crate::{
     storage::{BackendStorage, BinaryOp, UnaryOp},
 };
 
+use super::ReduceOp;
+
 #[derive(Debug, Clone)]
 pub enum CpuStorage {
     F32(Vec<f32>),
@@ -119,7 +121,7 @@ impl BackendStorage for CpuStorage {
         }
     }
 
-    fn reduce_sum(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
+    fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
         assert!(layout.is_compact());
         assert_eq!(0, layout.size() % dst.len());
 
@@ -128,12 +130,12 @@ impl BackendStorage for CpuStorage {
         match (self, dst) {
             (CpuStorage::F32(src), CpuStorage::F32(dst)) => {
                 for (i, chunk) in src.chunks(reduce_size).enumerate() {
-                    dst[i] = chunk.iter().sum();
+                    dst[i] = chunk.iter().copied().reduce(O::f32).unwrap();
                 }
             }
             (CpuStorage::F64(src), CpuStorage::F64(dst)) => {
                 for (i, chunk) in src.chunks(reduce_size).enumerate() {
-                    dst[i] = chunk.iter().sum();
+                    dst[i] = chunk.iter().copied().reduce(O::f64).unwrap();
                 }
             }
             (CpuStorage::F32(_), CpuStorage::F64(_)) => unreachable!(),

@@ -8,6 +8,7 @@ use crate::backprop::GradientStore;
 use crate::error::Result;
 use crate::layout::{Layout, Shape};
 use crate::storage::{self, BackendStorage};
+use crate::storage::{ReduceMax, ReduceSum};
 use crate::tensor::{Tensor, TensorInternal};
 
 pub trait TensorOp: fmt::Debug + Send + Sync {
@@ -507,7 +508,8 @@ impl TensorOp for Sum {
 
         let view = self.arg.permute(permuted_dims).compact()?;
         let mut out_storage = self.arg.device().zeros(new_shape.size(), self.arg.dtype());
-        view.storage().reduce_sum(view.layout(), &mut out_storage)?;
+        view.storage()
+            .reduce::<ReduceSum>(view.layout(), &mut out_storage)?;
         let storage = Arc::new(RwLock::new(out_storage));
         Ok(TensorInternal::new(
             storage,
@@ -538,6 +540,78 @@ impl TensorOp for Sum {
         let sum_grad = grads.get_or_insert_zero(&self.arg);
         *sum_grad = &*sum_grad + out_grad;
         Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
+#[derive(Debug)]
+pub struct Max {
+    arg: Tensor,
+    axis: Vec<usize>,
+    keep_dims: bool,
+}
+
+impl Max {
+    pub fn new(arg: Tensor, axis: Vec<usize>, keep_dims: bool) -> Self {
+        Self {
+            arg,
+            axis,
+            keep_dims,
+        }
+    }
+}
+
+impl TensorOp for Max {
+    fn forward(self) -> Result<Tensor> {
+        // TODO: refactor with Sum forward implementation
+        assert!(self.axis.iter().all(|&i| i < self.arg.layout().ndim()));
+        let new_shape: Shape = if self.keep_dims {
+            self.arg
+                .layout()
+                .shape()
+                .iter()
+                .enumerate()
+                .map(|(ref i, &v)| if self.axis.contains(i) { 1 } else { v })
+                .collect::<Vec<usize>>()
+                .into()
+        } else {
+            self.arg
+                .layout()
+                .shape()
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| !self.axis.contains(&i))
+                .map(|(_, &dim)| dim)
+                .collect::<Vec<usize>>()
+                .into()
+        };
+
+        let permuted_dims: Vec<usize> = (0..self.arg.layout().ndim())
+            .filter(|i| !self.axis.contains(i))
+            .chain(self.axis.iter().copied())
+            .collect();
+
+        let view = self.arg.permute(permuted_dims).compact()?;
+        let mut out_storage = self.arg.device().zeros(new_shape.size(), self.arg.dtype());
+        view.storage()
+            .reduce::<ReduceMax>(view.layout(), &mut out_storage)?;
+        let storage = Arc::new(RwLock::new(out_storage));
+        Ok(TensorInternal::new(
+            storage,
+            Layout::from(new_shape),
+            self.arg.device(),
+            self.arg.dtype(),
+            false,
+            Some(Box::new(self)),
+        )
+        .into())
+    }
+
+    fn backward(&self, _: &mut GradientStore, _: &Tensor) -> Result<()> {
+        todo!()
     }
 
     fn dependencies(&self) -> Vec<&Tensor> {
@@ -635,5 +709,30 @@ impl TensorOp for MatMul {
 
     fn dependencies(&self) -> Vec<&Tensor> {
         vec![&self.arg1, &self.arg2]
+    }
+}
+
+#[derive(Debug)]
+struct LogSoftmax {
+    arg: Tensor,
+}
+
+impl LogSoftmax {
+    pub fn new(arg: Tensor) -> Self {
+        Self { arg }
+    }
+}
+
+impl TensorOp for LogSoftmax {
+    fn forward(self) -> Result<Tensor> {
+        todo!()
+    }
+
+    fn backward(&self, _: &mut GradientStore, _: &Tensor) -> Result<()> {
+        todo!()
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
     }
 }

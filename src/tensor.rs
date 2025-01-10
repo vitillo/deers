@@ -224,6 +224,12 @@ impl Tensor {
         .unwrap()
     }
 
+    pub fn max(&self, axis: Vec<usize>, keep_dims: bool) -> Tensor {
+        ops::Max::new(self.clone(), axis, keep_dims)
+            .forward()
+            .unwrap()
+    }
+
     pub fn is_compact(&self) -> bool {
         self.layout.is_compact()
     }
