@@ -197,21 +197,15 @@ impl Tensor {
     }
 
     pub fn broadcast(&self, new_shape: impl Into<Shape>) -> Tensor {
-        ops::Broadcast {
-            arg: self.clone(),
-            new_shape: new_shape.into(),
-        }
-        .forward()
-        .unwrap()
+        ops::Broadcast::new(self.clone(), new_shape.into())
+            .forward()
+            .unwrap()
     }
 
     pub fn reshape(&self, new_shape: impl Into<Shape>) -> Tensor {
-        ops::Reshape {
-            arg: self.clone(),
-            new_shape: new_shape.into(),
-        }
-        .forward()
-        .unwrap()
+        ops::Reshape::new(self.clone(), new_shape.into())
+            .forward()
+            .unwrap()
     }
 
     pub fn transpose(&self, axes: Option<(usize, usize)>) -> Tensor {
@@ -227,13 +221,9 @@ impl Tensor {
     }
 
     pub fn sum(&self, axis: Vec<usize>, keep_dims: bool) -> Tensor {
-        ops::Sum {
-            arg: self.clone(),
-            axis,
-            keep_dims,
-        }
-        .forward()
-        .unwrap()
+        ops::Sum::new(self.clone(), axis, keep_dims)
+            .forward()
+            .unwrap()
     }
 
     pub fn max(&self, axis: Vec<usize>, keep_dims: bool) -> Tensor {
@@ -246,46 +236,38 @@ impl Tensor {
         self.layout.is_compact()
     }
 
-    pub fn compact(self) -> Result<Tensor> {
+    pub fn compact(&self) -> Tensor {
         if self.is_compact() {
-            return Ok(self);
+            return self.clone();
         }
-
-        let mut storage = self.device().zeros(self.layout.size(), self.dtype);
-        self.storage().copy_compact(&self.layout, &mut storage)?;
-        let strides = self.layout().shape().compact_strides();
-        let layout = Layout::new(self.layout().shape().clone(), strides, 0);
-        let tensor = Arc::into_inner(self.0).unwrap();
-        Ok(Tensor::new(
-            Arc::new(RwLock::new(storage)),
-            layout,
-            tensor.device,
-            tensor.dtype,
-            tensor.requires_grad,
-            tensor.op,
-        ))
+        ops::Compact::new(self.clone()).forward().unwrap()
     }
 
     pub fn powf<B: Borrow<Tensor>>(&self, e: B) -> Tensor {
-        ops::EWisePowf(self.clone(), e.borrow().clone())
+        ops::EWisePowf::new(self.clone(), e.borrow().clone())
+            .unwrap()
             .forward()
             .unwrap()
     }
 
     pub fn log(&self) -> Tensor {
-        ops::EWiseLog(self.clone()).forward().unwrap()
+        ops::EWiseLog::new(self.clone()).unwrap().forward().unwrap()
     }
 
     pub fn exp(&self) -> Tensor {
-        ops::EWiseExp(self.clone()).forward().unwrap()
+        ops::EWiseExp::new(self.clone()).unwrap().forward().unwrap()
     }
 
     pub fn scalar_powf(&self, e: f64) -> Tensor {
-        ops::ScalarPowf(self.clone(), e).forward().unwrap()
+        ops::ScalarPowf::new(self.clone(), e)
+            .unwrap()
+            .forward()
+            .unwrap()
     }
 
     pub fn matmul(&self, other: &Tensor) -> Tensor {
         ops::MatMul::new(self.clone(), other.clone())
+            .unwrap()
             .forward()
             .unwrap()
     }
@@ -316,7 +298,7 @@ impl Neg for Tensor {
     type Output = Tensor;
 
     fn neg(self) -> Self::Output {
-        ops::Neg(self.clone()).forward().unwrap()
+        ops::Neg::new(self.clone()).unwrap().forward().unwrap()
     }
 }
 
@@ -324,7 +306,7 @@ impl Neg for &Tensor {
     type Output = Tensor;
 
     fn neg(self) -> Self::Output {
-        ops::Neg(self.clone()).forward().unwrap()
+        ops::Neg::new(self.clone()).unwrap().forward().unwrap()
     }
 }
 
@@ -332,7 +314,8 @@ impl<B: Borrow<Tensor>> Add<B> for Tensor {
     type Output = Tensor;
 
     fn add(self, rhs: B) -> Self::Output {
-        ops::EWiseAdd(self.clone(), rhs.borrow().clone())
+        ops::EWiseAdd::new(self.clone(), rhs.borrow().clone())
+            .unwrap()
             .forward()
             .unwrap()
     }
@@ -342,7 +325,8 @@ impl<B: Borrow<Tensor>> Add<B> for &Tensor {
     type Output = Tensor;
 
     fn add(self, rhs: B) -> Self::Output {
-        ops::EWiseAdd(self.clone(), rhs.borrow().clone())
+        ops::EWiseAdd::new(self.clone(), rhs.borrow().clone())
+            .unwrap()
             .forward()
             .unwrap()
     }
@@ -352,7 +336,10 @@ impl Add<f64> for Tensor {
     type Output = Tensor;
 
     fn add(self, rhs: f64) -> Self::Output {
-        ops::ScalarAdd(self.clone(), rhs).forward().unwrap()
+        ops::ScalarAdd::new(self.clone(), rhs)
+            .unwrap()
+            .forward()
+            .unwrap()
     }
 }
 
@@ -360,7 +347,10 @@ impl Add<f64> for &Tensor {
     type Output = Tensor;
 
     fn add(self, rhs: f64) -> Self::Output {
-        ops::ScalarAdd(self.clone(), rhs).forward().unwrap()
+        ops::ScalarAdd::new(self.clone(), rhs)
+            .unwrap()
+            .forward()
+            .unwrap()
     }
 }
 
@@ -400,7 +390,8 @@ impl<B: Borrow<Tensor>> Mul<B> for Tensor {
     type Output = Tensor;
 
     fn mul(self, rhs: B) -> Self::Output {
-        ops::EWiseMul(self.clone(), rhs.borrow().clone())
+        ops::EWiseMul::new(self.clone(), rhs.borrow().clone())
+            .unwrap()
             .forward()
             .unwrap()
     }
@@ -410,7 +401,8 @@ impl<B: Borrow<Tensor>> Mul<B> for &Tensor {
     type Output = Tensor;
 
     fn mul(self, rhs: B) -> Self::Output {
-        ops::EWiseMul(self.clone(), rhs.borrow().clone())
+        ops::EWiseMul::new(self.clone(), rhs.borrow().clone())
+            .unwrap()
             .forward()
             .unwrap()
     }
@@ -420,7 +412,8 @@ impl<B: Borrow<Tensor>> Div<B> for Tensor {
     type Output = Tensor;
 
     fn div(self, rhs: B) -> Self::Output {
-        ops::EWiseDiv(self.clone(), rhs.borrow().clone())
+        ops::EWiseDiv::new(self.clone(), rhs.borrow().clone())
+            .unwrap()
             .forward()
             .unwrap()
     }
@@ -430,7 +423,8 @@ impl<B: Borrow<Tensor>> Div<B> for &Tensor {
     type Output = Tensor;
 
     fn div(self, rhs: B) -> Self::Output {
-        ops::EWiseDiv(self.clone(), rhs.borrow().clone())
+        ops::EWiseDiv::new(self.clone(), rhs.borrow().clone())
+            .unwrap()
             .forward()
             .unwrap()
     }
@@ -440,7 +434,10 @@ impl Mul<f64> for Tensor {
     type Output = Tensor;
 
     fn mul(self, rhs: f64) -> Self::Output {
-        ops::ScalarMul(self.clone(), rhs).forward().unwrap()
+        ops::ScalarMul::new(self.clone(), rhs)
+            .unwrap()
+            .forward()
+            .unwrap()
     }
 }
 
@@ -448,6 +445,9 @@ impl Mul<f64> for &Tensor {
     type Output = Tensor;
 
     fn mul(self, rhs: f64) -> Self::Output {
-        ops::ScalarMul(self.clone(), rhs).forward().unwrap()
+        ops::ScalarMul::new(self.clone(), rhs)
+            .unwrap()
+            .forward()
+            .unwrap()
     }
 }

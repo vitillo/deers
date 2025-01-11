@@ -105,7 +105,7 @@ fn test_ewise_mul() {
 #[test]
 fn test_ewise_mul_backward() {
     let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], (3,), Device::Cpu).attach();
-    let b = Tensor::from_vec(vec![4.0, 5.0, 6.0], (3,), Device::Cpu);
+    let b = Tensor::from_vec(vec![4.0, 5.0, 6.0], (3,), Device::Cpu).attach();
     let c = &a * &b;
 
     let grads = c.backward().unwrap();
@@ -475,5 +475,29 @@ fn test_logsumexp_backward() {
     Vec::<_>::assert_approx_eq(
         grads.get(a.id()).unwrap().to_vec().unwrap(),
         vec![0.2689f32, 0.7311, 0.2689, 0.7311],
+    );
+}
+
+#[test]
+fn test_compact() {
+    let t = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);
+    let c = t.permute(vec![1, 0]);
+
+    let c = c.compact();
+
+    assert_eq!(c.to_vec::<f32>().unwrap(), vec![1.0f32, 3.0, 2.0, 4.0]);
+}
+
+#[test]
+fn test_compact_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu).attach();
+    let b = a.permute(vec![1, 0]);
+    let c = b.compact();
+
+    let grads = c.backward().unwrap();
+
+    assert_eq!(
+        grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![1.0, 1.0, 1.0, 1.0]
     );
 }
