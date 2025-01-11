@@ -5,13 +5,11 @@ use std::ops::{Index, IndexMut};
 #[derive(Debug, PartialEq, PartialOrd, Clone)]
 pub struct Shape {
     shape: Vec<usize>,
-    size: usize,
 }
 
 impl Shape {
     pub fn new(shape: Vec<usize>) -> Self {
-        let size = shape.iter().product();
-        Self { shape, size }
+        Self { shape }
     }
 
     pub fn compact_strides(&self) -> Strides {
@@ -23,7 +21,7 @@ impl Shape {
     }
 
     pub fn size(&self) -> usize {
-        self.size
+        self.shape.iter().product()
     }
 
     pub fn ndim(&self) -> usize {

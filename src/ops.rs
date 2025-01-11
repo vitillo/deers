@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::layout::{Layout, Shape};
 use crate::storage::{self, BackendStorage};
 use crate::storage::{ReduceMax, ReduceSum};
-use crate::tensor::{Tensor, TensorInternal};
+use crate::tensor::Tensor;
 
 pub trait TensorOp: fmt::Debug + Send + Sync {
     fn forward(self) -> Result<Tensor>;
@@ -29,15 +29,14 @@ impl TensorOp for Neg {
             self.0.storage().unary_op(storage::Neg, self.0.layout())?,
         ));
         let layout = self.0.layout().clone();
-        Ok(TensorInternal::new(
+        Ok(Tensor::new(
             storage,
             layout,
             self.0.device(),
             self.0.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -56,6 +55,8 @@ pub struct EWiseAdd(pub Tensor, pub Tensor);
 
 impl TensorOp for EWiseAdd {
     fn forward(self) -> Result<Tensor> {
+        assert!(self.0.layout() == self.1.layout());
+
         let storage = Arc::new(RwLock::new(
             self.0.storage().binary_op::<storage::EWiseAdd>(
                 self.0.layout(),
@@ -63,15 +64,14 @@ impl TensorOp for EWiseAdd {
                 self.1.layout(),
             )?,
         ));
-        Ok(TensorInternal::new(
+        Ok(Tensor::new(
             storage,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -94,6 +94,8 @@ pub struct EWiseMul(pub Tensor, pub Tensor);
 
 impl TensorOp for EWiseMul {
     fn forward(self) -> Result<Tensor> {
+        assert!(self.0.layout() == self.1.layout());
+
         let storage = Arc::new(RwLock::new(
             self.0.storage().binary_op::<storage::EWiseMul>(
                 self.0.layout(),
@@ -101,15 +103,14 @@ impl TensorOp for EWiseMul {
                 self.1.layout(),
             )?,
         ));
-        Ok(TensorInternal::new(
+        Ok(Tensor::new(
             storage,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -132,6 +133,8 @@ pub struct EWiseDiv(pub Tensor, pub Tensor);
 
 impl TensorOp for EWiseDiv {
     fn forward(self) -> Result<Tensor> {
+        assert!(self.0.layout() == self.1.layout());
+
         let storage = Arc::new(RwLock::new(
             self.0.storage().binary_op::<storage::EWiseDiv>(
                 self.0.layout(),
@@ -139,15 +142,14 @@ impl TensorOp for EWiseDiv {
                 self.1.layout(),
             )?,
         ));
-        Ok(TensorInternal::new(
+        Ok(Tensor::new(
             storage,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -169,6 +171,8 @@ pub struct EWisePowf(pub Tensor, pub Tensor);
 
 impl TensorOp for EWisePowf {
     fn forward(self) -> Result<Tensor> {
+        assert!(self.0.layout() == self.1.layout());
+
         let storage = Arc::new(RwLock::new(
             self.0.storage().binary_op::<storage::EWisePow>(
                 self.0.layout(),
@@ -176,15 +180,14 @@ impl TensorOp for EWisePowf {
                 self.1.layout(),
             )?,
         ));
-        Ok(TensorInternal::new(
+        Ok(Tensor::new(
             storage,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -212,15 +215,14 @@ impl TensorOp for EWiseLog {
         let storage = Arc::new(RwLock::new(
             self.0.storage().unary_op(storage::Log, self.0.layout())?,
         ));
-        Ok(TensorInternal::new(
+        Ok(Tensor::new(
             storage,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -242,15 +244,14 @@ impl TensorOp for EWiseExp {
         let storage = Arc::new(RwLock::new(
             self.0.storage().unary_op(storage::Exp, self.0.layout())?,
         ));
-        Ok(TensorInternal::new(
+        Ok(Tensor::new(
             storage,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -274,15 +275,14 @@ impl TensorOp for ScalarAdd {
                 .storage()
                 .unary_op(storage::ScalarAdd(self.1), self.0.layout())?,
         ));
-        Ok(TensorInternal::new(
+        Ok(Tensor::new(
             storage,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -307,15 +307,14 @@ impl TensorOp for ScalarMul {
                 .storage()
                 .unary_op(storage::ScalarMul(self.1), self.0.layout())?,
         ));
-        Ok(TensorInternal::new(
+        Ok(Tensor::new(
             storage,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -339,15 +338,14 @@ impl TensorOp for ScalarPowf {
         let storage = Arc::new(RwLock::new(
             self.0.storage().ewise_powf(self.1, self.0.layout())?,
         ));
-        Ok(TensorInternal::new(
+        Ok(Tensor::new(
             storage,
             self.0.layout().clone(),
             self.0.device(),
             self.0.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -375,17 +373,16 @@ impl Permute {
 
 impl TensorOp for Permute {
     fn forward(self) -> Result<Tensor> {
-        let storage = self.0.storage.clone();
+        let storage = self.0.storage_clone();
         let layout = self.0.layout().permute(&self.1);
-        Ok(TensorInternal::new(
+        Ok(Tensor::new(
             storage,
             layout,
             self.0.device(),
             self.0.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -428,16 +425,15 @@ impl TensorOp for Broadcast {
         }
 
         let layout = Layout::new(self.new_shape.clone(), new_strides, 0);
-        let storage = self.arg.storage.clone();
-        Ok(TensorInternal::new(
+        let storage = self.arg.storage_clone();
+        Ok(Tensor::new(
             storage,
             layout,
             self.arg.device(),
             self.arg.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -511,15 +507,14 @@ impl TensorOp for Sum {
         view.storage()
             .reduce::<ReduceSum>(view.layout(), &mut out_storage)?;
         let storage = Arc::new(RwLock::new(out_storage));
-        Ok(TensorInternal::new(
+        Ok(Tensor::new(
             storage,
             Layout::from(new_shape),
             self.arg.device(),
             self.arg.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -599,15 +594,14 @@ impl TensorOp for Max {
         view.storage()
             .reduce::<ReduceMax>(view.layout(), &mut out_storage)?;
         let storage = Arc::new(RwLock::new(out_storage));
-        Ok(TensorInternal::new(
+        Ok(Tensor::new(
             storage,
             Layout::from(new_shape),
             self.arg.device(),
             self.arg.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, _: &mut GradientStore, _: &Tensor) -> Result<()> {
@@ -628,17 +622,16 @@ pub struct Reshape {
 impl TensorOp for Reshape {
     fn forward(self) -> Result<Tensor> {
         assert!(self.arg.layout().size() == self.new_shape.size());
-        let storage = self.arg.storage.clone();
+        let storage = self.arg.storage_clone();
 
-        Ok(TensorInternal::new(
+        Ok(Tensor::new(
             storage,
             Layout::from(self.new_shape.clone()),
             self.arg.device(),
             self.arg.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -676,15 +669,14 @@ impl TensorOp for MatMul {
             self.arg2.layout(),
         )?));
 
-        Ok(TensorInternal::new(
+        Ok(Tensor::new(
             storage,
             shape.into(),
             self.arg1.device(),
             self.arg1.dtype(),
             false,
             Some(Box::new(self)),
-        )
-        .into())
+        ))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -713,23 +705,58 @@ impl TensorOp for MatMul {
 }
 
 #[derive(Debug)]
-struct LogSoftmax {
+pub struct LogSumExp {
     arg: Tensor,
+    axes: Vec<usize>,
 }
 
-impl LogSoftmax {
-    pub fn new(arg: Tensor) -> Self {
-        Self { arg }
+impl LogSumExp {
+    pub fn new(arg: Tensor, axes: Vec<usize>) -> Self {
+        Self { arg, axes }
     }
 }
 
-impl TensorOp for LogSoftmax {
+impl TensorOp for LogSumExp {
     fn forward(self) -> Result<Tensor> {
-        todo!()
+        // https://gregorygundersen.com/blog/2020/02/09/log-sum-exp/
+        let max_z = self.arg.max(self.axes.clone(), true);
+        let broadcast_max_z = max_z
+            .broadcast(self.arg.layout().shape().clone())
+            .compact()?;
+        let sum_z = (&self.arg - &broadcast_max_z)
+            .exp()
+            .sum(self.axes.clone(), false);
+        let logsumexp = max_z.reshape(sum_z.layout().shape.clone()) + sum_z.log();
+        // This is required to avoid creating a computational graph for the above operations
+        // How do I prevent this from happening for all ops??
+        Ok(logsumexp.with_op(Box::new(self)))
     }
 
-    fn backward(&self, _: &mut GradientStore, _: &Tensor) -> Result<()> {
-        todo!()
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let max_z = self.arg.max(self.axes.clone(), true);
+        let broadcast_max_z = max_z
+            .broadcast(self.arg.layout().shape().clone())
+            .compact()?;
+        let exp_z = (&self.arg - broadcast_max_z).exp();
+        let sum_z = exp_z.sum(self.axes.clone(), false);
+
+        let expand_shape = {
+            let mut shape = self.arg.layout().shape().clone();
+            for axis in &self.axes {
+                shape[*axis] = 1;
+            }
+            shape
+        };
+        // TODO: auto compact...
+        let grad_sum_z = (out_grad / sum_z)
+            .reshape(expand_shape)
+            .broadcast(self.arg.layout().shape().clone())
+            .compact()?;
+        let arg_grad = grad_sum_z * exp_z;
+
+        let sum_grad = grads.get_or_insert_zero(&self.arg);
+        *sum_grad = &*sum_grad + arg_grad;
+        Ok(())
     }
 
     fn dependencies(&self) -> Vec<&Tensor> {
