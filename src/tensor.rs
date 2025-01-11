@@ -18,42 +18,12 @@ pub struct TensorId(usize);
 #[derive(Debug)]
 pub struct TensorInternal {
     id: TensorId,
-    pub(crate) storage: Arc<RwLock<Storage>>,
+    storage: Arc<RwLock<Storage>>,
     layout: Layout,
     device: Device,
     dtype: DType,
     op: Option<Box<dyn TensorOp>>,
     requires_grad: bool,
-}
-
-impl TensorInternal {
-    pub fn new(
-        storage: Arc<RwLock<Storage>>,
-        layout: Layout,
-        device: Device,
-        dtype: DType,
-        requires_grad: bool,
-        op: Option<Box<dyn TensorOp>>,
-    ) -> Self {
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
-        let id = TensorId(COUNTER.fetch_add(1, Ordering::Relaxed));
-
-        let requires_grad = requires_grad
-            || op
-                .as_ref()
-                .map(|o| o.dependencies().iter().any(|dep| dep.requires_grad()))
-                .unwrap_or(false);
-
-        Self {
-            id,
-            storage,
-            layout,
-            device,
-            dtype,
-            op,
-            requires_grad,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +44,47 @@ impl Deref for Tensor {
 }
 
 impl Tensor {
+    pub(crate) fn new(
+        storage: Arc<RwLock<Storage>>,
+        layout: Layout,
+        device: Device,
+        dtype: DType,
+        requires_grad: bool,
+        op: Option<Box<dyn TensorOp>>,
+    ) -> Self {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let id = TensorId(COUNTER.fetch_add(1, Ordering::Relaxed));
+
+        let requires_grad = requires_grad
+            || op
+                .as_ref()
+                .map(|o| o.dependencies().iter().any(|dep| dep.requires_grad()))
+                .unwrap_or(false);
+
+        TensorInternal {
+            id,
+            storage,
+            layout,
+            device,
+            dtype,
+            op,
+            requires_grad,
+        }
+        .into()
+    }
+
+    pub(crate) fn with_op(self, op: Box<dyn TensorOp>) -> Self {
+        let tensor = Arc::into_inner(self.0).unwrap();
+        Tensor::new(
+            tensor.storage,
+            tensor.layout,
+            tensor.device,
+            tensor.dtype,
+            false,
+            Some(op),
+        )
+    }
+
     pub fn op(&self) -> &Option<Box<dyn TensorOp>> {
         &self.op
     }
@@ -84,6 +95,10 @@ impl Tensor {
 
     pub fn storage(&self) -> RwLockReadGuard<'_, Storage> {
         self.storage.read().unwrap()
+    }
+
+    pub(crate) fn storage_clone(&self) -> Arc<RwLock<Storage>> {
+        self.storage.clone()
     }
 
     pub fn layout(&self) -> &Layout {
@@ -107,7 +122,7 @@ impl Tensor {
             return self.clone();
         }
 
-        TensorInternal::new(
+        Tensor::new(
             self.storage.clone(),
             self.layout.clone(),
             self.device,
@@ -115,21 +130,20 @@ impl Tensor {
             true,
             None,
         )
-        .into()
     }
 
     pub fn zeros(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
         let storage = Arc::new(RwLock::new(device.zeros(shape.size(), dtype)));
         let layout: Layout = shape.into();
-        TensorInternal::new(storage, layout, device, dtype, false, None).into()
+        Tensor::new(storage, layout, device, dtype, false, None)
     }
 
     pub fn ones(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
         let storage = Arc::new(RwLock::new(device.ones(shape.size(), dtype)));
         let layout: Layout = shape.into();
-        TensorInternal::new(storage, layout, device, dtype, false, None).into()
+        Tensor::new(storage, layout, device, dtype, false, None)
     }
 
     pub fn from_vec(vec: impl Into<CpuStorage>, shape: impl Into<Shape>, device: Device) -> Tensor {
@@ -143,7 +157,7 @@ impl Tensor {
         let layout: Layout = shape.into();
         let dtype = storage.dtype();
         let storage = Arc::new(RwLock::new(storage));
-        TensorInternal::new(storage, layout, device, dtype, false, None).into()
+        Tensor::new(storage, layout, device, dtype, false, None)
     }
 
     pub fn to_vec<S: WithDType>(&self) -> Result<Vec<S>> {
@@ -151,7 +165,7 @@ impl Tensor {
     }
 
     pub fn ones_like(&self) -> Tensor {
-        TensorInternal::new(
+        Tensor::new(
             Arc::new(RwLock::new(
                 self.device.ones(self.layout.size(), self.dtype),
             )),
@@ -161,11 +175,10 @@ impl Tensor {
             false,
             None,
         )
-        .into()
     }
 
     pub fn zeros_like(&self) -> Tensor {
-        TensorInternal::new(
+        Tensor::new(
             Arc::new(RwLock::new(
                 self.device.zeros(self.layout.size(), self.dtype),
             )),
@@ -175,7 +188,6 @@ impl Tensor {
             false,
             None,
         )
-        .into()
     }
 
     pub fn permute(&self, axis: impl Into<Shape>) -> Tensor {
@@ -234,24 +246,24 @@ impl Tensor {
         self.layout.is_compact()
     }
 
-    pub fn compact(&self) -> Result<Tensor> {
+    pub fn compact(self) -> Result<Tensor> {
         if self.is_compact() {
-            return Ok(self.clone());
+            return Ok(self);
         }
 
         let mut storage = self.device().zeros(self.layout.size(), self.dtype);
         self.storage().copy_compact(&self.layout, &mut storage)?;
         let strides = self.layout().shape().compact_strides();
         let layout = Layout::new(self.layout().shape().clone(), strides, 0);
-        Ok(TensorInternal::new(
+        let tensor = Arc::into_inner(self.0).unwrap();
+        Ok(Tensor::new(
             Arc::new(RwLock::new(storage)),
             layout,
-            self.device,
-            self.dtype,
-            false,
-            None,
-        )
-        .into())
+            tensor.device,
+            tensor.dtype,
+            tensor.requires_grad,
+            tensor.op,
+        ))
     }
 
     pub fn powf<B: Borrow<Tensor>>(&self, e: B) -> Tensor {
@@ -276,6 +288,10 @@ impl Tensor {
         ops::MatMul::new(self.clone(), other.clone())
             .forward()
             .unwrap()
+    }
+
+    pub fn log_sum_exp(&self, axes: Vec<usize>) -> Tensor {
+        ops::LogSumExp::new(self.clone(), axes).forward().unwrap()
     }
 }
 

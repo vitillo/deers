@@ -454,3 +454,26 @@ fn test_max() {
     assert_eq!(b.layout().shape, (2,).into());
     assert_eq!(b.to_vec::<f32>().unwrap(), vec![2.0, 4.0]);
 }
+
+#[test]
+fn test_logsumexp() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);
+
+    let b = a.log_sum_exp(vec![1]);
+
+    assert_eq!(b.layout().shape, (2,).into());
+    Vec::<_>::assert_approx_eq(b.to_vec::<f32>().unwrap(), vec![2.3133, 4.3133]);
+}
+
+#[test]
+fn test_logsumexp_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu).attach();
+    let b = a.log_sum_exp(vec![1]);
+
+    let grads = b.backward().unwrap();
+
+    Vec::<_>::assert_approx_eq(
+        grads.get(a.id()).unwrap().to_vec().unwrap(),
+        vec![0.2689f32, 0.7311, 0.2689, 0.7311],
+    );
+}
