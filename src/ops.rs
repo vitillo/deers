@@ -909,7 +909,7 @@ impl TensorOp for Compact {
             .zeros(self.arg.layout().size(), self.arg.dtype());
         self.arg
             .storage()
-            .copy_compact(&self.arg.layout(), &mut storage)?;
+            .copy_compact(self.arg.layout(), &mut storage)?;
         let strides = self.arg.layout().shape().compact_strides();
         let layout = Layout::new(self.arg.layout().shape().clone(), strides, 0);
         Ok(Tensor::new(
