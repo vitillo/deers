@@ -259,6 +259,39 @@ impl BackendStorage for CpuStorage {
         }
     }
 
+    fn broadcast_add(
+        &self,
+        layout: &Layout,
+        other: &Self,
+        other_layout: &Layout,
+        out_shape: &[usize],
+        a_strides: &[isize],
+        b_strides: &[isize],
+    ) -> Result<Self> {
+        let out_size: usize = out_shape.iter().product();
+        match (self, other) {
+            (CpuStorage::F32(a), CpuStorage::F32(b)) => {
+                let mut out = vec![0.0f32; out_size];
+                strided_add(
+                    a, layout.offset, a_strides,
+                    b, other_layout.offset, b_strides,
+                    &mut out, out_shape,
+                );
+                Ok(CpuStorage::F32(out))
+            }
+            (CpuStorage::F64(a), CpuStorage::F64(b)) => {
+                let mut out = vec![0.0f64; out_size];
+                strided_add(
+                    a, layout.offset, a_strides,
+                    b, other_layout.offset, b_strides,
+                    &mut out, out_shape,
+                );
+                Ok(CpuStorage::F64(out))
+            }
+            _ => unreachable!(),
+        }
+    }
+
     fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self> {
         assert!(layout.is_compact() && layout_other.is_compact());
         let n = layout.shape[layout.shape.ndim() - 1]; // cols of self, rows of other
@@ -278,6 +311,43 @@ impl BackendStorage for CpuStorage {
             }
             (CpuStorage::F32(_), CpuStorage::F64(_)) => unreachable!(),
             (CpuStorage::F64(_), CpuStorage::F32(_)) => unreachable!(),
+        }
+    }
+}
+
+/// Adds two strided arrays element-wise into a compact output.
+///
+/// Each input has its own offset and strides (which may include zeros for broadcast dims).
+/// The output shape must be the broadcast-compatible shape of both inputs.
+fn strided_add<T: Copy + std::ops::Add<Output = T>>(
+    a: &[T], a_off: usize, a_strides: &[isize],
+    b: &[T], b_off: usize, b_strides: &[isize],
+    out: &mut [T],
+    shape: &[usize],
+) {
+    strided_add_inner(a, a_off, a_strides, b, b_off, b_strides, out, &mut 0, shape);
+}
+
+fn strided_add_inner<T: Copy + std::ops::Add<Output = T>>(
+    a: &[T], a_off: usize, a_strides: &[isize],
+    b: &[T], b_off: usize, b_strides: &[isize],
+    out: &mut [T], out_off: &mut usize,
+    shape: &[usize],
+) {
+    if shape.len() == 1 {
+        let (sa, sb) = (a_strides[0] as usize, b_strides[0] as usize);
+        for i in 0..shape[0] {
+            out[*out_off] = a[a_off + i * sa] + b[b_off + i * sb];
+            *out_off += 1;
+        }
+    } else {
+        let (sa, sb) = (a_strides[0] as usize, b_strides[0] as usize);
+        for i in 0..shape[0] {
+            strided_add_inner(
+                a, a_off + i * sa, &a_strides[1..],
+                b, b_off + i * sb, &b_strides[1..],
+                out, out_off, &shape[1..],
+            );
         }
     }
 }

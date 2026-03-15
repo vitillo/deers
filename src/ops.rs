@@ -118,6 +118,131 @@ impl TensorOp for EWiseAdd {
     }
 }
 
+/// Fused broadcast addition: adds two tensors of different shapes without
+/// materializing the broadcast. Computes broadcast strides so the storage
+/// layer can iterate directly without copying.
+#[derive(Debug)]
+pub struct BroadcastAdd {
+    arg1: Tensor,
+    arg2: Tensor,
+    out_shape: Shape,
+    a_strides: Vec<isize>,
+    b_strides: Vec<isize>,
+    /// For each input, the axes that were broadcast (needed for backward).
+    a_broadcast_axes: Vec<usize>,
+    b_broadcast_axes: Vec<usize>,
+}
+
+impl BroadcastAdd {
+    pub fn new(arg1: Tensor, arg2: Tensor) -> Result<Self> {
+        let s1: Vec<usize> = arg1.layout().shape().iter().copied().collect();
+        let s2: Vec<usize> = arg2.layout().shape().iter().copied().collect();
+        let st1: Vec<isize> = arg1.layout().strides().iter().copied().collect();
+        let st2: Vec<isize> = arg2.layout().strides().iter().copied().collect();
+
+        let ndim = s1.len().max(s2.len());
+
+        // Pad shapes and strides from the left (numpy-style broadcasting)
+        let pad1 = ndim - s1.len();
+        let pad2 = ndim - s2.len();
+
+        let mut out_shape = Vec::with_capacity(ndim);
+        let mut a_strides = Vec::with_capacity(ndim);
+        let mut b_strides = Vec::with_capacity(ndim);
+        let mut a_broadcast_axes = vec![];
+        let mut b_broadcast_axes = vec![];
+
+        for i in 0..ndim {
+            let d1 = if i < pad1 { 1 } else { s1[i - pad1] };
+            let d2 = if i < pad2 { 1 } else { s2[i - pad2] };
+            let stride1 = if i < pad1 { 0 } else { st1[i - pad1] };
+            let stride2 = if i < pad2 { 0 } else { st2[i - pad2] };
+
+            assert!(d1 == d2 || d1 == 1 || d2 == 1, "incompatible shapes for broadcast");
+
+            let out_dim = d1.max(d2);
+            out_shape.push(out_dim);
+
+            if d1 == 1 && out_dim > 1 {
+                a_strides.push(0);
+                a_broadcast_axes.push(i);
+            } else {
+                a_strides.push(stride1);
+            }
+
+            if d2 == 1 && out_dim > 1 {
+                b_strides.push(0);
+                b_broadcast_axes.push(i);
+            } else {
+                b_strides.push(stride2);
+            }
+        }
+
+        Ok(Self {
+            arg1,
+            arg2,
+            out_shape: out_shape.into(),
+            a_strides,
+            b_strides,
+            a_broadcast_axes,
+            b_broadcast_axes,
+        })
+    }
+}
+
+impl TensorOp for BroadcastAdd {
+    fn forward(self) -> Result<Tensor> {
+        let storage = Arc::new(RwLock::new(self.arg1.storage().broadcast_add(
+            self.arg1.layout(),
+            &self.arg2.storage(),
+            self.arg2.layout(),
+            &self.out_shape.iter().copied().collect::<Vec<_>>(),
+            &self.a_strides,
+            &self.b_strides,
+        )?));
+        Ok(Tensor::new(
+            storage,
+            Layout::from(self.out_shape.clone()),
+            self.arg1.device(),
+            self.arg1.dtype(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        // For arg1: sum along axes that were broadcast, reshape to original shape
+        if self.a_broadcast_axes.is_empty() {
+            let grad_sum = store.get_or_insert_zero(&self.arg1);
+            *grad_sum = &*grad_sum + out_grad;
+        } else {
+            let grad = out_grad
+                .sum(self.a_broadcast_axes.clone(), false)
+                .reshape(self.arg1.layout().shape().clone());
+            let grad_sum = store.get_or_insert_zero(&self.arg1);
+            *grad_sum = &*grad_sum + grad;
+        }
+
+        // For arg2: sum along axes that were broadcast, reshape to original shape
+        if self.b_broadcast_axes.is_empty() {
+            let grad_sum = store.get_or_insert_zero(&self.arg2);
+            *grad_sum = &*grad_sum + out_grad;
+        } else {
+            let grad = out_grad
+                .sum(self.b_broadcast_axes.clone(), false)
+                .reshape(self.arg2.layout().shape().clone());
+            let grad_sum = store.get_or_insert_zero(&self.arg2);
+            *grad_sum = &*grad_sum + grad;
+        }
+
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg1, &self.arg2]
+    }
+}
+
 #[derive(Debug)]
 pub struct EWiseMul {
     arg1: Tensor,

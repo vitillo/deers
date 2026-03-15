@@ -361,6 +361,15 @@ impl Tensor {
             .unwrap()
     }
 
+    /// Adds two tensors with numpy-style broadcasting, without materializing
+    /// the broadcast. Equivalent to candle's `broadcast_add`.
+    pub fn broadcast_add(&self, other: &Tensor) -> Tensor {
+        ops::BroadcastAdd::new(self.clone(), other.clone())
+            .unwrap()
+            .forward()
+            .unwrap()
+    }
+
     /// 2-D matrix multiplication: `(m, n) @ (n, p) -> (m, p)`.
     pub fn matmul(&self, other: &Tensor) -> Tensor {
         ops::MatMul::new(self.clone(), other.clone())
