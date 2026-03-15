@@ -1,5 +1,8 @@
 use core::{f32, f64};
-use deers::{Approx, DType, Device, Tensor};
+mod utils;
+
+use deers::{DType, Device, Tensor};
+use utils::Approx;
 
 #[test]
 fn test_zeros() {

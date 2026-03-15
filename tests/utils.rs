@@ -1,3 +1,4 @@
+/// Trait for approximate floating-point comparisons in tests (tolerance: 1e-4).
 pub trait Approx {
     fn assert_approx_eq(_: impl AsRef<Self>, _: impl AsRef<Self>);
 }

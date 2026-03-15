@@ -12,6 +12,7 @@ use crate::{
 
 pub use cpu::*;
 
+/// An element-wise operation applied to a single tensor.
 pub trait UnaryOp {
     const KERNEL: &'static str;
 
@@ -101,6 +102,7 @@ scalar_op!(ScalarAdd, "scalar_add", +);
 scalar_op!(ScalarMul, "scalar_mul", *);
 scalar_op!(ScalarDiv, "scalar_div", /);
 
+/// An element-wise operation applied to two tensors of the same shape.
 pub trait BinaryOp {
     const KERNEL: &'static str;
 
@@ -136,6 +138,7 @@ impl_binary_op!(EWiseMul, "mul", mul);
 impl_binary_op!(EWiseDiv, "div", div);
 impl_binary_op!(EWisePow, "powf", powf);
 
+/// A reduction operation that combines elements (e.g. sum, max).
 pub trait ReduceOp {
     const KERNEL: &'static str;
 
@@ -169,6 +172,7 @@ impl ReduceOp for ReduceMax {
     }
 }
 
+/// Trait that storage backends (CPU, future GPU) must implement.
 pub trait BackendStorage: Sized {
     fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self>;
     fn unary_op<O: UnaryOp>(&self, op: O, l: &Layout) -> Result<Self>;
@@ -185,6 +189,7 @@ pub trait BackendStorage: Sized {
     fn copy_compact(&self, src_layout: &Layout, dst: &mut Self) -> Result<()>;
 }
 
+/// Backend-agnostic storage enum. Currently only CPU is implemented.
 #[derive(Debug, Clone)]
 pub enum Storage {
     Cpu(CpuStorage),

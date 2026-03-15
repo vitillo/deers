@@ -2,16 +2,21 @@
 
 use std::ops::{Index, IndexMut};
 
+/// The dimensions of a tensor (e.g. `[2, 3, 4]` for a 3-D tensor).
+///
+/// Can be created from tuples: `Shape::from((2, 3))` or from `Vec<usize>`.
 #[derive(Debug, PartialEq, PartialOrd, Clone)]
 pub struct Shape {
     shape: Vec<usize>,
 }
 
 impl Shape {
+    /// Creates a shape from a vector of dimension sizes.
     pub fn new(shape: Vec<usize>) -> Self {
         Self { shape }
     }
 
+    /// Returns the strides for a contiguous row-major layout with this shape.
     pub fn compact_strides(&self) -> Strides {
         let mut strides = vec![1isize; self.shape.len()];
         for i in (0..(self.shape.len() - 1)).rev() {
@@ -20,10 +25,12 @@ impl Shape {
         strides.into()
     }
 
+    /// Total number of elements (product of all dimensions).
     pub fn size(&self) -> usize {
         self.shape.iter().product()
     }
 
+    /// Number of dimensions.
     pub fn ndim(&self) -> usize {
         self.shape.len()
     }
@@ -69,6 +76,9 @@ impl_from_tuple!(Shape 0 usize);
 impl_from_tuple!(Shape 0 usize, 1 usize);
 impl_from_tuple!(Shape 0 usize, 1 usize, 2 usize);
 
+/// Per-dimension byte offsets that map logical indices to storage positions.
+///
+/// A stride of 0 indicates a broadcasted dimension.
 #[derive(Debug, PartialEq, PartialOrd, Clone)]
 pub struct Strides(pub Vec<isize>);
 
@@ -110,6 +120,11 @@ impl From<Vec<isize>> for Strides {
     }
 }
 
+/// Describes how a tensor's elements are laid out in memory.
+///
+/// Combines [`Shape`] (logical dimensions), [`Strides`] (memory stepping),
+/// and an offset into the storage buffer. View operations like `permute` and
+/// `broadcast` change the layout without copying data.
 #[derive(Debug, PartialEq, PartialOrd, Clone)]
 pub struct Layout {
     pub shape: Shape,
@@ -118,6 +133,7 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// Creates a layout with explicit shape, strides, and offset.
     pub fn new(shape: impl Into<Shape>, strides: impl Into<Strides>, offset: usize) -> Self {
         Self {
             shape: shape.into(),
@@ -126,22 +142,27 @@ impl Layout {
         }
     }
 
+    /// Returns the shape of this layout.
     pub fn shape(&self) -> &Shape {
         &self.shape
     }
 
+    /// Returns the strides of this layout.
     pub fn strides(&self) -> &Strides {
         &self.strides
     }
 
+    /// Total number of elements.
     pub fn size(&self) -> usize {
         self.shape.size()
     }
 
+    /// Number of dimensions.
     pub fn ndim(&self) -> usize {
         self.shape.ndim()
     }
 
+    /// Returns a new layout with dimensions reordered according to `axis`.
     pub fn permute(&self, axis: &Shape) -> Self {
         assert!(axis.iter().all(|x| *x < self.ndim()));
 
@@ -154,6 +175,7 @@ impl Layout {
         }
     }
 
+    /// Returns true if this layout is contiguous row-major (no gaps or reordering).
     pub fn is_compact(&self) -> bool {
         self.shape.compact_strides() == self.strides
     }

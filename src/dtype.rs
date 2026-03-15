@@ -2,6 +2,7 @@
 
 use crate::storage::CpuStorage;
 
+/// Supported tensor element types.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum DType {
     F16,
@@ -9,6 +10,7 @@ pub enum DType {
     F64,
 }
 
+/// Trait implemented by Rust types that can be stored in a tensor (f32, f64).
 pub trait WithDType: Sized + Copy {
     fn to_vec(storage: &CpuStorage) -> Vec<Self>;
     fn as_slice(storage: &CpuStorage) -> &[Self];
