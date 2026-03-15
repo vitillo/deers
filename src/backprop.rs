@@ -1,37 +1,43 @@
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use crate::error::Result;
 use crate::tensor::{Tensor, TensorId};
 
 impl Tensor {
+    /// Returns nodes in reverse topological order (output before inputs).
+    /// Uses DFS post-order + reverse so each node is processed only after
+    /// all its consumers have been processed during backward.
     fn sorted_nodes(&self) -> Vec<&Tensor> {
         if !self.requires_grad() {
             return vec![];
         }
 
-        let mut sorted_nodes = vec![];
+        let mut post_order = vec![];
         let mut visited = HashSet::new();
-        let mut queue = VecDeque::new();
-        queue.push_front(self);
-        sorted_nodes.push(self);
-        visited.insert(self.id());
 
-        while let Some(node) = queue.pop_back() {
+        fn dfs<'a>(
+            node: &'a Tensor,
+            visited: &mut HashSet<TensorId>,
+            post_order: &mut Vec<&'a Tensor>,
+        ) {
+            if !visited.insert(node.id()) {
+                return;
+            }
             if let Some(op) = node.op() {
                 for dep in op.dependencies() {
-                    if !dep.requires_grad() || !visited.insert(dep.id()) {
-                        continue;
+                    if dep.requires_grad() {
+                        dfs(dep, visited, post_order);
                     }
-
-                    sorted_nodes.push(dep);
-                    queue.push_front(dep);
                 }
             }
+            post_order.push(node);
         }
 
-        sorted_nodes
+        dfs(self, &mut visited, &mut post_order);
+        post_order.reverse();
+        post_order
     }
 
     /// Computes gradients for all tensors that require grad in this tensor's
