@@ -87,6 +87,17 @@ impl From<Vec<f64>> for CpuStorage {
 
 impl BackendStorage for CpuStorage {
     fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self> {
+        if l.is_compact() {
+            return match self {
+                CpuStorage::F32(data) => {
+                    let e = e as f32;
+                    Ok(CpuStorage::F32(data.iter().map(|v| v.powf(e)).collect()))
+                }
+                CpuStorage::F64(data) => {
+                    Ok(CpuStorage::F64(data.iter().map(|v| v.powf(e)).collect()))
+                }
+            };
+        }
         let shape: Vec<usize> = l.shape().iter().copied().collect();
         let strides: Vec<isize> = l.strides().iter().copied().collect();
         match self {
@@ -105,6 +116,16 @@ impl BackendStorage for CpuStorage {
     }
 
     fn unary_op<O: UnaryOp>(&self, op: O, l: &Layout) -> Result<Self> {
+        if l.is_compact() {
+            return match self {
+                CpuStorage::F32(data) => {
+                    Ok(CpuStorage::F32(data.iter().map(|v| op.f32(*v)).collect()))
+                }
+                CpuStorage::F64(data) => {
+                    Ok(CpuStorage::F64(data.iter().map(|v| op.f64(*v)).collect()))
+                }
+            };
+        }
         let shape: Vec<usize> = l.shape().iter().copied().collect();
         let strides: Vec<isize> = l.strides().iter().copied().collect();
         match self {
@@ -127,6 +148,17 @@ impl BackendStorage for CpuStorage {
         other: &Self,
         other_layout: &Layout,
     ) -> Result<Self> {
+        if layout.is_compact() && other_layout.is_compact() {
+            return match (self, other) {
+                (CpuStorage::F32(a), CpuStorage::F32(b)) => {
+                    Ok(CpuStorage::F32(a.iter().zip(b.iter()).map(|(a, b)| O::f32(*a, *b)).collect()))
+                }
+                (CpuStorage::F64(a), CpuStorage::F64(b)) => {
+                    Ok(CpuStorage::F64(a.iter().zip(b.iter()).map(|(a, b)| O::f64(*a, *b)).collect()))
+                }
+                _ => unreachable!(),
+            };
+        }
         let shape: Vec<usize> = layout.shape().iter().copied().collect();
         let a_strides: Vec<isize> = layout.strides().iter().copied().collect();
         let b_strides: Vec<isize> = other_layout.strides().iter().copied().collect();
