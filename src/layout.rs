@@ -179,6 +179,7 @@ impl Layout {
     pub fn is_compact(&self) -> bool {
         self.shape.compact_strides() == self.strides
     }
+
 }
 
 impl From<Shape> for Layout {

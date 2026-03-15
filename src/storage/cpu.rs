@@ -28,23 +28,47 @@ impl CpuStorage {
         }
     }
 
-    fn matmul_internal<
-        T: Default + Copy + std::ops::Mul + std::ops::AddAssign<<T as std::ops::Mul>::Output>,
-    >(
-        left: &[T],
-        right: &[T],
-        out: &mut [T],
-        m: usize,
-        n: usize,
-        p: usize,
-    ) {
-        // TODO: optimize loop by reordinger k with j
-        for i in 0..m {
-            for j in 0..p {
-                for k in 0..n {
-                    out[i * p + j] += left[i * n + k] * right[k * p + j];
-                }
-            }
+    fn gemm_f32(left: &[f32], right: &[f32], out: &mut [f32], m: usize, n: usize, p: usize) {
+        unsafe {
+            gemm::gemm(
+                m, p, n,
+                out.as_mut_ptr(),
+                1,          // dst_cs
+                p as isize, // dst_rs
+                false,      // read_dst
+                left.as_ptr(),
+                1,          // lhs_cs
+                n as isize, // lhs_rs
+                right.as_ptr(),
+                1,          // rhs_cs
+                p as isize, // rhs_rs
+                0.0,        // alpha (dst = alpha*dst + beta*lhs*rhs)
+                1.0,        // beta
+                false, false, false,
+                gemm::Parallelism::None,
+            );
+        }
+    }
+
+    fn gemm_f64(left: &[f64], right: &[f64], out: &mut [f64], m: usize, n: usize, p: usize) {
+        unsafe {
+            gemm::gemm(
+                m, p, n,
+                out.as_mut_ptr(),
+                1,
+                p as isize,
+                false,
+                left.as_ptr(),
+                1,
+                n as isize,
+                right.as_ptr(),
+                1,
+                p as isize,
+                0.0,
+                1.0,
+                false, false, false,
+                gemm::Parallelism::None,
+            );
         }
     }
 }
@@ -158,22 +182,21 @@ impl BackendStorage for CpuStorage {
     }
 
     fn copy_compact(&self, src_layout: &Layout, dst: &mut CpuStorage) -> Result<()> {
-        assert!(
-            src_layout.size() <= dst.len(),
-            "Destination storage has insufficient space"
-        );
+        // Tensor::compact() already no-ops for contiguous tensors, so this
+        // only runs on non-contiguous layouts (transposes, broadcasts, etc).
+        // Direct index computation avoids the overhead of the strided iterator.
+        let strides: Vec<usize> = src_layout.strides.0.iter().map(|&s| s as usize).collect();
+        let shape: Vec<usize> = (0..src_layout.ndim()).map(|i| src_layout.shape[i]).collect();
+        let offset = src_layout.offset;
 
-        match dst {
-            CpuStorage::F32(dst) => {
-                for (i, v) in self.iter::<f32>(src_layout).enumerate() {
-                    dst[i] = *v;
-                }
+        match (self, dst) {
+            (CpuStorage::F32(src), CpuStorage::F32(dst)) => {
+                copy_strided(src, dst, offset, &shape, &strides);
             }
-            CpuStorage::F64(dst) => {
-                for (i, v) in self.iter::<f64>(src_layout).enumerate() {
-                    dst[i] = *v;
-                }
+            (CpuStorage::F64(src), CpuStorage::F64(dst)) => {
+                copy_strided(src, dst, offset, &shape, &strides);
             }
+            _ => unreachable!(),
         }
 
         Ok(())
@@ -245,16 +268,46 @@ impl BackendStorage for CpuStorage {
         match (self, other) {
             (CpuStorage::F32(left), CpuStorage::F32(right)) => {
                 let mut out = vec![0.0; m * p];
-                CpuStorage::matmul_internal(left, right, &mut out, m, n, p);
+                CpuStorage::gemm_f32(left, right, &mut out, m, n, p);
                 Ok(CpuStorage::F32(out))
             }
             (CpuStorage::F64(left), CpuStorage::F64(right)) => {
                 let mut out = vec![0.0; m * p];
-                CpuStorage::matmul_internal(left, right, &mut out, m, n, p);
+                CpuStorage::gemm_f64(left, right, &mut out, m, n, p);
                 Ok(CpuStorage::F64(out))
             }
             (CpuStorage::F32(_), CpuStorage::F64(_)) => unreachable!(),
             (CpuStorage::F64(_), CpuStorage::F32(_)) => unreachable!(),
+        }
+    }
+}
+
+/// Copies a strided src into a contiguous dst using direct index computation.
+fn copy_strided<T: Copy>(src: &[T], dst: &mut [T], offset: usize, shape: &[usize], strides: &[usize]) {
+    // Recurse over dimensions, accumulating the source offset.
+    copy_strided_inner(src, dst, offset, shape, strides, &mut 0);
+}
+
+fn copy_strided_inner<T: Copy>(
+    src: &[T],
+    dst: &mut [T],
+    src_offset: usize,
+    shape: &[usize],
+    strides: &[usize],
+    dst_offset: &mut usize,
+) {
+    if shape.len() == 1 {
+        let size = shape[0];
+        let stride = strides[0];
+        for i in 0..size {
+            dst[*dst_offset] = src[src_offset + i * stride];
+            *dst_offset += 1;
+        }
+    } else {
+        let size = shape[0];
+        let stride = strides[0];
+        for i in 0..size {
+            copy_strided_inner(src, dst, src_offset + i * stride, &shape[1..], &strides[1..], dst_offset);
         }
     }
 }
