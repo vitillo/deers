@@ -3,7 +3,7 @@
 use std::borrow::Borrow;
 use std::ops::{Add, Deref, Div, Mul, Neg, Sub};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use rand::Rng;
 
@@ -114,6 +114,11 @@ impl Tensor {
 
     pub(crate) fn storage_clone(&self) -> Arc<RwLock<Storage>> {
         self.storage.clone()
+    }
+
+    /// Returns a write guard to the underlying storage.
+    pub(crate) fn storage_mut(&self) -> RwLockWriteGuard<'_, Storage> {
+        self.storage.write().unwrap()
     }
 
     /// Returns the layout (shape, strides, offset) of this tensor.
