@@ -34,7 +34,7 @@ impl Linear {
 impl Module for Linear {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let out = x.matmul(&self.weight);
-        Ok(out.broadcast_add(&self.bias))
+        Ok(&out + &*self.bias)
     }
 
     fn vars(&self) -> Vec<Var> {

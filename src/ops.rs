@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use std::iter::zip;
 use std::sync::{Arc, RwLock};
 use std::{fmt, iter};
 
@@ -35,7 +34,7 @@ pub struct Neg {
 
 impl Neg {
     pub fn new(arg: Tensor) -> Result<Self> {
-        Ok(Self { arg: arg.compact() })
+        Ok(Self { arg })
     }
 }
 
@@ -46,7 +45,7 @@ impl TensorOp for Neg {
                 .storage()
                 .unary_op(storage::Neg, self.arg.layout())?,
         ));
-        let layout = self.arg.layout().clone();
+        let layout = Layout::from(self.arg.layout().shape().clone());
         Ok(Tensor::new(
             storage,
             layout,
@@ -77,10 +76,7 @@ pub struct EWiseAdd {
 impl EWiseAdd {
     pub fn new(arg1: Tensor, arg2: Tensor) -> Result<Self> {
         assert!(arg1.layout().shape() == arg2.layout().shape());
-        Ok(Self {
-            arg1: arg1.compact(),
-            arg2: arg2.compact(),
-        })
+        Ok(Self { arg1, arg2 })
     }
 }
 
@@ -95,7 +91,7 @@ impl TensorOp for EWiseAdd {
         ));
         Ok(Tensor::new(
             storage,
-            self.arg1.layout().clone(),
+            Layout::from(self.arg1.layout().shape().clone()),
             self.arg1.device(),
             self.arg1.dtype(),
             false,
@@ -118,131 +114,6 @@ impl TensorOp for EWiseAdd {
     }
 }
 
-/// Fused broadcast addition: adds two tensors of different shapes without
-/// materializing the broadcast. Computes broadcast strides so the storage
-/// layer can iterate directly without copying.
-#[derive(Debug)]
-pub struct BroadcastAdd {
-    arg1: Tensor,
-    arg2: Tensor,
-    out_shape: Shape,
-    a_strides: Vec<isize>,
-    b_strides: Vec<isize>,
-    /// For each input, the axes that were broadcast (needed for backward).
-    a_broadcast_axes: Vec<usize>,
-    b_broadcast_axes: Vec<usize>,
-}
-
-impl BroadcastAdd {
-    pub fn new(arg1: Tensor, arg2: Tensor) -> Result<Self> {
-        let s1: Vec<usize> = arg1.layout().shape().iter().copied().collect();
-        let s2: Vec<usize> = arg2.layout().shape().iter().copied().collect();
-        let st1: Vec<isize> = arg1.layout().strides().iter().copied().collect();
-        let st2: Vec<isize> = arg2.layout().strides().iter().copied().collect();
-
-        let ndim = s1.len().max(s2.len());
-
-        // Pad shapes and strides from the left (numpy-style broadcasting)
-        let pad1 = ndim - s1.len();
-        let pad2 = ndim - s2.len();
-
-        let mut out_shape = Vec::with_capacity(ndim);
-        let mut a_strides = Vec::with_capacity(ndim);
-        let mut b_strides = Vec::with_capacity(ndim);
-        let mut a_broadcast_axes = vec![];
-        let mut b_broadcast_axes = vec![];
-
-        for i in 0..ndim {
-            let d1 = if i < pad1 { 1 } else { s1[i - pad1] };
-            let d2 = if i < pad2 { 1 } else { s2[i - pad2] };
-            let stride1 = if i < pad1 { 0 } else { st1[i - pad1] };
-            let stride2 = if i < pad2 { 0 } else { st2[i - pad2] };
-
-            assert!(d1 == d2 || d1 == 1 || d2 == 1, "incompatible shapes for broadcast");
-
-            let out_dim = d1.max(d2);
-            out_shape.push(out_dim);
-
-            if d1 == 1 && out_dim > 1 {
-                a_strides.push(0);
-                a_broadcast_axes.push(i);
-            } else {
-                a_strides.push(stride1);
-            }
-
-            if d2 == 1 && out_dim > 1 {
-                b_strides.push(0);
-                b_broadcast_axes.push(i);
-            } else {
-                b_strides.push(stride2);
-            }
-        }
-
-        Ok(Self {
-            arg1,
-            arg2,
-            out_shape: out_shape.into(),
-            a_strides,
-            b_strides,
-            a_broadcast_axes,
-            b_broadcast_axes,
-        })
-    }
-}
-
-impl TensorOp for BroadcastAdd {
-    fn forward(self) -> Result<Tensor> {
-        let storage = Arc::new(RwLock::new(self.arg1.storage().broadcast_add(
-            self.arg1.layout(),
-            &self.arg2.storage(),
-            self.arg2.layout(),
-            &self.out_shape.iter().copied().collect::<Vec<_>>(),
-            &self.a_strides,
-            &self.b_strides,
-        )?));
-        Ok(Tensor::new(
-            storage,
-            Layout::from(self.out_shape.clone()),
-            self.arg1.device(),
-            self.arg1.dtype(),
-            false,
-            Some(Box::new(self)),
-        ))
-    }
-
-    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        // For arg1: sum along axes that were broadcast, reshape to original shape
-        if self.a_broadcast_axes.is_empty() {
-            let grad_sum = store.get_or_insert_zero(&self.arg1);
-            *grad_sum = &*grad_sum + out_grad;
-        } else {
-            let grad = out_grad
-                .sum(self.a_broadcast_axes.clone(), false)
-                .reshape(self.arg1.layout().shape().clone());
-            let grad_sum = store.get_or_insert_zero(&self.arg1);
-            *grad_sum = &*grad_sum + grad;
-        }
-
-        // For arg2: sum along axes that were broadcast, reshape to original shape
-        if self.b_broadcast_axes.is_empty() {
-            let grad_sum = store.get_or_insert_zero(&self.arg2);
-            *grad_sum = &*grad_sum + out_grad;
-        } else {
-            let grad = out_grad
-                .sum(self.b_broadcast_axes.clone(), false)
-                .reshape(self.arg2.layout().shape().clone());
-            let grad_sum = store.get_or_insert_zero(&self.arg2);
-            *grad_sum = &*grad_sum + grad;
-        }
-
-        Ok(())
-    }
-
-    fn dependencies(&self) -> Vec<&Tensor> {
-        vec![&self.arg1, &self.arg2]
-    }
-}
-
 #[derive(Debug)]
 pub struct EWiseMul {
     arg1: Tensor,
@@ -252,10 +123,7 @@ pub struct EWiseMul {
 impl EWiseMul {
     pub fn new(arg1: Tensor, arg2: Tensor) -> Result<Self> {
         assert!(arg1.layout().shape() == arg2.layout().shape());
-        Ok(Self {
-            arg1: arg1.compact(),
-            arg2: arg2.compact(),
-        })
+        Ok(Self { arg1, arg2 })
     }
 }
 
@@ -270,7 +138,7 @@ impl TensorOp for EWiseMul {
         ));
         Ok(Tensor::new(
             storage,
-            self.arg1.layout().clone(),
+            Layout::from(self.arg1.layout().shape().clone()),
             self.arg1.device(),
             self.arg1.dtype(),
             false,
@@ -302,10 +170,7 @@ pub struct EWiseDiv {
 impl EWiseDiv {
     pub fn new(arg1: Tensor, arg2: Tensor) -> Result<Self> {
         assert!(arg1.layout().shape() == arg2.layout().shape());
-        Ok(Self {
-            arg1: arg1.compact(),
-            arg2: arg2.compact(),
-        })
+        Ok(Self { arg1, arg2 })
     }
 }
 
@@ -320,7 +185,7 @@ impl TensorOp for EWiseDiv {
         ));
         Ok(Tensor::new(
             storage,
-            self.arg1.layout().clone(),
+            Layout::from(self.arg1.layout().shape().clone()),
             self.arg1.device(),
             self.arg1.dtype(),
             false,
@@ -351,10 +216,7 @@ pub struct EWisePowf {
 impl EWisePowf {
     pub fn new(arg: Tensor, e: Tensor) -> Result<Self> {
         assert!(arg.layout().shape() == e.layout().shape());
-        Ok(Self {
-            arg: arg.compact(),
-            e: e.compact(),
-        })
+        Ok(Self { arg, e })
     }
 }
 
@@ -369,7 +231,7 @@ impl TensorOp for EWisePowf {
         ));
         Ok(Tensor::new(
             storage,
-            self.arg.layout().clone(),
+            Layout::from(self.arg.layout().shape().clone()),
             self.arg.device(),
             self.arg.dtype(),
             false,
@@ -401,7 +263,7 @@ pub struct EWiseLog {
 
 impl EWiseLog {
     pub fn new(arg: Tensor) -> Result<Self> {
-        Ok(Self { arg: arg.compact() })
+        Ok(Self { arg })
     }
 }
 
@@ -414,7 +276,7 @@ impl TensorOp for EWiseLog {
         ));
         Ok(Tensor::new(
             storage,
-            self.arg.layout().clone(),
+            Layout::from(self.arg.layout().shape().clone()),
             self.arg.device(),
             self.arg.dtype(),
             false,
@@ -440,7 +302,7 @@ pub struct EWiseExp {
 
 impl EWiseExp {
     pub fn new(arg: Tensor) -> Result<Self> {
-        Ok(Self { arg: arg.compact() })
+        Ok(Self { arg })
     }
 }
 
@@ -453,7 +315,7 @@ impl TensorOp for EWiseExp {
         ));
         Ok(Tensor::new(
             storage,
-            self.arg.layout().clone(),
+            Layout::from(self.arg.layout().shape().clone()),
             self.arg.device(),
             self.arg.dtype(),
             false,
@@ -479,7 +341,7 @@ pub struct Relu {
 
 impl Relu {
     pub fn new(arg: Tensor) -> Result<Self> {
-        Ok(Self { arg: arg.compact() })
+        Ok(Self { arg })
     }
 }
 
@@ -492,7 +354,7 @@ impl TensorOp for Relu {
         ));
         Ok(Tensor::new(
             storage,
-            self.arg.layout().clone(),
+            Layout::from(self.arg.layout().shape().clone()),
             self.arg.device(),
             self.arg.dtype(),
             false,
@@ -509,7 +371,7 @@ impl TensorOp for Relu {
         ));
         let mask = Tensor::new(
             mask_storage,
-            self.arg.layout().clone(),
+            Layout::from(self.arg.layout().shape().clone()),
             self.arg.device(),
             self.arg.dtype(),
             false,
@@ -533,10 +395,7 @@ pub struct ScalarAdd {
 
 impl ScalarAdd {
     pub fn new(arg: Tensor, scalar: f64) -> Result<Self> {
-        Ok(Self {
-            arg: arg.compact(),
-            scalar,
-        })
+        Ok(Self { arg, scalar })
     }
 }
 
@@ -549,7 +408,7 @@ impl TensorOp for ScalarAdd {
         ));
         Ok(Tensor::new(
             storage,
-            self.arg.layout().clone(),
+            Layout::from(self.arg.layout().shape().clone()),
             self.arg.device(),
             self.arg.dtype(),
             false,
@@ -577,10 +436,7 @@ pub struct ScalarMul {
 
 impl ScalarMul {
     pub fn new(arg: Tensor, scalar: f64) -> Result<Self> {
-        Ok(Self {
-            arg: arg.compact(),
-            scalar,
-        })
+        Ok(Self { arg, scalar })
     }
 }
 
@@ -593,7 +449,7 @@ impl TensorOp for ScalarMul {
         ));
         Ok(Tensor::new(
             storage,
-            self.arg.layout().clone(),
+            Layout::from(self.arg.layout().shape().clone()),
             self.arg.device(),
             self.arg.dtype(),
             false,
@@ -622,10 +478,7 @@ pub struct ScalarPowf {
 
 impl ScalarPowf {
     pub fn new(arg: Tensor, e: f64) -> Result<Self> {
-        Ok(Self {
-            arg: arg.compact(),
-            e,
-        })
+        Ok(Self { arg, e })
     }
 }
 
@@ -636,7 +489,7 @@ impl TensorOp for ScalarPowf {
         ));
         Ok(Tensor::new(
             storage,
-            self.arg.layout().clone(),
+            Layout::from(self.arg.layout().shape().clone()),
             self.arg.device(),
             self.arg.dtype(),
             false,
@@ -717,7 +570,7 @@ impl TensorOp for Broadcast {
         new_strides.extend((0..shape_diff).map(|_| 0));
         new_strides.extend(self.arg.layout().strides().iter());
 
-        for (i, (new_dim, old_dim)) in zip(self.new_shape.iter(), old_shape.iter()).enumerate() {
+        for (i, (new_dim, old_dim)) in self.new_shape.iter().zip(old_shape.iter()).enumerate() {
             if *old_dim == 1 {
                 new_strides[i] = 0;
             } else if old_dim != new_dim {
@@ -746,7 +599,7 @@ impl TensorOp for Broadcast {
             .collect();
 
         // Find axes that were broadcasted
-        let axes: Vec<_> = zip(shape, self.new_shape.iter().copied())
+        let axes: Vec<_> = shape.into_iter().zip(self.new_shape.iter().copied())
             .enumerate()
             .filter(|(_, (o, n))| o != n)
             .map(|(i, _)| i)
