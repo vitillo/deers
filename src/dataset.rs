@@ -7,6 +7,10 @@ use crate::error::Result;
 
 use crate::{Device, Tensor};
 
+/// The MNIST handwritten digit dataset (60k train + 10k test images).
+///
+/// Images are `(N, 28, 28)` tensors with pixel values normalized to `[0, 1]`.
+/// Labels are `(N,)` tensors with integer class values `0..=9` stored as f32.
 pub struct MNISTDataset {
     pub train_images: Tensor,
     pub train_labels: Tensor,
@@ -55,6 +59,7 @@ impl MNISTDataset {
         Ok(Tensor::from_vec(labels, (num_labels,), Device::Cpu))
     }
 
+    /// Loads MNIST from IDX files in `data/mnist/`.
     pub fn load() -> Result<Self> {
         let train_images = Self::parse_images(Path::new("data/mnist/train-images-idx3-ubyte"))?;
         let train_labels = Self::parse_labels(Path::new("data/mnist/train-labels-idx1-ubyte"))?;

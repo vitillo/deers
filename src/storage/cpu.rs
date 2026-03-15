@@ -9,6 +9,7 @@ use crate::{
 
 use super::ReduceOp;
 
+/// CPU-backed tensor storage, holding data as a flat `Vec` of f32 or f64.
 #[derive(Debug, Clone)]
 pub enum CpuStorage {
     F32(Vec<f32>),

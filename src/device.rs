@@ -5,7 +5,7 @@ use crate::{
     storage::{CpuStorage, Storage},
 };
 
-/// A device is responsible for allocating memory for arrays
+/// The compute device where tensor data is stored and operations run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Device {
     Cpu,
@@ -13,6 +13,7 @@ pub enum Device {
 }
 
 impl Device {
+    /// Allocates a zero-filled storage buffer of `size` elements.
     pub fn zeros(&self, size: usize, dtype: DType) -> Storage {
         match (self, dtype) {
             (Device::Cpu, DType::F32) => Storage::Cpu(CpuStorage::F32(vec![0.0; size])),
@@ -22,6 +23,7 @@ impl Device {
         }
     }
 
+    /// Allocates a storage buffer of `size` elements filled with ones.
     pub fn ones(&self, size: usize, dtype: DType) -> Storage {
         match (self, dtype) {
             (Device::Cpu, DType::F32) => Storage::Cpu(CpuStorage::F32(vec![1.0; size])),

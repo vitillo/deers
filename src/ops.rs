@@ -10,12 +10,21 @@ use crate::layout::{Layout, Shape};
 use crate::storage::{self, BackendStorage, ReduceMax, ReduceSum};
 use crate::tensor::Tensor;
 
+/// An operator in the computation graph with forward and backward passes.
+///
+/// Each operator stores its input tensors and implements:
+/// - `forward`: computes the output tensor and records itself in the graph.
+/// - `backward`: given the output gradient, accumulates gradients for each input.
+/// - `dependencies`: returns references to input tensors (for topological sorting).
 pub trait TensorOp: fmt::Debug + Send + Sync {
+    /// Executes the forward computation and returns the result tensor.
     fn forward(self) -> Result<Tensor>;
 
-    /// Compute partial adjoint for each input value for a given output adjoint
+    /// Computes partial gradients for each input given the output gradient `out_grad`,
+    /// accumulating them in `store`.
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()>;
 
+    /// Returns references to the input tensors this op depends on.
     fn dependencies(&self) -> Vec<&Tensor>;
 }
 

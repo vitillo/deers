@@ -32,6 +32,10 @@ impl Tensor {
         sorted_nodes
     }
 
+    /// Computes gradients for all tensors that require grad in this tensor's
+    /// computation graph via reverse-mode automatic differentiation.
+    ///
+    /// Returns a [`GradientStore`] mapping each tensor's [`TensorId`] to its gradient.
     pub fn backward(&self) -> Result<GradientStore> {
         let mut grads = GradientStore::new();
         grads.get_or_insert_with(self.id(), || Tensor::ones_like(self));
@@ -48,18 +52,24 @@ impl Tensor {
     }
 }
 
+/// Stores computed gradients, keyed by [`TensorId`].
+///
+/// Returned by [`Tensor::backward`]. Use [`get`](GradientStore::get) with a
+/// tensor's id to retrieve its gradient.
 #[derive(Debug)]
 pub struct GradientStore {
     store: HashMap<TensorId, Tensor>,
 }
 
 impl GradientStore {
+    /// Creates an empty gradient store.
     pub fn new() -> Self {
         Self {
             store: HashMap::new(),
         }
     }
 
+    /// Returns the gradient for the given tensor id, if it exists.
     pub fn get(&self, id: TensorId) -> Option<Tensor> {
         self.store.get(&id).cloned()
     }
@@ -78,6 +88,7 @@ impl GradientStore {
         self.store.insert(id, tensor);
     }
 
+    /// Returns the number of stored gradients.
     pub fn len(&self) -> usize {
         self.store.len()
     }

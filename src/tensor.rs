@@ -14,6 +14,7 @@ use crate::layout::{Layout, Shape};
 use crate::ops::{self, TensorOp};
 use crate::storage::{BackendStorage, CpuStorage, Storage};
 
+/// Unique identifier for a tensor, used to look up gradients after [`Tensor::backward`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TensorId(usize);
 
@@ -28,6 +29,15 @@ pub struct TensorInternal {
     requires_grad: bool,
 }
 
+/// A multi-dimensional array with optional automatic differentiation.
+///
+/// Tensors are reference-counted (`Arc`-wrapped) so cloning is cheap and
+/// shares the underlying storage. Operations on tensors build a computation
+/// graph that can be traversed with [`backward`](Tensor::backward) to
+/// compute gradients.
+///
+/// Arithmetic operators (`+`, `-`, `*`, `/`) work element-wise on tensors
+/// of the same shape, or between a tensor and an `f64` scalar.
 #[derive(Clone, Debug)]
 pub struct Tensor(Arc<TensorInternal>);
 
@@ -87,14 +97,17 @@ impl Tensor {
         )
     }
 
+    /// Returns the operation that produced this tensor, if any.
     pub fn op(&self) -> &Option<Box<dyn TensorOp>> {
         &self.op
     }
 
+    /// Returns this tensor's unique identifier.
     pub fn id(&self) -> TensorId {
         self.id
     }
 
+    /// Returns a read guard to the underlying storage.
     pub fn storage(&self) -> RwLockReadGuard<'_, Storage> {
         self.storage.read().unwrap()
     }
@@ -103,22 +116,29 @@ impl Tensor {
         self.storage.clone()
     }
 
+    /// Returns the layout (shape, strides, offset) of this tensor.
     pub fn layout(&self) -> &Layout {
         &self.layout
     }
 
+    /// Returns the data type (F32, F64) of this tensor.
     pub fn dtype(&self) -> DType {
         self.dtype
     }
 
+    /// Returns the device (CPU, CUDA) where this tensor is stored.
     pub fn device(&self) -> Device {
         self.device
     }
 
+    /// Returns whether this tensor tracks gradients.
     pub fn requires_grad(&self) -> bool {
         self.requires_grad
     }
 
+    /// Enables gradient tracking for this tensor. This is the equivalent of
+    /// PyTorch's `requires_grad_(True)`. Tensors produced by operations on an
+    /// attached tensor will also track gradients.
     pub fn attach(self) -> Tensor {
         if self.requires_grad {
             return self.clone();
@@ -134,6 +154,7 @@ impl Tensor {
         )
     }
 
+    /// Creates a tensor filled with zeros.
     pub fn zeros(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
         let storage = Arc::new(RwLock::new(device.zeros(shape.size(), dtype)));
@@ -141,6 +162,7 @@ impl Tensor {
         Tensor::new(storage, layout, device, dtype, false, None)
     }
 
+    /// Creates a tensor filled with ones.
     pub fn ones(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
         let storage = Arc::new(RwLock::new(device.ones(shape.size(), dtype)));
@@ -148,6 +170,7 @@ impl Tensor {
         Tensor::new(storage, layout, device, dtype, false, None)
     }
 
+    /// Creates a tensor from a `Vec<f32>` or `Vec<f64>` with the given shape.
     pub fn from_vec(vec: impl Into<CpuStorage>, shape: impl Into<Shape>, device: Device) -> Tensor {
         assert_eq!(
             device,
@@ -213,10 +236,12 @@ impl Tensor {
         Tensor::new(Arc::new(RwLock::new(storage)), layout, device, dtype, false, None)
     }
 
+    /// Copies the tensor data into a flat `Vec`, respecting strides.
     pub fn to_vec<S: WithDType>(&self) -> Result<Vec<S>> {
         Ok(self.storage().to_vec(&self.layout))
     }
 
+    /// Creates a tensor of ones with the same shape, dtype, and device.
     pub fn ones_like(&self) -> Tensor {
         Tensor::new(
             Arc::new(RwLock::new(
@@ -230,6 +255,7 @@ impl Tensor {
         )
     }
 
+    /// Creates a tensor of zeros with the same shape, dtype, and device.
     pub fn zeros_like(&self) -> Tensor {
         Tensor::new(
             Arc::new(RwLock::new(
@@ -243,24 +269,28 @@ impl Tensor {
         )
     }
 
+    /// Reorders the dimensions of the tensor. Does not copy data.
     pub fn permute(&self, axis: impl Into<Shape>) -> Tensor {
         ops::Permute::new(self.clone(), axis.into())
             .forward()
             .unwrap()
     }
 
+    /// Expands dimensions of size 1 to match `new_shape`. Does not copy data.
     pub fn broadcast(&self, new_shape: impl Into<Shape>) -> Tensor {
         ops::Broadcast::new(self.clone(), new_shape.into())
             .forward()
             .unwrap()
     }
 
+    /// Returns a view with a different shape but the same total number of elements.
     pub fn reshape(&self, new_shape: impl Into<Shape>) -> Tensor {
         ops::Reshape::new(self.clone(), new_shape.into())
             .forward()
             .unwrap()
     }
 
+    /// Swaps two dimensions. Defaults to the last two if `axes` is `None`.
     pub fn transpose(&self, axes: Option<(usize, usize)>) -> Tensor {
         let axes = axes.unwrap_or((self.layout().ndim() - 2, self.layout().ndim() - 1));
         assert!(
@@ -273,22 +303,26 @@ impl Tensor {
         self.permute(reshaped_axes)
     }
 
+    /// Sums elements along the given axes. If `keep_dims`, reduced axes become size 1.
     pub fn sum(&self, axis: Vec<usize>, keep_dims: bool) -> Tensor {
         ops::Sum::new(self.clone(), axis, keep_dims)
             .forward()
             .unwrap()
     }
 
+    /// Returns the maximum along the given axes. Backward is not yet implemented.
     pub fn max(&self, axis: Vec<usize>, keep_dims: bool) -> Tensor {
         ops::Max::new(self.clone(), axis, keep_dims)
             .forward()
             .unwrap()
     }
 
+    /// Returns true if the tensor's memory layout is contiguous (row-major).
     pub fn is_compact(&self) -> bool {
         self.layout.is_compact()
     }
 
+    /// Returns a contiguous copy of the tensor. No-op if already compact.
     pub fn compact(&self) -> Tensor {
         if self.is_compact() {
             return self.clone();
@@ -296,6 +330,7 @@ impl Tensor {
         ops::Compact::new(self.clone()).forward().unwrap()
     }
 
+    /// Element-wise power: `self^e`.
     pub fn powf<B: Borrow<Tensor>>(&self, e: B) -> Tensor {
         ops::EWisePowf::new(self.clone(), e.borrow().clone())
             .unwrap()
@@ -303,14 +338,17 @@ impl Tensor {
             .unwrap()
     }
 
+    /// Element-wise natural logarithm.
     pub fn log(&self) -> Tensor {
         ops::EWiseLog::new(self.clone()).unwrap().forward().unwrap()
     }
 
+    /// Element-wise exponential.
     pub fn exp(&self) -> Tensor {
         ops::EWiseExp::new(self.clone()).unwrap().forward().unwrap()
     }
 
+    /// Raises every element to the scalar power `e`.
     pub fn scalar_powf(&self, e: f64) -> Tensor {
         ops::ScalarPowf::new(self.clone(), e)
             .unwrap()
@@ -318,6 +356,7 @@ impl Tensor {
             .unwrap()
     }
 
+    /// 2-D matrix multiplication: `(m, n) @ (n, p) -> (m, p)`.
     pub fn matmul(&self, other: &Tensor) -> Tensor {
         ops::MatMul::new(self.clone(), other.clone())
             .unwrap()
@@ -325,10 +364,12 @@ impl Tensor {
             .unwrap()
     }
 
+    /// Element-wise ReLU: `max(0, x)`.
     pub fn relu(&self) -> Tensor {
         ops::Relu::new(self.clone()).unwrap().forward().unwrap()
     }
 
+    /// Numerically stable `log(sum(exp(x)))` along the given axes.
     pub fn log_sum_exp(&self, axes: Vec<usize>) -> Tensor {
         ops::LogSumExp::new(self.clone(), axes).forward().unwrap()
     }
