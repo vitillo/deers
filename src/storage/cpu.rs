@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, iter::zip};
+use std::borrow::Borrow;
 
 use crate::{
     dtype::{DType, WithDType},
@@ -87,31 +87,36 @@ impl From<Vec<f64>> for CpuStorage {
 
 impl BackendStorage for CpuStorage {
     fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self> {
-        assert!(l.is_compact());
-
+        let shape: Vec<usize> = l.shape().iter().copied().collect();
+        let strides: Vec<isize> = l.strides().iter().copied().collect();
         match self {
             CpuStorage::F32(data) => {
-                let array = data.iter().map(|v| v.powf(e as f32)).collect::<Vec<_>>();
-                Ok(CpuStorage::F32(array))
+                let e = e as f32;
+                let mut out = vec![0.0f32; l.size()];
+                strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| v.powf(e));
+                Ok(CpuStorage::F32(out))
             }
             CpuStorage::F64(data) => {
-                let array = data.iter().map(|v| v.powf(e)).collect::<Vec<_>>();
-                Ok(CpuStorage::F64(array))
+                let mut out = vec![0.0f64; l.size()];
+                strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| v.powf(e));
+                Ok(CpuStorage::F64(out))
             }
         }
     }
 
     fn unary_op<O: UnaryOp>(&self, op: O, l: &Layout) -> Result<Self> {
-        assert!(l.is_compact());
-
+        let shape: Vec<usize> = l.shape().iter().copied().collect();
+        let strides: Vec<isize> = l.strides().iter().copied().collect();
         match self {
             CpuStorage::F32(data) => {
-                let array = data.iter().map(|v| op.f32(*v)).collect::<Vec<_>>();
-                Ok(CpuStorage::F32(array))
+                let mut out = vec![0.0f32; l.size()];
+                strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| op.f32(v));
+                Ok(CpuStorage::F32(out))
             }
             CpuStorage::F64(data) => {
-                let array = data.iter().map(|v| op.f64(*v)).collect::<Vec<_>>();
-                Ok(CpuStorage::F64(array))
+                let mut out = vec![0.0f64; l.size()];
+                strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| op.f64(v));
+                Ok(CpuStorage::F64(out))
             }
         }
     }
@@ -122,24 +127,27 @@ impl BackendStorage for CpuStorage {
         other: &Self,
         other_layout: &Layout,
     ) -> Result<Self> {
-        assert!(layout.is_compact() && other_layout.is_compact());
-
+        let shape: Vec<usize> = layout.shape().iter().copied().collect();
+        let a_strides: Vec<isize> = layout.strides().iter().copied().collect();
+        let b_strides: Vec<isize> = other_layout.strides().iter().copied().collect();
         match (self, other) {
-            (CpuStorage::F32(v), CpuStorage::F32(w)) => {
-                let array = v
-                    .iter()
-                    .zip(w.iter())
-                    .map(|(v, w)| O::f32(*v, *w))
-                    .collect::<Vec<_>>();
-                Ok(CpuStorage::F32(array))
+            (CpuStorage::F32(a), CpuStorage::F32(b)) => {
+                let mut out = vec![0.0f32; layout.size()];
+                strided_binary_op(
+                    a, layout.offset, &a_strides,
+                    b, other_layout.offset, &b_strides,
+                    &mut out, &shape, O::f32,
+                );
+                Ok(CpuStorage::F32(out))
             }
-            (CpuStorage::F64(v), CpuStorage::F64(w)) => {
-                let array = v
-                    .iter()
-                    .zip(w.iter())
-                    .map(|(v, w)| O::f64(*v, *w))
-                    .collect::<Vec<_>>();
-                Ok(CpuStorage::F64(array))
+            (CpuStorage::F64(a), CpuStorage::F64(b)) => {
+                let mut out = vec![0.0f64; layout.size()];
+                strided_binary_op(
+                    a, layout.offset, &a_strides,
+                    b, other_layout.offset, &b_strides,
+                    &mut out, &shape, O::f64,
+                );
+                Ok(CpuStorage::F64(out))
             }
             (CpuStorage::F32(_), CpuStorage::F64(_)) => unreachable!(),
             (CpuStorage::F64(_), CpuStorage::F32(_)) => unreachable!(),
@@ -259,39 +267,6 @@ impl BackendStorage for CpuStorage {
         }
     }
 
-    fn broadcast_add(
-        &self,
-        layout: &Layout,
-        other: &Self,
-        other_layout: &Layout,
-        out_shape: &[usize],
-        a_strides: &[isize],
-        b_strides: &[isize],
-    ) -> Result<Self> {
-        let out_size: usize = out_shape.iter().product();
-        match (self, other) {
-            (CpuStorage::F32(a), CpuStorage::F32(b)) => {
-                let mut out = vec![0.0f32; out_size];
-                strided_add(
-                    a, layout.offset, a_strides,
-                    b, other_layout.offset, b_strides,
-                    &mut out, out_shape,
-                );
-                Ok(CpuStorage::F32(out))
-            }
-            (CpuStorage::F64(a), CpuStorage::F64(b)) => {
-                let mut out = vec![0.0f64; out_size];
-                strided_add(
-                    a, layout.offset, a_strides,
-                    b, other_layout.offset, b_strides,
-                    &mut out, out_shape,
-                );
-                Ok(CpuStorage::F64(out))
-            }
-            _ => unreachable!(),
-        }
-    }
-
     fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self> {
         assert!(layout.is_compact() && layout_other.is_compact());
         let n = layout.shape[layout.shape.ndim() - 1]; // cols of self, rows of other
@@ -315,38 +290,64 @@ impl BackendStorage for CpuStorage {
     }
 }
 
-/// Adds two strided arrays element-wise into a compact output.
-///
-/// Each input has its own offset and strides (which may include zeros for broadcast dims).
-/// The output shape must be the broadcast-compatible shape of both inputs.
-fn strided_add<T: Copy + std::ops::Add<Output = T>>(
+/// Applies a binary function to two strided arrays, writing to a compact output.
+fn strided_binary_op<T: Copy, F: Fn(T, T) -> T>(
     a: &[T], a_off: usize, a_strides: &[isize],
     b: &[T], b_off: usize, b_strides: &[isize],
-    out: &mut [T],
-    shape: &[usize],
+    out: &mut [T], shape: &[usize], f: F,
 ) {
-    strided_add_inner(a, a_off, a_strides, b, b_off, b_strides, out, &mut 0, shape);
+    strided_binary_op_inner(a, a_off, a_strides, b, b_off, b_strides, out, &mut 0, shape, &f);
 }
 
-fn strided_add_inner<T: Copy + std::ops::Add<Output = T>>(
+fn strided_binary_op_inner<T: Copy, F: Fn(T, T) -> T>(
     a: &[T], a_off: usize, a_strides: &[isize],
     b: &[T], b_off: usize, b_strides: &[isize],
     out: &mut [T], out_off: &mut usize,
-    shape: &[usize],
+    shape: &[usize], f: &F,
 ) {
     if shape.len() == 1 {
         let (sa, sb) = (a_strides[0] as usize, b_strides[0] as usize);
         for i in 0..shape[0] {
-            out[*out_off] = a[a_off + i * sa] + b[b_off + i * sb];
+            out[*out_off] = f(a[a_off + i * sa], b[b_off + i * sb]);
             *out_off += 1;
         }
     } else {
         let (sa, sb) = (a_strides[0] as usize, b_strides[0] as usize);
         for i in 0..shape[0] {
-            strided_add_inner(
+            strided_binary_op_inner(
                 a, a_off + i * sa, &a_strides[1..],
                 b, b_off + i * sb, &b_strides[1..],
-                out, out_off, &shape[1..],
+                out, out_off, &shape[1..], f,
+            );
+        }
+    }
+}
+
+/// Applies a unary function to a strided array, writing to a compact output.
+fn strided_unary_op<T: Copy, F: Fn(T) -> T>(
+    a: &[T], a_off: usize, a_strides: &[isize],
+    out: &mut [T], shape: &[usize], f: F,
+) {
+    strided_unary_op_inner(a, a_off, a_strides, out, &mut 0, shape, &f);
+}
+
+fn strided_unary_op_inner<T: Copy, F: Fn(T) -> T>(
+    a: &[T], a_off: usize, a_strides: &[isize],
+    out: &mut [T], out_off: &mut usize,
+    shape: &[usize], f: &F,
+) {
+    if shape.len() == 1 {
+        let sa = a_strides[0] as usize;
+        for i in 0..shape[0] {
+            out[*out_off] = f(a[a_off + i * sa]);
+            *out_off += 1;
+        }
+    } else {
+        let sa = a_strides[0] as usize;
+        for i in 0..shape[0] {
+            strided_unary_op_inner(
+                a, a_off + i * sa, &a_strides[1..],
+                out, out_off, &shape[1..], f,
             );
         }
     }
@@ -415,7 +416,7 @@ impl<'a, D: WithDType> Iter<'a, D> {
 
     fn get_item(&self) -> &'a D {
         let mut offset = self.layout.offset as isize;
-        for (idx, stride) in zip(&self.cursor, &self.layout.strides) {
+        for (idx, stride) in self.cursor.iter().zip(&self.layout.strides) {
             let idx = *idx as isize;
             offset += idx * stride;
         }

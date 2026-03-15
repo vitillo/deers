@@ -25,16 +25,16 @@ fn main() {
         let targets = Tensor::from_vec(targets_f32.clone(), (batch_size,), Device::Cpu);
 
         // Warmup
-        let h = x.matmul(&w1).broadcast_add(&b1).relu();
-        let logits = h.matmul(&w2).broadcast_add(&b2);
+        let h = (x.matmul(&w1) + &*b1).relu();
+        let logits = h.matmul(&w2) + &*b2;
         let loss = deers::loss::cross_entropy(&logits, &targets);
         let _ = loss.backward();
 
         // Forward benchmark
         let t0 = Instant::now();
         for _ in 0..iterations {
-            let h = x.matmul(&w1).broadcast_add(&b1).relu();
-            let logits = h.matmul(&w2).broadcast_add(&b2);
+            let h = (x.matmul(&w1) + &*b1).relu();
+            let logits = h.matmul(&w2) + &*b2;
             let _loss = deers::loss::cross_entropy(&logits, &targets);
         }
         let fwd_us = t0.elapsed().as_micros() as f64 / iterations as f64;
@@ -42,8 +42,8 @@ fn main() {
         // Forward + backward benchmark
         let t0 = Instant::now();
         for _ in 0..iterations {
-            let h = x.matmul(&w1).broadcast_add(&b1).relu();
-            let logits = h.matmul(&w2).broadcast_add(&b2);
+            let h = (x.matmul(&w1) + &*b1).relu();
+            let logits = h.matmul(&w2) + &*b2;
             let loss = deers::loss::cross_entropy(&logits, &targets);
             let _ = loss.backward();
         }

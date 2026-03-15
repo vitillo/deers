@@ -183,15 +183,6 @@ pub trait BackendStorage: Sized {
         layout_other: &Layout,
     ) -> Result<Self>;
     fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()>;
-    fn broadcast_add(
-        &self,
-        layout: &Layout,
-        other: &Self,
-        other_layout: &Layout,
-        out_shape: &[usize],
-        a_strides: &[isize],
-        b_strides: &[isize],
-    ) -> Result<Self>;
     fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self>;
     /// Gathers values along `dim` using integer indices.
     /// Input must be compact. Returns a new storage with one value per index.
@@ -272,22 +263,6 @@ impl BackendStorage for Storage {
             (Storage::Cpu(src), Storage::Cpu(dst)) => {
                 src.copy_compact(src_layout, dst)?;
                 Ok(())
-            }
-        }
-    }
-
-    fn broadcast_add(
-        &self,
-        layout: &Layout,
-        other: &Self,
-        other_layout: &Layout,
-        out_shape: &[usize],
-        a_strides: &[isize],
-        b_strides: &[isize],
-    ) -> Result<Self> {
-        match (self, other) {
-            (Storage::Cpu(a), Storage::Cpu(b)) => {
-                Ok(Self::Cpu(a.broadcast_add(layout, b, other_layout, out_shape, a_strides, b_strides)?))
             }
         }
     }

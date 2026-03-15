@@ -19,8 +19,10 @@ impl Shape {
     /// Returns the strides for a contiguous row-major layout with this shape.
     pub fn compact_strides(&self) -> Strides {
         let mut strides = vec![1isize; self.shape.len()];
-        for i in (0..(self.shape.len() - 1)).rev() {
-            strides[i] = self.shape[i + 1] as isize * strides[i + 1];
+        if self.shape.len() > 1 {
+            for i in (0..(self.shape.len() - 1)).rev() {
+                strides[i] = self.shape[i + 1] as isize * strides[i + 1];
+            }
         }
         strides.into()
     }

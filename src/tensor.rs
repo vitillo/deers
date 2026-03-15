@@ -361,15 +361,6 @@ impl Tensor {
             .unwrap()
     }
 
-    /// Adds two tensors with numpy-style broadcasting, without materializing
-    /// the broadcast. Equivalent to candle's `broadcast_add`.
-    pub fn broadcast_add(&self, other: &Tensor) -> Tensor {
-        ops::BroadcastAdd::new(self.clone(), other.clone())
-            .unwrap()
-            .forward()
-            .unwrap()
-    }
-
     /// 2-D matrix multiplication: `(m, n) @ (n, p) -> (m, p)`.
     pub fn matmul(&self, other: &Tensor) -> Tensor {
         ops::MatMul::new(self.clone(), other.clone())
@@ -419,6 +410,28 @@ impl Tensor {
     }
 }
 
+/// Computes the broadcast-compatible output shape for two shapes (numpy-style).
+fn broadcast_shape(a: &Shape, b: &Shape) -> Shape {
+    let ndim = a.ndim().max(b.ndim());
+    let mut out = Vec::with_capacity(ndim);
+    for i in 0..ndim {
+        let da = if i < ndim - a.ndim() { 1 } else { a[i - (ndim - a.ndim())] };
+        let db = if i < ndim - b.ndim() { 1 } else { b[i - (ndim - b.ndim())] };
+        assert!(da == db || da == 1 || db == 1, "incompatible shapes for broadcast");
+        out.push(da.max(db));
+    }
+    out.into()
+}
+
+/// Auto-broadcasts two tensors to the same shape if needed.
+fn broadcast_pair(a: &Tensor, b: &Tensor) -> (Tensor, Tensor) {
+    if a.layout().shape() == b.layout().shape() {
+        return (a.clone(), b.clone());
+    }
+    let out_shape = broadcast_shape(a.layout().shape(), b.layout().shape());
+    (a.broadcast(out_shape.clone()), b.broadcast(out_shape))
+}
+
 impl PartialEq for Tensor {
     fn eq(&self, other: &Self) -> bool {
         self.layout().shape == other.layout().shape
@@ -456,10 +469,8 @@ impl<B: Borrow<Tensor>> Add<B> for Tensor {
     type Output = Tensor;
 
     fn add(self, rhs: B) -> Self::Output {
-        ops::EWiseAdd::new(self.clone(), rhs.borrow().clone())
-            .unwrap()
-            .forward()
-            .unwrap()
+        let (a, b) = broadcast_pair(&self, rhs.borrow());
+        ops::EWiseAdd::new(a, b).unwrap().forward().unwrap()
     }
 }
 
@@ -467,10 +478,8 @@ impl<B: Borrow<Tensor>> Add<B> for &Tensor {
     type Output = Tensor;
 
     fn add(self, rhs: B) -> Self::Output {
-        ops::EWiseAdd::new(self.clone(), rhs.borrow().clone())
-            .unwrap()
-            .forward()
-            .unwrap()
+        let (a, b) = broadcast_pair(self, rhs.borrow());
+        ops::EWiseAdd::new(a, b).unwrap().forward().unwrap()
     }
 }
 
@@ -532,10 +541,8 @@ impl<B: Borrow<Tensor>> Mul<B> for Tensor {
     type Output = Tensor;
 
     fn mul(self, rhs: B) -> Self::Output {
-        ops::EWiseMul::new(self.clone(), rhs.borrow().clone())
-            .unwrap()
-            .forward()
-            .unwrap()
+        let (a, b) = broadcast_pair(&self, rhs.borrow());
+        ops::EWiseMul::new(a, b).unwrap().forward().unwrap()
     }
 }
 
@@ -543,10 +550,8 @@ impl<B: Borrow<Tensor>> Mul<B> for &Tensor {
     type Output = Tensor;
 
     fn mul(self, rhs: B) -> Self::Output {
-        ops::EWiseMul::new(self.clone(), rhs.borrow().clone())
-            .unwrap()
-            .forward()
-            .unwrap()
+        let (a, b) = broadcast_pair(self, rhs.borrow());
+        ops::EWiseMul::new(a, b).unwrap().forward().unwrap()
     }
 }
 
@@ -554,10 +559,8 @@ impl<B: Borrow<Tensor>> Div<B> for Tensor {
     type Output = Tensor;
 
     fn div(self, rhs: B) -> Self::Output {
-        ops::EWiseDiv::new(self.clone(), rhs.borrow().clone())
-            .unwrap()
-            .forward()
-            .unwrap()
+        let (a, b) = broadcast_pair(&self, rhs.borrow());
+        ops::EWiseDiv::new(a, b).unwrap().forward().unwrap()
     }
 }
 
@@ -565,10 +568,8 @@ impl<B: Borrow<Tensor>> Div<B> for &Tensor {
     type Output = Tensor;
 
     fn div(self, rhs: B) -> Self::Output {
-        ops::EWiseDiv::new(self.clone(), rhs.borrow().clone())
-            .unwrap()
-            .forward()
-            .unwrap()
+        let (a, b) = broadcast_pair(self, rhs.borrow());
+        ops::EWiseDiv::new(a, b).unwrap().forward().unwrap()
     }
 }
 

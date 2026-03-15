@@ -803,3 +803,38 @@ fn test_sgd_preserves_grad_tracking() {
     assert!(x.requires_grad());
 }
 
+#[test]
+fn test_auto_broadcast_add() {
+    // (2,3) + (3,) should auto-broadcast
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+    let b = Tensor::from_vec(vec![10.0f32, 20.0, 30.0], (3,), Device::Cpu);
+    let c = &a + &b;
+    assert_eq!(c.to_vec::<f32>().unwrap(), vec![11.0, 22.0, 33.0, 14.0, 25.0, 36.0]);
+}
+
+#[test]
+fn test_auto_broadcast_mul() {
+    // (2,3) * (2,1) should auto-broadcast
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+    let b = Tensor::from_vec(vec![2.0f32, 3.0], (2, 1), Device::Cpu);
+    let c = &a * &b;
+    assert_eq!(c.to_vec::<f32>().unwrap(), vec![2.0, 4.0, 6.0, 12.0, 15.0, 18.0]);
+}
+
+#[test]
+fn test_auto_broadcast_gradient() {
+    // Verify gradients flow correctly through auto-broadcast
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu).attach();
+    let b = Tensor::from_vec(vec![10.0f32, 20.0, 30.0], (3,), Device::Cpu).attach();
+    let c = (&a + &b).sum(vec![0, 1], false);
+    let grads = c.backward().unwrap();
+
+    // d(sum(a+b))/da = ones(2,3)
+    let ga = grads.get(a.id()).unwrap();
+    assert_eq!(ga.to_vec::<f32>().unwrap(), vec![1.0; 6]);
+
+    // d(sum(a+b))/db = sum along broadcast axis 0 of ones(2,3) = [2,2,2]
+    let gb = grads.get(b.id()).unwrap();
+    assert_eq!(gb.to_vec::<f32>().unwrap(), vec![2.0, 2.0, 2.0]);
+}
+
