@@ -610,3 +610,42 @@ fn test_relu_backward_with_mul() {
         vec![0.0, 2.0, 0.0, 4.0]
     );
 }
+
+#[test]
+fn test_log_softmax() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 1.0, 2.0, 3.0], (2, 3), Device::Cpu);
+    let b = a.log_softmax(1);
+    let result: Vec<f32> = b.to_vec().unwrap();
+
+    // log_softmax(x) = x - log(sum(exp(x))) per row
+    // For [1,2,3]: logsumexp = ln(e^1 + e^2 + e^3) ≈ 3.4076
+    let lse = (1.0f32.exp() + 2.0f32.exp() + 3.0f32.exp()).ln();
+    let expected = vec![1.0 - lse, 2.0 - lse, 3.0 - lse, 1.0 - lse, 2.0 - lse, 3.0 - lse];
+
+    Vec::<_>::assert_approx_eq(result, expected);
+}
+
+#[test]
+fn test_log_softmax_sums_to_one() {
+    // exp(log_softmax(x)) should sum to 1 along the softmax axis
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 1.0, -1.0], (2, 3), Device::Cpu);
+    let b = a.log_softmax(1).exp();
+    let sums: Vec<f32> = b.sum(vec![1], false).to_vec().unwrap();
+
+    Vec::<_>::assert_approx_eq(sums, vec![1.0, 1.0]);
+}
+
+#[test]
+fn test_log_softmax_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu).attach();
+    let b = a.log_softmax(1);
+    let c = b.sum(vec![0, 1], true);
+
+    let grads = c.backward().unwrap();
+
+    // d(sum(log_softmax))/dx_ij = 1 - n_cols * softmax(x_i)_j
+    // For [1,2]: softmax = [0.2689, 0.7311], grad = [1-2*0.2689, 1-2*0.7311] = [0.4622, -0.4622]
+    // For [3,4]: same softmax values
+    let grad: Vec<f32> = grads.get(a.id()).unwrap().to_vec().unwrap();
+    Vec::<_>::assert_approx_eq(grad, vec![0.4622, -0.4622, 0.4622, -0.4622]);
+}

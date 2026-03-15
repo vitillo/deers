@@ -2,6 +2,7 @@
 /// For each operation, we run the same computation in both frameworks
 /// with identical input data and compare the resulting gradients.
 use candle_core::{Device as CDevice, Tensor as CTensor, Var};
+use candle_nn;
 use deers::{Device, Tensor};
 
 const TOL: f64 = 1e-4;
@@ -258,4 +259,24 @@ fn validate_mlp_forward_backward() {
 
     assert_vecs_close(&dgrad_w1, &cgrad(&cgrads, &cw1), "mlp grad_w1");
     assert_vecs_close(&dgrad_w2, &cgrad(&cgrads, &cw2), "mlp grad_w2");
+}
+
+#[test]
+fn validate_log_softmax_backward() {
+    let data = vec![1.0f32, 2.0, 3.0, 4.0, 1.0, -1.0];
+
+    // deers
+    let da = Tensor::from_vec(data.clone(), (2, 3), Device::Cpu).attach();
+    let db = da.log_softmax(1);
+    let dc = db.sum(vec![0, 1], true);
+    let dgrads = dc.backward().unwrap();
+    let dgrad: Vec<f32> = dgrads.get(da.id()).unwrap().to_vec().unwrap();
+
+    // candle
+    let ca = cvar(data, &[2, 3]);
+    let cb = candle_nn::ops::log_softmax(&ca, 1).unwrap();
+    let cc = cb.sum_all().unwrap();
+    let cgrads = cc.backward().unwrap();
+
+    assert_vecs_close(&dgrad, &cgrad(&cgrads, &ca), "log_softmax");
 }
