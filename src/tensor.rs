@@ -387,6 +387,22 @@ impl Tensor {
         let lse = lse.broadcast(self.layout().shape().clone());
         self - &lse
     }
+
+    /// Gathers values along `dim` using integer indices.
+    ///
+    /// For a 2D tensor of shape `(rows, cols)` with `dim=1` and indices of shape `(rows,)`,
+    /// returns shape `(rows, 1)` where `out[i, 0] = self[i, indices[i]]`.
+    pub fn gather(&self, dim: usize, indices: &Tensor) -> Tensor {
+        let idx: Vec<usize> = indices
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .map(|&v| v as usize)
+            .collect();
+        ops::Gather::new(self.clone(), dim, idx)
+            .forward()
+            .unwrap()
+    }
 }
 
 impl PartialEq for Tensor {
