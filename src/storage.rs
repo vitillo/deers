@@ -52,6 +52,33 @@ macro_rules! unary_op {
 
 unary_op!(Exp, "exp", v, v.exp());
 unary_op!(Log, "log", v, v.ln());
+pub struct Relu;
+
+impl UnaryOp for Relu {
+    const KERNEL: &'static str = "relu";
+
+    fn f32(&self, v: f32) -> f32 {
+        v.max(0.0)
+    }
+
+    fn f64(&self, v: f64) -> f64 {
+        v.max(0.0)
+    }
+}
+
+pub struct ReluBackward;
+
+impl UnaryOp for ReluBackward {
+    const KERNEL: &'static str = "relu_backward";
+
+    fn f32(&self, v: f32) -> f32 {
+        if v > 0.0 { 1.0 } else { 0.0 }
+    }
+
+    fn f64(&self, v: f64) -> f64 {
+        if v > 0.0 { 1.0 } else { 0.0 }
+    }
+}
 
 macro_rules! scalar_op {
     ($op:ident, $name:literal, $e:tt) => {

@@ -446,6 +446,42 @@ fn test_matmul_backward() {
 }
 
 #[test]
+fn test_matmul_non_square() {
+    // (2,3) @ (3,2) = (2,2)
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+    let b = Tensor::from_vec(vec![7.0f32, 8.0, 9.0, 10.0, 11.0, 12.0], (3, 2), Device::Cpu);
+
+    let c = a.matmul(&b);
+
+    assert_eq!(c.layout().shape, (2, 2).into());
+    // Row 0: [1*7+2*9+3*11, 1*8+2*10+3*12] = [58, 64]
+    // Row 1: [4*7+5*9+6*11, 4*8+5*10+6*12] = [139, 154]
+    assert_eq!(c.to_vec::<f32>().unwrap(), vec![58.0, 64.0, 139.0, 154.0]);
+}
+
+#[test]
+fn test_matmul_non_square_backward() {
+    // (2,3) @ (3,2) = (2,2) — would have caught the shape bug with square-only tests
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu).attach();
+    let b = Tensor::from_vec(vec![7.0f32, 8.0, 9.0, 10.0, 11.0, 12.0], (3, 2), Device::Cpu).attach();
+    let c = a.matmul(&b);
+    let d = c.sum(vec![0, 1], true);
+
+    let grads = d.backward().unwrap();
+
+    // dA = ones(2,2) @ B^T = [[7+8, 9+10, 11+12], [7+8, 9+10, 11+12]] = [[15, 19, 23], [15, 19, 23]]
+    assert_eq!(
+        grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![15.0, 19.0, 23.0, 15.0, 19.0, 23.0]
+    );
+    // dB = A^T @ ones(2,2) = [[1+4, 1+4], [2+5, 2+5], [3+6, 3+6]] = [[5, 5], [7, 7], [9, 9]]
+    assert_eq!(
+        grads.get(b.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![5.0, 5.0, 7.0, 7.0, 9.0, 9.0]
+    );
+}
+
+#[test]
 fn test_max() {
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);
 
@@ -499,5 +535,75 @@ fn test_compact_backward() {
     assert_eq!(
         grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
         vec![1.0, 1.0, 1.0, 1.0]
+    );
+}
+
+#[test]
+fn test_rand() {
+    let t = Tensor::rand((100,), DType::F32, Device::Cpu);
+    let data: Vec<f32> = t.to_vec().unwrap();
+
+    assert_eq!(data.len(), 100);
+    assert!(data.iter().all(|&v| (0.0..1.0).contains(&v)));
+    // Check it's not all the same value (extremely unlikely with real randomness)
+    assert!(data.windows(2).any(|w| w[0] != w[1]));
+}
+
+#[test]
+fn test_randn() {
+    let t = Tensor::randn((1000,), DType::F32, Device::Cpu);
+    let data: Vec<f32> = t.to_vec().unwrap();
+
+    assert_eq!(data.len(), 1000);
+    let mean: f32 = data.iter().sum::<f32>() / data.len() as f32;
+    let variance: f32 = data.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / data.len() as f32;
+    // Mean should be close to 0, variance close to 1
+    assert!(mean.abs() < 0.2, "mean = {}", mean);
+    assert!((variance - 1.0).abs() < 0.2, "variance = {}", variance);
+}
+
+#[test]
+fn test_relu() {
+    let a = Tensor::from_vec(vec![-2.0f32, -1.0, 0.0, 1.0, 2.0, 3.0], (2, 3), Device::Cpu);
+    let b = a.relu();
+
+    assert_eq!(
+        b.to_vec::<f32>().unwrap(),
+        vec![0.0, 0.0, 0.0, 1.0, 2.0, 3.0]
+    );
+}
+
+#[test]
+fn test_relu_backward() {
+    let a =
+        Tensor::from_vec(vec![-2.0f32, -1.0, 0.0, 1.0, 2.0, 3.0], (2, 3), Device::Cpu).attach();
+    let b = a.relu();
+    let c = b.sum(vec![1], true);
+    let d = c.sum(vec![0], true);
+
+    let grads = d.backward().unwrap();
+
+    // Gradient is 1 where input > 0, 0 elsewhere
+    assert_eq!(
+        grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+    );
+}
+
+#[test]
+fn test_relu_backward_with_mul() {
+    // Test that gradients flow correctly through relu when multiplied
+    let a = Tensor::from_vec(vec![-1.0f32, 2.0, -3.0, 4.0], (2, 2), Device::Cpu).attach();
+    let b = a.relu();
+    let scale = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);
+    let c = b * scale;
+    let d = c.sum(vec![0, 1], true);
+
+    let grads = d.backward().unwrap();
+
+    // grad = scale * (input > 0): [0, 2, 0, 4]
+    assert_eq!(
+        grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![0.0, 2.0, 0.0, 4.0]
     );
 }

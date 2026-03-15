@@ -7,8 +7,7 @@ use std::{fmt, iter};
 use crate::backprop::GradientStore;
 use crate::error::Result;
 use crate::layout::{Layout, Shape};
-use crate::storage::{self, BackendStorage};
-use crate::storage::{ReduceMax, ReduceSum};
+use crate::storage::{self, BackendStorage, ReduceMax, ReduceSum};
 use crate::tensor::Tensor;
 
 pub trait TensorOp: fmt::Debug + Send + Sync {
@@ -331,6 +330,59 @@ impl TensorOp for EWiseExp {
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let arg1_grad_sum = grads.get_or_insert_zero(&self.arg);
         *arg1_grad_sum = &*arg1_grad_sum + out_grad * &self.arg.exp();
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
+#[derive(Debug)]
+pub struct Relu {
+    arg: Tensor,
+}
+
+impl Relu {
+    pub fn new(arg: Tensor) -> Result<Self> {
+        Ok(Self { arg: arg.compact() })
+    }
+}
+
+impl TensorOp for Relu {
+    fn forward(self) -> Result<Tensor> {
+        let storage = Arc::new(RwLock::new(
+            self.arg
+                .storage()
+                .unary_op(storage::Relu, self.arg.layout())?,
+        ));
+        Ok(Tensor::new(
+            storage,
+            self.arg.layout().clone(),
+            self.arg.device(),
+            self.arg.dtype(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        // grad is out_grad * (input > 0)
+        let mask_storage = Arc::new(RwLock::new(
+            self.arg
+                .storage()
+                .unary_op(storage::ReluBackward, self.arg.layout())?,
+        ));
+        let mask = Tensor::new(
+            mask_storage,
+            self.arg.layout().clone(),
+            self.arg.device(),
+            self.arg.dtype(),
+            false,
+            None,
+        );
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + out_grad * &mask;
         Ok(())
     }
 
@@ -795,7 +847,7 @@ impl MatMul {
 
 impl TensorOp for MatMul {
     fn forward(self) -> Result<Tensor> {
-        let shape: Shape = (self.arg1.layout().shape[1], self.arg2.layout().shape[0]).into();
+        let shape: Shape = (self.arg1.layout().shape[0], self.arg2.layout().shape[1]).into();
         let storage = Arc::new(RwLock::new(self.arg1.storage().matmul(
             self.arg1.layout(),
             &self.arg2.storage(),
