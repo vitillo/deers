@@ -280,3 +280,25 @@ fn validate_log_softmax_backward() {
 
     assert_vecs_close(&dgrad, &cgrad(&cgrads, &ca), "log_softmax");
 }
+
+#[test]
+fn validate_nll_loss_backward() {
+    let logits = vec![1.0f32, 2.0, 3.0, 4.0, 1.0, -1.0];
+    let targets = vec![2u32, 0];
+
+    // deers: logits -> log_softmax -> nll_loss -> backward
+    let da = Tensor::from_vec(logits.clone(), (2, 3), Device::Cpu).attach();
+    let db = da.log_softmax(1);
+    let dloss = deers::loss::nll_loss(&db, &Tensor::from_vec(vec![2.0f32, 0.0], (2,), Device::Cpu));
+    let dgrads = dloss.backward().unwrap();
+    let dgrad: Vec<f32> = dgrads.get(da.id()).unwrap().to_vec().unwrap();
+
+    // candle: logits -> log_softmax -> nll -> backward
+    let ca = cvar(logits, &[2, 3]);
+    let cb = candle_nn::ops::log_softmax(&ca, 1).unwrap();
+    let ct = CTensor::from_vec(targets, 2, &CDevice::Cpu).unwrap();
+    let closs = candle_nn::loss::nll(&cb, &ct).unwrap();
+    let cgrads = closs.backward().unwrap();
+
+    assert_vecs_close(&dgrad, &cgrad(&cgrads, &ca), "nll_loss");
+}

@@ -993,3 +993,74 @@ impl TensorOp for Compact {
         vec![&self.arg]
     }
 }
+
+/// Gathers values along an axis using integer indices.
+///
+/// For a 2D input of shape `(rows, cols)` with `dim=1` and indices of shape `(rows,)`,
+/// produces output of shape `(rows, 1)` where `out[i, 0] = input[i, indices[i]]`.
+///
+/// Currently only supports 2D input with 1D indices along dim 1.
+#[derive(Debug)]
+pub struct Gather {
+    input: Tensor,
+    dim: usize,
+    indices: Vec<usize>,
+}
+
+impl Gather {
+    pub fn new(input: Tensor, dim: usize, indices: Vec<usize>) -> Self {
+        assert_eq!(input.layout().ndim(), 2, "gather only supports 2D input");
+        assert_eq!(dim, 1, "gather only supports dim=1");
+        assert_eq!(indices.len(), input.layout().shape()[0]);
+        Self {
+            input: input.compact(),
+            dim,
+            indices,
+        }
+    }
+}
+
+impl TensorOp for Gather {
+    fn forward(self) -> Result<Tensor> {
+        let rows = self.input.layout().shape()[0];
+        let storage = Arc::new(RwLock::new(
+            self.input
+                .storage()
+                .gather(self.input.layout(), self.dim, &self.indices)?,
+        ));
+        let shape: Shape = (rows, 1).into();
+        Ok(Tensor::new(
+            storage,
+            shape.into(),
+            self.input.device(),
+            self.input.dtype(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let full_shape = self.input.layout().shape();
+        let grad_storage = out_grad.compact().storage().scatter(
+            out_grad.layout(),
+            self.dim,
+            &self.indices,
+            &full_shape.iter().copied().collect::<Vec<_>>(),
+        )?;
+        let grad_tensor = Tensor::new(
+            Arc::new(RwLock::new(grad_storage)),
+            full_shape.clone().into(),
+            self.input.device(),
+            self.input.dtype(),
+            false,
+            None,
+        );
+        let sum_grad = grads.get_or_insert_zero(&self.input);
+        *sum_grad = &*sum_grad + &grad_tensor;
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.input]
+    }
+}

@@ -69,3 +69,4 @@ cargo test
 - **Readable**: a newcomer should be able to follow the code. Prefer explicit over clever.
 - **Easy to extend**: adding a new op = implement TensorOp trait with forward/backward.
 - **Correctness first**: every op should have gradient tests.
+- **Follow PyTorch/candle conventions**: before implementing a new feature (op, loss, module, etc.), always check how PyTorch and candle structure it. Use their design decisions to guide ours — where to put the API, whether to use a custom op or compose from primitives, naming, etc.

@@ -10,6 +10,7 @@ mod device;
 mod dtype;
 mod error;
 mod layout;
+pub mod loss;
 mod ops;
 mod storage;
 mod tensor;

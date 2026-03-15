@@ -184,6 +184,18 @@ pub trait BackendStorage: Sized {
     ) -> Result<Self>;
     fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()>;
     fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self>;
+    /// Gathers values along `dim` using integer indices.
+    /// Input must be compact. Returns a new storage with one value per index.
+    fn gather(&self, layout: &Layout, dim: usize, indices: &[usize]) -> Result<Self>;
+    /// Scatters `src` values into a zero-initialized tensor of size `full_size`,
+    /// placing each value at the corresponding index along `dim`.
+    fn scatter(
+        &self,
+        layout: &Layout,
+        dim: usize,
+        indices: &[usize],
+        full_shape: &[usize],
+    ) -> Result<Self>;
     fn dtype(&self) -> DType;
     fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D>;
     fn copy_compact(&self, src_layout: &Layout, dst: &mut Self) -> Result<()>;
@@ -260,6 +272,26 @@ impl BackendStorage for Storage {
             (Storage::Cpu(storage), Storage::Cpu(other)) => {
                 let storage = storage.matmul(layout, other, layout_other)?;
                 Ok(Self::Cpu(storage))
+            }
+        }
+    }
+
+    fn gather(&self, layout: &Layout, dim: usize, indices: &[usize]) -> Result<Self> {
+        match self {
+            Storage::Cpu(storage) => Ok(Self::Cpu(storage.gather(layout, dim, indices)?)),
+        }
+    }
+
+    fn scatter(
+        &self,
+        layout: &Layout,
+        dim: usize,
+        indices: &[usize],
+        full_shape: &[usize],
+    ) -> Result<Self> {
+        match self {
+            Storage::Cpu(storage) => {
+                Ok(Self::Cpu(storage.scatter(layout, dim, indices, full_shape)?))
             }
         }
     }

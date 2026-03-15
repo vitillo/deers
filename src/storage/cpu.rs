@@ -179,6 +179,63 @@ impl BackendStorage for CpuStorage {
         Ok(())
     }
 
+    fn gather(&self, layout: &Layout, dim: usize, indices: &[usize]) -> Result<Self> {
+        assert!(layout.is_compact());
+        assert_eq!(dim, 1, "gather only supports dim=1 for 2D tensors");
+        let rows = layout.shape[0];
+        let cols = layout.shape[1];
+        assert_eq!(indices.len(), rows);
+
+        match self {
+            CpuStorage::F32(data) => {
+                let out: Vec<f32> = indices
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &idx)| data[i * cols + idx])
+                    .collect();
+                Ok(CpuStorage::F32(out))
+            }
+            CpuStorage::F64(data) => {
+                let out: Vec<f64> = indices
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &idx)| data[i * cols + idx])
+                    .collect();
+                Ok(CpuStorage::F64(out))
+            }
+        }
+    }
+
+    fn scatter(
+        &self,
+        layout: &Layout,
+        dim: usize,
+        indices: &[usize],
+        full_shape: &[usize],
+    ) -> Result<Self> {
+        assert!(layout.is_compact());
+        assert_eq!(dim, 1, "scatter_add only supports dim=1 for 2D tensors");
+        let rows = full_shape[0];
+        let cols = full_shape[1];
+
+        match self {
+            CpuStorage::F32(data) => {
+                let mut out = vec![0.0f32; rows * cols];
+                for (i, &idx) in indices.iter().enumerate() {
+                    out[i * cols + idx] += data[i];
+                }
+                Ok(CpuStorage::F32(out))
+            }
+            CpuStorage::F64(data) => {
+                let mut out = vec![0.0f64; rows * cols];
+                for (i, &idx) in indices.iter().enumerate() {
+                    out[i * cols + idx] += data[i];
+                }
+                Ok(CpuStorage::F64(out))
+            }
+        }
+    }
+
     fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self> {
         assert!(layout.is_compact() && layout_other.is_compact());
         let n = layout.shape[layout.shape.ndim() - 1]; // cols of self, rows of other

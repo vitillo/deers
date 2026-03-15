@@ -452,7 +452,11 @@ fn test_matmul_backward() {
 fn test_matmul_non_square() {
     // (2,3) @ (3,2) = (2,2)
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
-    let b = Tensor::from_vec(vec![7.0f32, 8.0, 9.0, 10.0, 11.0, 12.0], (3, 2), Device::Cpu);
+    let b = Tensor::from_vec(
+        vec![7.0f32, 8.0, 9.0, 10.0, 11.0, 12.0],
+        (3, 2),
+        Device::Cpu,
+    );
 
     let c = a.matmul(&b);
 
@@ -466,7 +470,12 @@ fn test_matmul_non_square() {
 fn test_matmul_non_square_backward() {
     // (2,3) @ (3,2) = (2,2) — would have caught the shape bug with square-only tests
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu).attach();
-    let b = Tensor::from_vec(vec![7.0f32, 8.0, 9.0, 10.0, 11.0, 12.0], (3, 2), Device::Cpu).attach();
+    let b = Tensor::from_vec(
+        vec![7.0f32, 8.0, 9.0, 10.0, 11.0, 12.0],
+        (3, 2),
+        Device::Cpu,
+    )
+    .attach();
     let c = a.matmul(&b);
     let d = c.sum(vec![0, 1], true);
 
@@ -578,8 +587,7 @@ fn test_relu() {
 
 #[test]
 fn test_relu_backward() {
-    let a =
-        Tensor::from_vec(vec![-2.0f32, -1.0, 0.0, 1.0, 2.0, 3.0], (2, 3), Device::Cpu).attach();
+    let a = Tensor::from_vec(vec![-2.0f32, -1.0, 0.0, 1.0, 2.0, 3.0], (2, 3), Device::Cpu).attach();
     let b = a.relu();
     let c = b.sum(vec![1], true);
     let d = c.sum(vec![0], true);
@@ -620,7 +628,14 @@ fn test_log_softmax() {
     // log_softmax(x) = x - log(sum(exp(x))) per row
     // For [1,2,3]: logsumexp = ln(e^1 + e^2 + e^3) ≈ 3.4076
     let lse = (1.0f32.exp() + 2.0f32.exp() + 3.0f32.exp()).ln();
-    let expected = vec![1.0 - lse, 2.0 - lse, 3.0 - lse, 1.0 - lse, 2.0 - lse, 3.0 - lse];
+    let expected = vec![
+        1.0 - lse,
+        2.0 - lse,
+        3.0 - lse,
+        1.0 - lse,
+        2.0 - lse,
+        3.0 - lse,
+    ];
 
     Vec::<_>::assert_approx_eq(result, expected);
 }
@@ -648,4 +663,84 @@ fn test_log_softmax_backward() {
     // For [3,4]: same softmax values
     let grad: Vec<f32> = grads.get(a.id()).unwrap().to_vec().unwrap();
     Vec::<_>::assert_approx_eq(grad, vec![0.4622, -0.4622, 0.4622, -0.4622]);
+}
+
+#[test]
+fn test_gather_forward() {
+    let input = Tensor::from_vec(
+        vec![10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0],
+        (2, 3),
+        Device::Cpu,
+    );
+    let indices = Tensor::from_vec(vec![1.0f32, 2.0], (2,), Device::Cpu);
+    let out = input.gather(1, &indices);
+    let vals: Vec<f32> = out.to_vec().unwrap();
+    // out[0] = input[0, 1] = 20.0, out[1] = input[1, 2] = 60.0
+    Vec::<_>::assert_approx_eq(vals, vec![20.0, 60.0]);
+}
+
+#[test]
+fn test_gather_backward() {
+    let input =
+        Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu).attach();
+    let indices = Tensor::from_vec(vec![0.0f32, 2.0], (2,), Device::Cpu);
+    let out = input.gather(1, &indices);
+    let loss = out.sum(vec![0, 1], true);
+    let grads = loss.backward().unwrap();
+    let grad: Vec<f32> = grads.get(input.id()).unwrap().to_vec().unwrap();
+    // Gradient is 1 at gathered positions, 0 elsewhere
+    Vec::<_>::assert_approx_eq(grad, vec![1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+}
+
+#[test]
+fn test_nll_loss_forward() {
+    let log_probs = Tensor::from_vec(
+        vec![-0.9076f32, -1.2076, -2.4076, -0.4076, -1.9076, -1.5076],
+        (2, 3),
+        Device::Cpu,
+    );
+    let targets = Tensor::from_vec(vec![0.0f32, 2.0], (2,), Device::Cpu);
+    let loss = deers::loss::nll_loss(&log_probs, &targets);
+
+    // -mean(log_probs[0,0] + log_probs[1,2]) = -mean(-0.9076 + -1.5076) = 1.2076
+    let loss_val: Vec<f32> = loss.to_vec().unwrap();
+    assert!((loss_val[0] - 1.2076).abs() < 1e-4, "loss={}", loss_val[0]);
+}
+
+#[test]
+fn test_nll_loss_backward() {
+    let log_probs = Tensor::from_vec(
+        vec![-0.9f32, -1.2, -2.4, -0.4, -1.9, -1.5],
+        (2, 3),
+        Device::Cpu,
+    )
+    .attach();
+    let targets = Tensor::from_vec(vec![1.0f32, 0.0], (2,), Device::Cpu);
+    let loss = deers::loss::nll_loss(&log_probs, &targets);
+    let grads = loss.backward().unwrap();
+    let grad: Vec<f32> = grads.get(log_probs.id()).unwrap().to_vec().unwrap();
+
+    // Gradient is -1/batch_size at [i, target[i]], 0 elsewhere
+    // batch_size=2, so scale = -0.5
+    // targets = [1, 0] → grad[0,1]=-0.5, grad[1,0]=-0.5, rest 0
+    Vec::<_>::assert_approx_eq(grad, vec![0.0, -0.5, 0.0, -0.5, 0.0, 0.0]);
+}
+
+#[test]
+fn test_cross_entropy_end_to_end() {
+    // Full pipeline: logits -> cross_entropy -> backward
+    let logits =
+        Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 1.0, -1.0, 0.0], (2, 3), Device::Cpu).attach();
+    let targets = Tensor::from_vec(vec![2.0f32, 0.0], (2,), Device::Cpu);
+    let loss = deers::loss::cross_entropy(&logits, &targets);
+    let grads = loss.backward().unwrap();
+
+    let grad: Vec<f32> = grads.get(logits.id()).unwrap().to_vec().unwrap();
+    assert_eq!(grad.len(), 6);
+
+    // Sum of gradients per row should be 0
+    let row1_sum: f32 = grad[0..3].iter().sum();
+    let row2_sum: f32 = grad[3..6].iter().sum();
+    assert!(row1_sum.abs() < 1e-4, "row1_sum={row1_sum}");
+    assert!(row2_sum.abs() < 1e-4, "row2_sum={row2_sum}");
 }
