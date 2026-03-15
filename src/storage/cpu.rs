@@ -45,7 +45,7 @@ impl CpuStorage {
                 0.0,        // alpha (dst = alpha*dst + beta*lhs*rhs)
                 1.0,        // beta
                 false, false, false,
-                gemm::Parallelism::None,
+                gemm::Parallelism::Rayon(0),
             );
         }
     }
@@ -67,7 +67,7 @@ impl CpuStorage {
                 0.0,
                 1.0,
                 false, false, false,
-                gemm::Parallelism::None,
+                gemm::Parallelism::Rayon(0),
             );
         }
     }
