@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::error::Result;
 use crate::tensor::{Tensor, TensorId};
@@ -12,14 +12,16 @@ impl Tensor {
         }
 
         let mut sorted_nodes = vec![];
+        let mut visited = HashSet::new();
         let mut queue = VecDeque::new();
         queue.push_front(self);
         sorted_nodes.push(self);
+        visited.insert(self.id());
 
         while let Some(node) = queue.pop_back() {
             if let Some(op) = node.op() {
                 for dep in op.dependencies() {
-                    if !dep.requires_grad() {
+                    if !dep.requires_grad() || !visited.insert(dep.id()) {
                         continue;
                     }
 

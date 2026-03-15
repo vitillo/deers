@@ -744,3 +744,61 @@ fn test_cross_entropy_end_to_end() {
     assert!(row1_sum.abs() < 1e-4, "row1_sum={row1_sum}");
     assert!(row2_sum.abs() < 1e-4, "row2_sum={row2_sum}");
 }
+
+// --- Var & SGD tests ---
+
+use deers::Var;
+use deers::optim::SGD;
+
+#[test]
+fn test_var_basic() {
+    let t = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu);
+    let var = Var::new(t);
+    assert!(var.requires_grad());
+    assert_eq!(var.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn test_sgd_step() {
+    // Minimize (x - 3)^2, starting at x=0. After one step with lr=0.1:
+    // grad = 2*(0-3) = -6, x_new = 0 - 0.1*(-6) = 0.6
+    let x = Var::new(Tensor::from_vec(vec![0.0f32], (1,), Device::Cpu));
+    let target = Tensor::from_vec(vec![3.0f32], (1,), Device::Cpu);
+    let mut sgd = SGD::new(vec![x.clone()], 0.1);
+
+    let diff = &*x - &target;
+    let loss = (&diff * &diff).sum(vec![0], true);
+    sgd.backward_step(&loss).unwrap();
+
+    let val: Vec<f32> = x.to_vec().unwrap();
+    assert!((val[0] - 0.6).abs() < 1e-5, "x after step = {}", val[0]);
+}
+
+#[test]
+fn test_sgd_loss_decreases() {
+    // Minimize (x - 3)^2 starting from x=0. Loss should decrease each step.
+    let x = Var::new(Tensor::from_vec(vec![0.0f32], (1,), Device::Cpu));
+    let target = Tensor::from_vec(vec![3.0f32], (1,), Device::Cpu);
+    let mut sgd = SGD::new(vec![x.clone()], 0.1);
+
+    let mut prev_loss = f32::MAX;
+    for _ in 0..5 {
+        let diff = &*x - &target;
+        let loss = (&diff * &diff).sum(vec![0], true);
+        let loss_val: Vec<f32> = loss.to_vec().unwrap();
+        assert!(loss_val[0] < prev_loss, "loss should decrease");
+        prev_loss = loss_val[0];
+        sgd.backward_step(&loss).unwrap();
+    }
+}
+
+#[test]
+fn test_sgd_preserves_grad_tracking() {
+    let x = Var::new(Tensor::from_vec(vec![1.0f32], (1,), Device::Cpu));
+    let mut sgd = SGD::new(vec![x.clone()], 0.01);
+
+    let loss = (&*x * &*x).sum(vec![0], true);
+    sgd.backward_step(&loss).unwrap();
+
+    assert!(x.requires_grad());
+}

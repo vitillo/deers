@@ -70,3 +70,9 @@ cargo test
 - **Easy to extend**: adding a new op = implement TensorOp trait with forward/backward.
 - **Correctness first**: every op should have gradient tests.
 - **Follow PyTorch/candle conventions**: before implementing a new feature (op, loss, module, etc.), always check how PyTorch and candle structure it. Use their design decisions to guide ours — where to put the API, whether to use a custom op or compose from primitives, naming, etc.
+
+## Commit messages
+
+- Focus on **why**, not what — the diff already shows the what.
+- First line: short summary of the change.
+- Body: explain the motivation, trade-offs, or reasoning behind the decision.

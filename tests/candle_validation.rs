@@ -2,7 +2,7 @@
 /// For each operation, we run the same computation in both frameworks
 /// with identical input data and compare the resulting gradients.
 use candle_core::{Device as CDevice, Tensor as CTensor, Var};
-use candle_nn;
+use candle_nn::{self, Optimizer};
 use deers::{Device, Tensor};
 
 const TOL: f64 = 1e-4;
@@ -234,7 +234,9 @@ fn validate_mlp_forward_backward() {
     // This validates the gradient flow through a realistic computation graph.
     // Use values where x @ w1 has no exact zeros (to avoid ReLU subgradient convention differences)
     let x_data = vec![1.1f32, 0.7, -0.9, 2.1, 0.3, 1.4]; // (2, 3)
-    let w1_data = vec![0.1f32, 0.2, 0.3, 0.4, 0.5, -0.1, 0.2, 0.3, -0.1, 0.6, -0.4, 0.2]; // (3, 4)
+    let w1_data = vec![
+        0.1f32, 0.2, 0.3, 0.4, 0.5, -0.1, 0.2, 0.3, -0.1, 0.6, -0.4, 0.2,
+    ]; // (3, 4)
     let w2_data = vec![0.3f32, -0.2, 0.5, 0.1]; // (4, 1)
 
     // deers
@@ -301,4 +303,38 @@ fn validate_nll_loss_backward() {
     let cgrads = closs.backward().unwrap();
 
     assert_vecs_close(&dgrad, &cgrad(&cgrads, &ca), "nll_loss");
+}
+
+#[test]
+fn validate_sgd_matches_candle() {
+    // Same MLP: x @ w -> relu -> sum as loss, one SGD step, compare updated weights.
+    let x_data = vec![1.0f32, 2.0, 3.0, 4.0]; // (2, 2)
+    let w_data = vec![0.5f32, -0.3, 0.8, 0.1]; // (2, 2)
+    let lr = 0.01;
+
+    // --- deers ---
+    let dx = deers::Tensor::from_vec(x_data.clone(), (2, 2), deers::Device::Cpu);
+    let dw = deers::Var::new(deers::Tensor::from_vec(
+        w_data.clone(),
+        (2, 2),
+        deers::Device::Cpu,
+    ));
+    let mut dsgd = deers::optim::SGD::new(vec![dw.clone()], lr);
+
+    let dout = dx.matmul(&dw).relu();
+    let dloss = dout.sum(vec![0, 1], true);
+    dsgd.backward_step(&dloss).unwrap();
+    let dw_updated: Vec<f32> = dw.to_vec().unwrap();
+
+    // --- candle ---
+    let cx = ctensor(x_data, &[2, 2]);
+    let cw = cvar(w_data, &[2, 2]);
+    let mut csgd = candle_nn::SGD::new(vec![cw.clone()], lr).unwrap();
+
+    let cout = cx.matmul(&cw).unwrap().relu().unwrap();
+    let closs = cout.sum_all().unwrap();
+    csgd.backward_step(&closs).unwrap();
+    let cw_updated: Vec<f32> = cw.flatten_all().unwrap().to_vec1().unwrap();
+
+    assert_vecs_close(&dw_updated, &cw_updated, "sgd updated weights");
 }
