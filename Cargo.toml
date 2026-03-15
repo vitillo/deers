@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 thiserror = "2.0.9"
 rand = "0.8"
+gemm = "0.19"
 
 [dev-dependencies]
 candle-core = "0.8"
