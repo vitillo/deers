@@ -373,6 +373,20 @@ impl Tensor {
     pub fn log_sum_exp(&self, axes: Vec<usize>) -> Tensor {
         ops::LogSumExp::new(self.clone(), axes).forward().unwrap()
     }
+
+    /// Numerically stable log-softmax along the given axis.
+    ///
+    /// Computes `x - logsumexp(x, axis)` with the logsumexp result
+    /// broadcast back to the original shape.
+    pub fn log_softmax(&self, axis: usize) -> Tensor {
+        let lse = self.log_sum_exp(vec![axis]);
+        // Reshape lse to have size 1 in the reduced axis so we can broadcast
+        let mut shape: Vec<usize> = self.layout().shape().iter().copied().collect();
+        shape[axis] = 1;
+        let lse = lse.reshape(shape);
+        let lse = lse.broadcast(self.layout().shape().clone());
+        self - &lse
+    }
 }
 
 impl PartialEq for Tensor {
