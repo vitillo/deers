@@ -5,6 +5,8 @@ use std::ops::{Add, Deref, Div, Mul, Neg, Sub};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
+use rand::Rng;
+
 use crate::device::Device;
 use crate::dtype::{DType, WithDType};
 use crate::error::Result;
@@ -160,6 +162,57 @@ impl Tensor {
         Tensor::new(storage, layout, device, dtype, false, None)
     }
 
+    /// Create a tensor with values drawn from a uniform distribution in [0, 1).
+    pub fn rand(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
+        let shape: Shape = shape.into();
+        let mut rng = rand::thread_rng();
+        let storage = match dtype {
+            DType::F32 => {
+                let data: Vec<f32> = (0..shape.size()).map(|_| rng.gen()).collect();
+                Storage::Cpu(CpuStorage::from(data))
+            }
+            DType::F64 => {
+                let data: Vec<f64> = (0..shape.size()).map(|_| rng.gen()).collect();
+                Storage::Cpu(CpuStorage::from(data))
+            }
+            _ => unimplemented!(),
+        };
+        let layout: Layout = shape.into();
+        Tensor::new(Arc::new(RwLock::new(storage)), layout, device, dtype, false, None)
+    }
+
+    /// Create a tensor with values drawn from a standard normal distribution.
+    pub fn randn(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
+        let shape: Shape = shape.into();
+        let mut rng = rand::thread_rng();
+        // Box-Muller transform
+        let storage = match dtype {
+            DType::F32 => {
+                let data: Vec<f32> = (0..shape.size())
+                    .map(|_| {
+                        let u1: f32 = rng.gen();
+                        let u2: f32 = rng.gen();
+                        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
+                    })
+                    .collect();
+                Storage::Cpu(CpuStorage::from(data))
+            }
+            DType::F64 => {
+                let data: Vec<f64> = (0..shape.size())
+                    .map(|_| {
+                        let u1: f64 = rng.gen();
+                        let u2: f64 = rng.gen();
+                        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+                    })
+                    .collect();
+                Storage::Cpu(CpuStorage::from(data))
+            }
+            _ => unimplemented!(),
+        };
+        let layout: Layout = shape.into();
+        Tensor::new(Arc::new(RwLock::new(storage)), layout, device, dtype, false, None)
+    }
+
     pub fn to_vec<S: WithDType>(&self) -> Result<Vec<S>> {
         Ok(self.storage().to_vec(&self.layout))
     }
@@ -270,6 +323,10 @@ impl Tensor {
             .unwrap()
             .forward()
             .unwrap()
+    }
+
+    pub fn relu(&self) -> Tensor {
+        ops::Relu::new(self.clone()).unwrap().forward().unwrap()
     }
 
     pub fn log_sum_exp(&self, axes: Vec<usize>) -> Tensor {
