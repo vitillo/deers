@@ -5,12 +5,13 @@
 //! calling [`Tensor::backward`] traverses it in reverse to compute gradients.
 
 mod backprop;
-mod dataset;
+pub mod dataset;
 mod device;
 mod dtype;
 mod error;
 mod layout;
 pub mod loss;
+pub mod nn;
 mod ops;
 pub mod optim;
 mod storage;

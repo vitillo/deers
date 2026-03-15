@@ -338,3 +338,97 @@ fn validate_sgd_matches_candle() {
 
     assert_vecs_close(&dw_updated, &cw_updated, "sgd updated weights");
 }
+
+#[test]
+fn validate_linear_cross_entropy_step() {
+    // One full forward+backward through: Linear(4,3) -> relu -> Linear(3,2) -> cross_entropy
+    // Compare every intermediate against candle.
+    let x_data = vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]; // (2, 4)
+    let w1_data = vec![0.1f32, -0.2, 0.3, 0.4, 0.1, -0.1, -0.3, 0.2, 0.5, 0.2, -0.4, 0.1]; // (4, 3)
+    let b1_data = vec![0.01f32, -0.02, 0.03]; // (3,)
+    let w2_data = vec![0.2f32, -0.1, 0.3, 0.4, -0.2, 0.1]; // (3, 2)
+    let b2_data = vec![0.05f32, -0.05]; // (2,)
+    let targets_u32 = vec![1u32, 0];
+    let targets_f32 = vec![1.0f32, 0.0];
+
+    // --- deers ---
+    let dx = Tensor::from_vec(x_data.clone(), (2, 4), Device::Cpu);
+    let dw1 = deers::Var::new(Tensor::from_vec(w1_data.clone(), (4, 3), Device::Cpu));
+    let db1 = deers::Var::new(Tensor::from_vec(b1_data.clone(), (3,), Device::Cpu));
+    let dw2 = deers::Var::new(Tensor::from_vec(w2_data.clone(), (3, 2), Device::Cpu));
+    let db2 = deers::Var::new(Tensor::from_vec(b2_data.clone(), (2,), Device::Cpu));
+
+    // Forward: linear1
+    let dh = dx.matmul(&dw1);
+    let dh_vals: Vec<f32> = dh.to_vec().unwrap();
+
+    let db1_bc = db1.reshape((1, 3)).broadcast((2, 3));
+    let dh_bias = &dh + &db1_bc;
+    let dh_bias_vals: Vec<f32> = dh_bias.to_vec().unwrap();
+
+    // relu
+    let dh_relu = dh_bias.relu();
+    let dh_relu_vals: Vec<f32> = dh_relu.to_vec().unwrap();
+
+    // Forward: linear2
+    let dlogits = dh_relu.matmul(&dw2);
+    let db2_bc = db2.reshape((1, 2)).broadcast((2, 2));
+    let dlogits_bias = &dlogits + &db2_bc;
+    let dlogits_vals: Vec<f32> = dlogits_bias.to_vec().unwrap();
+
+    // cross_entropy
+    let dtargets = Tensor::from_vec(targets_f32.clone(), (2,), Device::Cpu);
+    let dloss = deers::loss::cross_entropy(&dlogits_bias, &dtargets);
+    let dloss_val: Vec<f32> = dloss.to_vec().unwrap();
+
+    // backward
+    let dgrads = dloss.backward().unwrap();
+    let dgrad_w1: Vec<f32> = dgrads.get(dw1.id()).unwrap().to_vec().unwrap();
+    let dgrad_b1: Vec<f32> = dgrads.get(db1.id()).unwrap().to_vec().unwrap();
+    let dgrad_w2: Vec<f32> = dgrads.get(dw2.id()).unwrap().to_vec().unwrap();
+    let dgrad_b2: Vec<f32> = dgrads.get(db2.id()).unwrap().to_vec().unwrap();
+
+    // --- candle ---
+    let cx = ctensor(x_data, &[2, 4]);
+    let cw1 = cvar(w1_data, &[4, 3]);
+    let cb1 = cvar(b1_data, &[3]);
+    let cw2 = cvar(w2_data, &[3, 2]);
+    let cb2 = cvar(b2_data, &[2]);
+
+    // candle Linear stores weight as (out, in) and transposes, but we do (in, out) directly.
+    // So we replicate our forward manually: x @ w + b
+    let ch = cx.matmul(&cw1).unwrap();
+    let ch_vals: Vec<f32> = ch.flatten_all().unwrap().to_vec1().unwrap();
+
+    let ch_bias = ch.broadcast_add(&cb1).unwrap();
+    let ch_bias_vals: Vec<f32> = ch_bias.flatten_all().unwrap().to_vec1().unwrap();
+
+    let ch_relu = ch_bias.relu().unwrap();
+    let ch_relu_vals: Vec<f32> = ch_relu.flatten_all().unwrap().to_vec1().unwrap();
+
+    let clogits = ch_relu.matmul(&cw2).unwrap();
+    let clogits_bias = clogits.broadcast_add(&cb2).unwrap();
+    let clogits_vals: Vec<f32> = clogits_bias.flatten_all().unwrap().to_vec1().unwrap();
+
+    let ct = CTensor::from_vec(targets_u32, 2, &CDevice::Cpu).unwrap();
+    let closs = candle_nn::loss::cross_entropy(&clogits_bias, &ct).unwrap();
+    let closs_val: Vec<f32> = closs.to_vec0::<f32>().map(|v| vec![v]).unwrap();
+
+    let cgrads = closs.backward().unwrap();
+    let cgrad_w1 = cgrad(&cgrads, &cw1);
+    let cgrad_b1 = cgrad(&cgrads, &cb1);
+    let cgrad_w2 = cgrad(&cgrads, &cw2);
+    let cgrad_b2 = cgrad(&cgrads, &cb2);
+
+    // --- compare stage by stage ---
+    assert_vecs_close(&dh_vals, &ch_vals, "matmul1");
+    assert_vecs_close(&dh_bias_vals, &ch_bias_vals, "linear1 (matmul+bias)");
+    assert_vecs_close(&dh_relu_vals, &ch_relu_vals, "relu");
+    assert_vecs_close(&dlogits_vals, &clogits_vals, "linear2 (matmul+bias)");
+    assert_vecs_close(&dloss_val, &closs_val, "cross_entropy loss");
+
+    assert_vecs_close(&dgrad_w2, &cgrad_w2, "grad_w2");
+    assert_vecs_close(&dgrad_b2, &cgrad_b2, "grad_b2");
+    assert_vecs_close(&dgrad_w1, &cgrad_w1, "grad_w1");
+    assert_vecs_close(&dgrad_b1, &cgrad_b1, "grad_b1");
+}
