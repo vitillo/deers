@@ -19,7 +19,6 @@ pub trait Module {
 pub struct Linear {
     weight: Var,
     bias: Var,
-    out_features: usize,
 }
 
 impl Linear {
@@ -28,16 +27,14 @@ impl Linear {
         let k = 1.0 / (in_features as f64).sqrt();
         let weight = Var::new(Tensor::rand((in_features, out_features), DType::F32, Device::Cpu) * 2.0 * k - k);
         let bias = Var::new(Tensor::rand((out_features,), DType::F32, Device::Cpu) * 2.0 * k - k);
-        Self { weight, bias, out_features }
+        Self { weight, bias }
     }
 }
 
 impl Module for Linear {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let batch = x.layout().shape()[0];
         let out = x.matmul(&self.weight);
-        let bias = self.bias.reshape((1, self.out_features)).broadcast((batch, self.out_features));
-        Ok(&out + &bias)
+        Ok(out.broadcast_add(&self.bias))
     }
 
     fn vars(&self) -> Vec<Var> {

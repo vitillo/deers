@@ -25,35 +25,26 @@ fn main() {
         let targets = Tensor::from_vec(targets_f32.clone(), (batch_size,), Device::Cpu);
 
         // Warmup
-        let h = x.matmul(&w1);
-        let hb = &h + &b1.reshape((1, 128)).broadcast((batch_size, 128));
-        let hr = hb.relu();
-        let logits = hr.matmul(&w2);
-        let lb = &logits + &b2.reshape((1, 10)).broadcast((batch_size, 10));
-        let loss = deers::loss::cross_entropy(&lb, &targets);
+        let h = x.matmul(&w1).broadcast_add(&b1).relu();
+        let logits = h.matmul(&w2).broadcast_add(&b2);
+        let loss = deers::loss::cross_entropy(&logits, &targets);
         let _ = loss.backward();
 
         // Forward benchmark
         let t0 = Instant::now();
         for _ in 0..iterations {
-            let h = x.matmul(&w1);
-            let hb = &h + &b1.reshape((1, 128)).broadcast((batch_size, 128));
-            let hr = hb.relu();
-            let logits = hr.matmul(&w2);
-            let lb = &logits + &b2.reshape((1, 10)).broadcast((batch_size, 10));
-            let _loss = deers::loss::cross_entropy(&lb, &targets);
+            let h = x.matmul(&w1).broadcast_add(&b1).relu();
+            let logits = h.matmul(&w2).broadcast_add(&b2);
+            let _loss = deers::loss::cross_entropy(&logits, &targets);
         }
         let fwd_us = t0.elapsed().as_micros() as f64 / iterations as f64;
 
         // Forward + backward benchmark
         let t0 = Instant::now();
         for _ in 0..iterations {
-            let h = x.matmul(&w1);
-            let hb = &h + &b1.reshape((1, 128)).broadcast((batch_size, 128));
-            let hr = hb.relu();
-            let logits = hr.matmul(&w2);
-            let lb = &logits + &b2.reshape((1, 10)).broadcast((batch_size, 10));
-            let loss = deers::loss::cross_entropy(&lb, &targets);
+            let h = x.matmul(&w1).broadcast_add(&b1).relu();
+            let logits = h.matmul(&w2).broadcast_add(&b2);
+            let loss = deers::loss::cross_entropy(&logits, &targets);
             let _ = loss.backward();
         }
         let fwd_bwd_us = t0.elapsed().as_micros() as f64 / iterations as f64;
