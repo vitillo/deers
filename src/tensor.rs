@@ -311,6 +311,7 @@ impl Tensor {
 
     /// Swaps two dimensions. Defaults to the last two if `axes` is `None`.
     pub fn transpose(&self, axes: Option<(usize, usize)>) -> Tensor {
+        assert!(self.layout().ndim() >= 2, "transpose requires ndim >= 2");
         let axes = axes.unwrap_or((self.layout().ndim() - 2, self.layout().ndim() - 1));
         assert!(
             axes.0 < self.layout().ndim() && axes.1 < self.layout().ndim(),
