@@ -8,6 +8,7 @@ pub enum DType {
     F16,
     F32,
     F64,
+    U32,
 }
 
 /// Trait implemented by Rust types that can be stored in a tensor (f32, f64).
@@ -43,6 +44,22 @@ impl WithDType for f64 {
     fn as_slice(storage: &CpuStorage) -> &[Self] {
         match storage {
             CpuStorage::F64(vec) => vec.as_slice(),
+            _ => todo!(),
+        }
+    }
+}
+
+impl WithDType for u32 {
+    fn to_vec(storage: &CpuStorage) -> Vec<Self> {
+        match storage {
+            CpuStorage::U32(vec) => vec.clone(),
+            _ => todo!(),
+        }
+    }
+
+    fn as_slice(storage: &CpuStorage) -> &[Self] {
+        match storage {
+            CpuStorage::U32(vec) => vec.as_slice(),
             _ => todo!(),
         }
     }

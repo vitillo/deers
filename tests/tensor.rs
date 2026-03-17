@@ -23,6 +23,38 @@ fn test_ones() {
 }
 
 #[test]
+fn test_mps_zeros() {
+    let tensor = Tensor::zeros((2, 3), DType::F32, Device::Mps);
+
+    assert_eq!(tensor.device(), Device::Mps);
+    assert_eq!(tensor.layout().shape, (2, 3).into());
+    assert_eq!(tensor.to_vec::<f32>().unwrap(), vec![0.0f32; 6]);
+}
+
+#[test]
+fn test_mps_ewise_add() {
+    let a = Tensor::ones((2, 3), DType::F32, Device::Mps);
+    let b = Tensor::ones((2, 3), DType::F32, Device::Mps);
+
+    let c = a + b;
+
+    assert_eq!(c.device(), Device::Mps);
+    assert_eq!(c.to_vec::<f32>().unwrap(), vec![2.0f32; 6]);
+}
+
+#[test]
+fn test_mps_matmul_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Mps).attach();
+    let b = Tensor::from_vec(vec![5.0f32, 6.0, 7.0, 8.0], (2, 2), Device::Mps).attach();
+    let c = a.matmul(&b);
+
+    let grads = c.backward().unwrap();
+
+    assert_eq!(grads.get(a.id()).unwrap().device(), Device::Mps);
+    assert_eq!(grads.get(b.id()).unwrap().device(), Device::Mps);
+}
+
+#[test]
 fn test_ones_like() {
     let tensor = Tensor::zeros((2, 3), DType::F32, Device::Cpu);
     let tensor = tensor.ones_like();
@@ -404,6 +436,20 @@ fn test_sum_backward() {
 }
 
 #[test]
+fn test_mps_sum_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Mps).attach();
+    let b = a.sum(vec![], false);
+
+    let grads = b.backward().unwrap();
+
+    assert_eq!(grads.get(a.id()).unwrap().device(), Device::Mps);
+    assert_eq!(
+        grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    );
+}
+
+#[test]
 fn test_sum_keepdims() {
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
 
@@ -487,6 +533,24 @@ fn test_matmul() {
 fn test_matmul_backward() {
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu).attach();
     let b = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu).attach();
+    let c = a.matmul(&b);
+
+    let grads = c.backward().unwrap();
+
+    assert_eq!(
+        grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![3.0, 7.0, 3.0, 7.0]
+    );
+    assert_eq!(
+        grads.get(b.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![4.0, 4.0, 6.0, 6.0]
+    );
+}
+
+#[test]
+fn test_mps_matmul_backward_values() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Mps).attach();
+    let b = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Mps).attach();
     let c = a.matmul(&b);
 
     let grads = c.backward().unwrap();
@@ -608,6 +672,19 @@ fn test_logsumexp_backward() {
 }
 
 #[test]
+fn test_mps_logsumexp_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Mps).attach();
+    let b = a.log_sum_exp(vec![1]);
+
+    let grads = b.backward().unwrap();
+
+    Vec::<_>::assert_approx_eq(
+        grads.get(a.id()).unwrap().to_vec().unwrap(),
+        vec![0.2689f32, 0.7311, 0.2689, 0.7311],
+    );
+}
+
+#[test]
 fn test_compact() {
     let t = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);
     let c = t.permute(vec![1, 0]);
@@ -683,6 +760,21 @@ fn test_relu_backward() {
 }
 
 #[test]
+fn test_mps_relu_backward() {
+    let a = Tensor::from_vec(vec![-2.0f32, -1.0, 0.0, 1.0, 2.0, 3.0], (2, 3), Device::Mps).attach();
+    let b = a.relu();
+    let c = b.sum(vec![1], true);
+    let d = c.sum(vec![0], true);
+
+    let grads = d.backward().unwrap();
+
+    assert_eq!(
+        grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+    );
+}
+
+#[test]
 fn test_relu_backward_with_mul() {
     // Test that gradients flow correctly through relu when multiplied
     let a = Tensor::from_vec(vec![-1.0f32, 2.0, -3.0, 4.0], (2, 2), Device::Cpu).attach();
@@ -722,6 +814,25 @@ fn test_log_softmax() {
 }
 
 #[test]
+fn test_mps_log_softmax() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 1.0, 2.0, 3.0], (2, 3), Device::Mps);
+    let b = a.log_softmax(1);
+    let result: Vec<f32> = b.to_vec().unwrap();
+
+    let lse = (1.0f32.exp() + 2.0f32.exp() + 3.0f32.exp()).ln();
+    let expected = vec![
+        1.0 - lse,
+        2.0 - lse,
+        3.0 - lse,
+        1.0 - lse,
+        2.0 - lse,
+        3.0 - lse,
+    ];
+
+    Vec::<_>::assert_approx_eq(result, expected);
+}
+
+#[test]
 fn test_log_softmax_sums_to_one() {
     // exp(log_softmax(x)) should sum to 1 along the softmax axis
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 1.0, -1.0], (2, 3), Device::Cpu);
@@ -747,13 +858,25 @@ fn test_log_softmax_backward() {
 }
 
 #[test]
+fn test_mps_log_softmax_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Mps).attach();
+    let b = a.log_softmax(1);
+    let c = b.sum(vec![0, 1], true);
+
+    let grads = c.backward().unwrap();
+
+    let grad: Vec<f32> = grads.get(a.id()).unwrap().to_vec().unwrap();
+    Vec::<_>::assert_approx_eq(grad, vec![0.4622, -0.4622, 0.4622, -0.4622]);
+}
+
+#[test]
 fn test_gather_forward() {
     let input = Tensor::from_vec(
         vec![10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0],
         (2, 3),
         Device::Cpu,
     );
-    let indices = Tensor::from_vec(vec![1.0f32, 2.0], (2,), Device::Cpu);
+    let indices = Tensor::from_vec(vec![1u32, 2], (2,), Device::Cpu);
     let out = input.gather(1, &indices);
     let vals: Vec<f32> = out.to_vec().unwrap();
     // out[0] = input[0, 1] = 20.0, out[1] = input[1, 2] = 60.0
@@ -764,12 +887,25 @@ fn test_gather_forward() {
 fn test_gather_backward() {
     let input =
         Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu).attach();
-    let indices = Tensor::from_vec(vec![0.0f32, 2.0], (2,), Device::Cpu);
+    let indices = Tensor::from_vec(vec![0u32, 2], (2,), Device::Cpu);
     let out = input.gather(1, &indices);
     let loss = out.sum(vec![0, 1], true);
     let grads = loss.backward().unwrap();
     let grad: Vec<f32> = grads.get(input.id()).unwrap().to_vec().unwrap();
     // Gradient is 1 at gathered positions, 0 elsewhere
+    Vec::<_>::assert_approx_eq(grad, vec![1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+}
+
+#[test]
+fn test_mps_gather_backward() {
+    let input =
+        Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Mps).attach();
+    let indices = Tensor::from_vec(vec![0u32, 2], (2,), Device::Cpu);
+    let out = input.gather(1, &indices);
+    let loss = out.sum(vec![0, 1], true);
+    let grads = loss.backward().unwrap();
+    let grad: Vec<f32> = grads.get(input.id()).unwrap().to_vec().unwrap();
+
     Vec::<_>::assert_approx_eq(grad, vec![1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
 }
 
@@ -780,7 +916,7 @@ fn test_nll_loss_forward() {
         (2, 3),
         Device::Cpu,
     );
-    let targets = Tensor::from_vec(vec![0.0f32, 2.0], (2,), Device::Cpu);
+    let targets = Tensor::from_vec(vec![0u32, 2], (2,), Device::Cpu);
     let loss = deers::loss::nll_loss(&log_probs, &targets);
 
     // -mean(log_probs[0,0] + log_probs[1,2]) = -mean(-0.9076 + -1.5076) = 1.2076
@@ -796,7 +932,7 @@ fn test_nll_loss_backward() {
         Device::Cpu,
     )
     .attach();
-    let targets = Tensor::from_vec(vec![1.0f32, 0.0], (2,), Device::Cpu);
+    let targets = Tensor::from_vec(vec![1u32, 0], (2,), Device::Cpu);
     let loss = deers::loss::nll_loss(&log_probs, &targets);
     let grads = loss.backward().unwrap();
     let grad: Vec<f32> = grads.get(log_probs.id()).unwrap().to_vec().unwrap();
@@ -812,7 +948,7 @@ fn test_cross_entropy_end_to_end() {
     // Full pipeline: logits -> cross_entropy -> backward
     let logits =
         Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 1.0, -1.0, 0.0], (2, 3), Device::Cpu).attach();
-    let targets = Tensor::from_vec(vec![2.0f32, 0.0], (2,), Device::Cpu);
+    let targets = Tensor::from_vec(vec![2u32, 0], (2,), Device::Cpu);
     let loss = deers::loss::cross_entropy(&logits, &targets);
     let grads = loss.backward().unwrap();
 
@@ -824,6 +960,31 @@ fn test_cross_entropy_end_to_end() {
     let row2_sum: f32 = grad[3..6].iter().sum();
     assert!(row1_sum.abs() < 1e-4, "row1_sum={row1_sum}");
     assert!(row2_sum.abs() < 1e-4, "row2_sum={row2_sum}");
+}
+
+#[test]
+fn test_mps_cross_entropy_end_to_end() {
+    let logits =
+        Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 1.0, -1.0, 0.0], (2, 3), Device::Mps).attach();
+    let targets = Tensor::from_vec(vec![2u32, 0], (2,), Device::Cpu);
+    let loss = deers::loss::cross_entropy(&logits, &targets);
+    let grads = loss.backward().unwrap();
+
+    let grad: Vec<f32> = grads.get(logits.id()).unwrap().to_vec().unwrap();
+    assert_eq!(grad.len(), 6);
+
+    let row1_sum: f32 = grad[0..3].iter().sum();
+    let row2_sum: f32 = grad[3..6].iter().sum();
+    assert!(row1_sum.abs() < 1e-4, "row1_sum={row1_sum}");
+    assert!(row2_sum.abs() < 1e-4, "row2_sum={row2_sum}");
+}
+
+#[test]
+fn test_mps_narrow_to_vec() {
+    let a = Tensor::from_vec((0..32).map(|v| v as f32).collect::<Vec<_>>(), (8, 4), Device::Mps);
+    let b = a.narrow(0, 2, 3);
+
+    assert_eq!(b.to_vec::<f32>().unwrap(), vec![8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0]);
 }
 
 // --- Var & SGD tests ---

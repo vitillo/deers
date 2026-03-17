@@ -87,11 +87,18 @@ impl Tensor {
 
     pub(crate) fn with_op(self, op: Box<dyn TensorOp>) -> Self {
         let tensor = Arc::into_inner(self.0).unwrap();
+        let storage = tensor.storage.read().unwrap();
+        let dtype = storage.dtype();
+        let device = match &*storage {
+            Storage::Cpu(_) => Device::Cpu,
+            Storage::Mps(_) => Device::Mps,
+        };
+        drop(storage);
         Tensor::new(
             tensor.storage,
             tensor.layout,
-            tensor.device,
-            tensor.dtype,
+            device,
+            dtype,
             false,
             Some(op),
         )
@@ -128,12 +135,15 @@ impl Tensor {
 
     /// Returns the data type (F32, F64) of this tensor.
     pub fn dtype(&self) -> DType {
-        self.dtype
+        self.storage().dtype()
     }
 
     /// Returns the device (CPU, CUDA) where this tensor is stored.
     pub fn device(&self) -> Device {
-        self.device
+        match &*self.storage() {
+            Storage::Cpu(_) => Device::Cpu,
+            Storage::Mps(_) => Device::Mps,
+        }
     }
 
     /// Returns whether this tensor tracks gradients.
@@ -152,8 +162,8 @@ impl Tensor {
         Tensor::new(
             self.storage.clone(),
             self.layout.clone(),
-            self.device,
-            self.dtype,
+            self.device(),
+            self.dtype(),
             true,
             None,
         )
@@ -175,15 +185,12 @@ impl Tensor {
         Tensor::new(storage, layout, device, dtype, false, None)
     }
 
-    /// Creates a tensor from a `Vec<f32>` or `Vec<f64>` with the given shape.
+    /// Creates a tensor from a CPU vector with the given shape.
+    ///
+    /// Currently supports `Vec<f32>`, `Vec<f64>`, and `Vec<u32>`.
     pub fn from_vec(vec: impl Into<CpuStorage>, shape: impl Into<Shape>, device: Device) -> Tensor {
-        assert_eq!(
-            device,
-            Device::Cpu,
-            "TODO: implement load for other devices"
-        );
         let shape: Shape = shape.into();
-        let storage = Storage::Cpu(vec.into());
+        let storage = vec.into().to(device);
         let layout: Layout = shape.into();
         let dtype = storage.dtype();
         let storage = Arc::new(RwLock::new(storage));
@@ -197,11 +204,11 @@ impl Tensor {
         let storage = match dtype {
             DType::F32 => {
                 let data: Vec<f32> = (0..shape.size()).map(|_| rng.gen()).collect();
-                Storage::Cpu(CpuStorage::from(data))
+                CpuStorage::from(data).to(device)
             }
             DType::F64 => {
                 let data: Vec<f64> = (0..shape.size()).map(|_| rng.gen()).collect();
-                Storage::Cpu(CpuStorage::from(data))
+                CpuStorage::from(data).to(device)
             }
             _ => unimplemented!(),
         };
@@ -230,7 +237,7 @@ impl Tensor {
                         (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
                     })
                     .collect();
-                Storage::Cpu(CpuStorage::from(data))
+                CpuStorage::from(data).to(device)
             }
             DType::F64 => {
                 let data: Vec<f64> = (0..shape.size())
@@ -240,7 +247,7 @@ impl Tensor {
                         (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
                     })
                     .collect();
-                Storage::Cpu(CpuStorage::from(data))
+                CpuStorage::from(data).to(device)
             }
             _ => unimplemented!(),
         };
@@ -260,15 +267,31 @@ impl Tensor {
         Ok(self.storage().to_vec(&self.layout))
     }
 
+    /// Returns a copy of this tensor on the target device.
+    pub fn to_device(&self, device: Device) -> Result<Tensor> {
+        if self.device() == device {
+            return Ok(self.clone());
+        }
+
+        let shape: Vec<usize> = self.layout().shape().iter().copied().collect();
+        let out = match self.dtype() {
+            DType::F32 => Tensor::from_vec(self.to_vec::<f32>()?, shape, device),
+            DType::F64 => Tensor::from_vec(self.to_vec::<f64>()?, shape, device),
+            DType::U32 => Tensor::from_vec(self.to_vec::<u32>()?, shape, device),
+            DType::F16 => todo!(),
+        };
+        Ok(out)
+    }
+
     /// Creates a tensor of ones with the same shape, dtype, and device.
     pub fn ones_like(&self) -> Tensor {
         Tensor::new(
             Arc::new(RwLock::new(
-                self.device.ones(self.layout.size(), self.dtype),
+                self.device().ones(self.layout.size(), self.dtype()),
             )),
             self.layout.clone(),
-            self.device,
-            self.dtype,
+            self.device(),
+            self.dtype(),
             false,
             None,
         )
@@ -278,11 +301,38 @@ impl Tensor {
     pub fn zeros_like(&self) -> Tensor {
         Tensor::new(
             Arc::new(RwLock::new(
-                self.device.zeros(self.layout.size(), self.dtype),
+                self.device().zeros(self.layout.size(), self.dtype()),
             )),
             self.layout.clone(),
-            self.device,
-            self.dtype,
+            self.device(),
+            self.dtype(),
+            false,
+            None,
+        )
+    }
+
+    /// Returns a no-copy view over a contiguous range on the given dimension.
+    ///
+    /// This is intended for dataset-style batching and other simple slicing.
+    /// The returned tensor does not keep gradient history.
+    pub fn narrow(&self, dim: usize, start: usize, len: usize) -> Tensor {
+        assert!(dim < self.layout().ndim(), "narrow dim out of bounds");
+        assert!(
+            start + len <= self.layout().shape()[dim],
+            "narrow out of bounds"
+        );
+        assert!(self.is_compact(), "narrow requires compact tensors");
+
+        let mut shape: Vec<usize> = self.layout().shape().iter().copied().collect();
+        shape[dim] = len;
+        let stride = self.layout().strides()[dim] as usize;
+        let offset = self.layout().offset + start * stride;
+
+        Tensor::new(
+            self.storage_clone(),
+            Layout::new(shape, self.layout().strides().clone(), offset),
+            self.device(),
+            self.dtype(),
             false,
             None,
         )
@@ -430,18 +480,9 @@ impl Tensor {
     /// For a 2D tensor of shape `(rows, cols)` with `dim=1` and indices of shape `(rows,)`,
     /// returns shape `(rows, 1)` where `out[i, 0] = self[i, indices[i]]`.
     pub fn gather(&self, dim: usize, indices: &Tensor) -> Tensor {
-        let idx: Vec<usize> = indices
-            .to_vec::<f32>()
+        ops::Gather::new(self.clone(), dim, indices.clone())
+            .forward()
             .unwrap()
-            .iter()
-            .map(|&v| {
-                assert!(v.is_finite(), "gather indices must be finite");
-                assert!(v >= 0.0, "gather indices must be non-negative");
-                assert!(v.fract() == 0.0, "gather indices must be integers");
-                v as usize
-            })
-            .collect();
-        ops::Gather::new(self.clone(), dim, idx).forward().unwrap()
     }
 }
 
@@ -487,6 +528,9 @@ impl PartialEq for Tensor {
                 }
                 (DType::F64, DType::F64) => {
                     self.to_vec::<f64>().unwrap() == other.to_vec::<f64>().unwrap()
+                }
+                (DType::U32, DType::U32) => {
+                    self.to_vec::<u32>().unwrap() == other.to_vec::<u32>().unwrap()
                 }
                 _ => false,
             }

@@ -1,10 +1,11 @@
 use std::borrow::Borrow;
 
 use crate::{
+    device::Device,
     dtype::{DType, WithDType},
     error::Result,
     layout::Layout,
-    storage::{BackendStorage, BinaryOp, UnaryOp},
+    storage::{BackendStorage, BinaryOp, MpsStorage, Storage, UnaryOp},
 };
 
 use super::ReduceOp;
@@ -14,9 +15,18 @@ use super::ReduceOp;
 pub enum CpuStorage {
     F32(Vec<f32>),
     F64(Vec<f64>),
+    U32(Vec<u32>),
 }
 
 impl CpuStorage {
+    pub fn to(self, device: Device) -> Storage {
+        match device {
+            Device::Cpu => Storage::Cpu(self),
+            Device::Mps => Storage::Mps(MpsStorage::from_cpu_storage(self)),
+            Device::Cuda => todo!(),
+        }
+    }
+
     pub fn iter<'a, D: WithDType>(&'a self, layout: &'a Layout) -> Iter<'a, D> {
         Iter::new(self, layout)
     }
@@ -25,6 +35,7 @@ impl CpuStorage {
         match self {
             CpuStorage::F32(data) => data.len(),
             CpuStorage::F64(data) => data.len(),
+            CpuStorage::U32(data) => data.len(),
         }
     }
 
@@ -85,6 +96,12 @@ impl From<Vec<f64>> for CpuStorage {
     }
 }
 
+impl From<Vec<u32>> for CpuStorage {
+    fn from(v: Vec<u32>) -> Self {
+        Self::U32(v)
+    }
+}
+
 impl BackendStorage for CpuStorage {
     fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self> {
         if l.is_compact() {
@@ -96,6 +113,7 @@ impl BackendStorage for CpuStorage {
                 CpuStorage::F64(data) => {
                     Ok(CpuStorage::F64(data.iter().map(|v| v.powf(e)).collect()))
                 }
+                CpuStorage::U32(_) => todo!(),
             };
         }
         let shape: Vec<usize> = l.shape().iter().copied().collect();
@@ -112,6 +130,7 @@ impl BackendStorage for CpuStorage {
                 strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| v.powf(e));
                 Ok(CpuStorage::F64(out))
             }
+            CpuStorage::U32(_) => todo!(),
         }
     }
 
@@ -124,6 +143,7 @@ impl BackendStorage for CpuStorage {
                 CpuStorage::F64(data) => {
                     Ok(CpuStorage::F64(data.iter().map(|v| op.f64(*v)).collect()))
                 }
+                CpuStorage::U32(_) => todo!(),
             };
         }
         let shape: Vec<usize> = l.shape().iter().copied().collect();
@@ -139,6 +159,7 @@ impl BackendStorage for CpuStorage {
                 strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| op.f64(v));
                 Ok(CpuStorage::F64(out))
             }
+            CpuStorage::U32(_) => todo!(),
         }
     }
 
@@ -203,6 +224,8 @@ impl BackendStorage for CpuStorage {
             }
             (CpuStorage::F32(_), CpuStorage::F64(_)) => unreachable!(),
             (CpuStorage::F64(_), CpuStorage::F32(_)) => unreachable!(),
+            (CpuStorage::U32(_), _) => todo!(),
+            (_, CpuStorage::U32(_)) => todo!(),
         }
     }
 
@@ -225,6 +248,8 @@ impl BackendStorage for CpuStorage {
             }
             (CpuStorage::F32(_), CpuStorage::F64(_)) => unreachable!(),
             (CpuStorage::F64(_), CpuStorage::F32(_)) => unreachable!(),
+            (CpuStorage::U32(_), _) => todo!(),
+            (_, CpuStorage::U32(_)) => todo!(),
         };
 
         Ok(())
@@ -234,6 +259,7 @@ impl BackendStorage for CpuStorage {
         match self {
             CpuStorage::F32(_) => DType::F32,
             CpuStorage::F64(_) => DType::F64,
+            CpuStorage::U32(_) => DType::U32,
         }
     }
 
@@ -256,21 +282,42 @@ impl BackendStorage for CpuStorage {
             (CpuStorage::F64(src), CpuStorage::F64(dst)) => {
                 copy_strided(src, dst, offset, &shape, &strides);
             }
+            (CpuStorage::U32(src), CpuStorage::U32(dst)) => {
+                copy_strided(src, dst, offset, &shape, &strides);
+            }
             _ => unreachable!(),
         }
 
         Ok(())
     }
 
-    fn gather(&self, layout: &Layout, dim: usize, indices: &[usize]) -> Result<Self> {
+    fn gather(
+        &self,
+        layout: &Layout,
+        dim: usize,
+        indices: &CpuStorage,
+        indices_layout: &Layout,
+    ) -> Result<Self> {
         assert!(layout.is_compact());
         assert_eq!(dim, 1, "gather only supports dim=1 for 2D tensors");
         let rows = layout.shape[0];
         let cols = layout.shape[1];
+        assert!(indices_layout.is_compact());
+        assert_eq!(indices_layout.ndim(), 1, "gather indices must be 1D");
+        assert_eq!(indices_layout.shape()[0], rows);
+
+        let indices: Vec<usize> = match indices {
+            CpuStorage::U32(_) => indices
+                .to_vec::<u32>(indices_layout)
+                .into_iter()
+                .map(|v| v as usize)
+                .collect(),
+            _ => todo!(),
+        };
         assert_eq!(indices.len(), rows);
 
-        for &idx in indices {
-            assert!(idx < cols, "gather index out of bounds");
+        for idx in &indices {
+            assert!(*idx < cols, "gather index out of bounds");
         }
 
         match self {
@@ -290,6 +337,14 @@ impl BackendStorage for CpuStorage {
                     .collect();
                 Ok(CpuStorage::F64(out))
             }
+            CpuStorage::U32(data) => {
+                let out: Vec<u32> = indices
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &idx)| data[i * cols + idx])
+                    .collect();
+                Ok(CpuStorage::U32(out))
+            }
         }
     }
 
@@ -297,16 +352,27 @@ impl BackendStorage for CpuStorage {
         &self,
         layout: &Layout,
         dim: usize,
-        indices: &[usize],
+        indices: &CpuStorage,
+        indices_layout: &Layout,
         full_shape: &[usize],
     ) -> Result<Self> {
         assert!(layout.is_compact());
         assert_eq!(dim, 1, "scatter_add only supports dim=1 for 2D tensors");
+        assert!(indices_layout.is_compact());
+        assert_eq!(indices_layout.ndim(), 1, "scatter indices must be 1D");
         let rows = full_shape[0];
         let cols = full_shape[1];
+        let indices: Vec<usize> = match indices {
+            CpuStorage::U32(_) => indices
+                .to_vec::<u32>(indices_layout)
+                .into_iter()
+                .map(|v| v as usize)
+                .collect(),
+            _ => todo!(),
+        };
 
-        for &idx in indices {
-            assert!(idx < cols, "scatter index out of bounds");
+        for idx in &indices {
+            assert!(*idx < cols, "scatter index out of bounds");
         }
 
         match self {
@@ -323,6 +389,13 @@ impl BackendStorage for CpuStorage {
                     out[i * cols + idx] += data[i];
                 }
                 Ok(CpuStorage::F64(out))
+            }
+            CpuStorage::U32(data) => {
+                let mut out = vec![0u32; rows * cols];
+                for (i, &idx) in indices.iter().enumerate() {
+                    out[i * cols + idx] += data[i];
+                }
+                Ok(CpuStorage::U32(out))
             }
         }
     }
@@ -346,6 +419,8 @@ impl BackendStorage for CpuStorage {
             }
             (CpuStorage::F32(_), CpuStorage::F64(_)) => unreachable!(),
             (CpuStorage::F64(_), CpuStorage::F32(_)) => unreachable!(),
+            (CpuStorage::U32(_), _) => todo!(),
+            (_, CpuStorage::U32(_)) => todo!(),
         }
     }
 }

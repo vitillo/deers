@@ -1,16 +1,18 @@
 #![allow(dead_code)]
 
 mod cpu;
+mod mps;
 
 use std::borrow::Borrow;
 
 use crate::{
     dtype::{DType, WithDType},
-    error::Result,
+    error::{Error, Result},
     layout::Layout,
 };
 
 pub use cpu::*;
+pub use mps::*;
 
 /// An element-wise operation applied to a single tensor.
 pub trait UnaryOp {
@@ -200,14 +202,21 @@ pub trait BackendStorage: Sized {
     fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self>;
     /// Gathers values along `dim` using integer indices.
     /// Input must be compact. Returns a new storage with one value per index.
-    fn gather(&self, layout: &Layout, dim: usize, indices: &[usize]) -> Result<Self>;
+    fn gather(
+        &self,
+        layout: &Layout,
+        dim: usize,
+        indices: &Self,
+        indices_layout: &Layout,
+    ) -> Result<Self>;
     /// Scatters `src` values into a zero-initialized tensor of size `full_size`,
     /// placing each value at the corresponding index along `dim`.
     fn scatter(
         &self,
         layout: &Layout,
         dim: usize,
-        indices: &[usize],
+        indices: &Self,
+        indices_layout: &Layout,
         full_shape: &[usize],
     ) -> Result<Self>;
     fn dtype(&self) -> DType;
@@ -215,10 +224,11 @@ pub trait BackendStorage: Sized {
     fn copy_compact(&self, src_layout: &Layout, dst: &mut Self) -> Result<()>;
 }
 
-/// Backend-agnostic storage enum. Currently only CPU is implemented.
+/// Backend-agnostic storage enum.
 #[derive(Debug, Clone)]
 pub enum Storage {
     Cpu(CpuStorage),
+    Mps(MpsStorage),
 }
 
 impl BackendStorage for Storage {
@@ -228,6 +238,10 @@ impl BackendStorage for Storage {
                 let storage = storage.ewise_powf(e, l)?;
                 Ok(Self::Cpu(storage))
             }
+            Storage::Mps(storage) => {
+                let storage = storage.ewise_powf(e, l)?;
+                Ok(Self::Mps(storage))
+            }
         }
     }
 
@@ -236,6 +250,10 @@ impl BackendStorage for Storage {
             Storage::Cpu(storage) => {
                 let storage = storage.unary_op(op, l)?;
                 Ok(Self::Cpu(storage))
+            }
+            Storage::Mps(storage) => {
+                let storage = storage.unary_op(op, l)?;
+                Ok(Self::Mps(storage))
             }
         }
     }
@@ -251,24 +269,33 @@ impl BackendStorage for Storage {
                 let storage = storage.binary_op::<O>(layout, other, other_layout)?;
                 Ok(Self::Cpu(storage))
             }
+            (Storage::Mps(storage), Storage::Mps(other)) => {
+                let storage = storage.binary_op::<O>(layout, other, other_layout)?;
+                Ok(Self::Mps(storage))
+            }
+            _ => Err(Error::DeviceMismatch { op: O::KERNEL }),
         }
     }
 
     fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
         match (self, dst) {
             (Storage::Cpu(storage), Storage::Cpu(dst)) => storage.reduce::<O>(layout, dst),
+            (Storage::Mps(storage), Storage::Mps(dst)) => storage.reduce::<O>(layout, dst),
+            _ => Err(Error::DeviceMismatch { op: O::KERNEL }),
         }
     }
 
     fn dtype(&self) -> DType {
         match self {
             Storage::Cpu(storage) => storage.dtype(),
+            Storage::Mps(storage) => storage.dtype(),
         }
     }
 
     fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D> {
         match self {
             Storage::Cpu(cpu_storage) => cpu_storage.to_vec(layout),
+            Storage::Mps(mps_storage) => mps_storage.to_vec(layout),
         }
     }
 
@@ -278,6 +305,11 @@ impl BackendStorage for Storage {
                 src.copy_compact(src_layout, dst)?;
                 Ok(())
             }
+            (Storage::Mps(src), Storage::Mps(dst)) => {
+                src.copy_compact(src_layout, dst)?;
+                Ok(())
+            }
+            _ => Err(Error::DeviceMismatch { op: "compact" }),
         }
     }
 
@@ -287,12 +319,29 @@ impl BackendStorage for Storage {
                 let storage = storage.matmul(layout, other, layout_other)?;
                 Ok(Self::Cpu(storage))
             }
+            (Storage::Mps(storage), Storage::Mps(other)) => {
+                let storage = storage.matmul(layout, other, layout_other)?;
+                Ok(Self::Mps(storage))
+            }
+            _ => Err(Error::DeviceMismatch { op: "matmul" }),
         }
     }
 
-    fn gather(&self, layout: &Layout, dim: usize, indices: &[usize]) -> Result<Self> {
-        match self {
-            Storage::Cpu(storage) => Ok(Self::Cpu(storage.gather(layout, dim, indices)?)),
+    fn gather(
+        &self,
+        layout: &Layout,
+        dim: usize,
+        indices: &Self,
+        indices_layout: &Layout,
+    ) -> Result<Self> {
+        match (self, indices) {
+            (Storage::Cpu(storage), Storage::Cpu(indices)) => {
+                Ok(Self::Cpu(storage.gather(layout, dim, indices, indices_layout)?))
+            }
+            (Storage::Mps(storage), Storage::Mps(indices)) => {
+                Ok(Self::Mps(storage.gather(layout, dim, indices, indices_layout)?))
+            }
+            _ => Err(Error::DeviceMismatch { op: "gather" }),
         }
     }
 
@@ -300,13 +349,18 @@ impl BackendStorage for Storage {
         &self,
         layout: &Layout,
         dim: usize,
-        indices: &[usize],
+        indices: &Self,
+        indices_layout: &Layout,
         full_shape: &[usize],
     ) -> Result<Self> {
-        match self {
-            Storage::Cpu(storage) => {
-                Ok(Self::Cpu(storage.scatter(layout, dim, indices, full_shape)?))
+        match (self, indices) {
+            (Storage::Cpu(storage), Storage::Cpu(indices)) => {
+                Ok(Self::Cpu(storage.scatter(layout, dim, indices, indices_layout, full_shape)?))
             }
+            (Storage::Mps(storage), Storage::Mps(indices)) => {
+                Ok(Self::Mps(storage.scatter(layout, dim, indices, indices_layout, full_shape)?))
+            }
+            _ => Err(Error::DeviceMismatch { op: "scatter" }),
         }
     }
 }

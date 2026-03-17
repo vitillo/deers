@@ -5,7 +5,7 @@ use crate::tensor::Tensor;
 /// Negative log-likelihood loss.
 ///
 /// Takes log-probabilities of shape `(batch, classes)` and integer targets
-/// stored as f32 with shape `(batch,)`. Returns a scalar loss tensor.
+/// with shape `(batch,)`. Returns a scalar loss tensor.
 ///
 /// Equivalent to PyTorch's `F.nll_loss` or candle's `loss::nll`.
 pub fn nll_loss(log_probs: &Tensor, targets: &Tensor) -> Tensor {
@@ -17,7 +17,7 @@ pub fn nll_loss(log_probs: &Tensor, targets: &Tensor) -> Tensor {
 /// Cross-entropy loss (log-softmax + NLL combined).
 ///
 /// Takes raw logits of shape `(batch, classes)` and integer targets
-/// stored as f32 with shape `(batch,)`. Returns a scalar loss tensor.
+/// with shape `(batch,)`. Returns a scalar loss tensor.
 pub fn cross_entropy(logits: &Tensor, targets: &Tensor) -> Tensor {
     let log_probs = logits.log_softmax(1);
     nll_loss(&log_probs, targets)

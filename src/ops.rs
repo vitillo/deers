@@ -1011,18 +1011,21 @@ impl TensorOp for Compact {
 pub struct Gather {
     input: Tensor,
     dim: usize,
-    indices: Vec<usize>,
+    indices: Tensor,
 }
 
 impl Gather {
-    pub fn new(input: Tensor, dim: usize, indices: Vec<usize>) -> Self {
+    pub fn new(input: Tensor, dim: usize, indices: Tensor) -> Self {
         assert_eq!(input.layout().ndim(), 2, "gather only supports 2D input");
         assert_eq!(dim, 1, "gather only supports dim=1");
-        assert_eq!(indices.len(), input.layout().shape()[0]);
+        assert_eq!(indices.layout().ndim(), 1, "gather indices must be 1D");
+        assert_eq!(indices.layout().shape()[0], input.layout().shape()[0]);
+        assert_eq!(indices.dtype(), crate::DType::U32, "gather indices must be u32");
+        let indices = indices.to_device(input.device()).unwrap();
         Self {
             input: input.compact(),
             dim,
-            indices,
+            indices: indices.compact(),
         }
     }
 }
@@ -1033,7 +1036,8 @@ impl TensorOp for Gather {
         let storage = Arc::new(RwLock::new(self.input.storage().gather(
             self.input.layout(),
             self.dim,
-            &self.indices,
+            &self.indices.storage(),
+            self.indices.layout(),
         )?));
         let shape: Shape = (rows, 1).into();
         Ok(Tensor::new(
@@ -1051,7 +1055,8 @@ impl TensorOp for Gather {
         let grad_storage = out_grad.compact().storage().scatter(
             out_grad.layout(),
             self.dim,
-            &self.indices,
+            &self.indices.storage(),
+            self.indices.layout(),
             &full_shape.iter().copied().collect::<Vec<_>>(),
         )?;
         let grad_tensor = Tensor::new(
@@ -1068,6 +1073,6 @@ impl TensorOp for Gather {
     }
 
     fn dependencies(&self) -> Vec<&Tensor> {
-        vec![&self.input]
+        vec![&self.input, &self.indices]
     }
 }

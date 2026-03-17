@@ -8,6 +8,9 @@ pub enum Error {
     #[error("Size mismatch, expected buffer of size {expected} but got buffer of size {actual} ")]
     StorageSizeMismatch { expected: usize, actual: usize },
 
+    #[error("Operation {op} requires tensors on the same device")]
+    DeviceMismatch { op: &'static str },
+
     #[error(transparent)]
     DatasetParseError(#[from] io::Error),
 }

@@ -10,7 +10,7 @@ use crate::{Device, Tensor};
 /// The MNIST handwritten digit dataset (60k train + 10k test images).
 ///
 /// Images are `(N, 28, 28)` tensors with pixel values normalized to `[0, 1]`.
-/// Labels are `(N,)` tensors with integer class values `0..=9` stored as f32.
+/// Labels are `(N,)` tensors with integer class values `0..=9` stored as u32.
 pub struct MNISTDataset {
     pub train_images: Tensor,
     pub train_labels: Tensor,
@@ -54,7 +54,7 @@ impl MNISTDataset {
 
         let mut labels = vec![0u8; num_labels];
         file.read_exact(&mut labels)?;
-        let labels = labels.into_iter().map(|v| v as f32).collect::<Vec<f32>>();
+        let labels = labels.into_iter().map(|v| v as u32).collect::<Vec<u32>>();
 
         Ok(Tensor::from_vec(labels, (num_labels,), Device::Cpu))
     }
