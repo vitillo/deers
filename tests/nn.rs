@@ -1,6 +1,6 @@
 use deers::nn::{self, Module};
 use deers::optim::SGD;
-use deers::{DType, Device, Tensor};
+use deers::{Device, Tensor};
 
 #[test]
 fn test_linear_forward() {
