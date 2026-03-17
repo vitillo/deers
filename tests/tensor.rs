@@ -557,6 +557,34 @@ fn test_max() {
 }
 
 #[test]
+fn test_max_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 3.0, 2.0, 4.0], (2, 2), Device::Cpu).attach();
+    let b = a.max(vec![1], false);
+    let loss = b.sum(vec![0], false);
+
+    let grads = loss.backward().unwrap();
+
+    assert_eq!(
+        grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![0.0, 1.0, 0.0, 1.0]
+    );
+}
+
+#[test]
+fn test_max_backward_routes_gradient_to_all_tied_maxima() {
+    let a = Tensor::from_vec(vec![2.0f32, 2.0, 1.0, 3.0], (2, 2), Device::Cpu).attach();
+    let b = a.max(vec![1], false);
+    let loss = b.sum(vec![0], false);
+
+    let grads = loss.backward().unwrap();
+
+    assert_eq!(
+        grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![1.0, 1.0, 0.0, 1.0]
+    );
+}
+
+#[test]
 fn test_logsumexp() {
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);
 

@@ -772,8 +772,17 @@ impl TensorOp for Max {
         ))
     }
 
-    fn backward(&self, _: &mut GradientStore, _: &Tensor) -> Result<()> {
-        todo!()
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let max_keep_dims = self.arg.max(self.axis.clone(), true);
+        let max_broadcast = max_keep_dims.broadcast(self.arg.layout().shape().clone());
+        let grad = out_grad
+            .reshape(max_keep_dims.layout().shape().clone())
+            .broadcast(self.arg.layout().shape().clone());
+        let arg_grad = self.arg.eq(&max_broadcast) * grad;
+
+        let sum_grad = grads.get_or_insert_zero(&self.arg);
+        *sum_grad = &*sum_grad + arg_grad;
+        Ok(())
     }
 
     fn dependencies(&self) -> Vec<&Tensor> {
