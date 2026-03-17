@@ -11,8 +11,7 @@ use crate::tensor::Tensor;
 pub fn nll_loss(log_probs: &Tensor, targets: &Tensor) -> Tensor {
     let batch_size = log_probs.layout().shape()[0] as f64;
     let picked = log_probs.gather(1, targets); // (batch, 1)
-    let loss = picked.sum(vec![0, 1], true) * (-1.0 / batch_size);
-    loss
+    picked.sum(vec![0, 1], true) * (-1.0 / batch_size)
 }
 
 /// Cross-entropy loss (log-softmax + NLL combined).

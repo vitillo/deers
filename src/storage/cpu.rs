@@ -166,18 +166,38 @@ impl BackendStorage for CpuStorage {
             (CpuStorage::F32(a), CpuStorage::F32(b)) => {
                 let mut out = vec![0.0f32; layout.size()];
                 strided_binary_op(
-                    a, layout.offset, &a_strides,
-                    b, other_layout.offset, &b_strides,
-                    &mut out, &shape, O::f32,
+                    StridedSlice {
+                        data: a,
+                        offset: layout.offset,
+                        strides: &a_strides,
+                    },
+                    StridedSlice {
+                        data: b,
+                        offset: other_layout.offset,
+                        strides: &b_strides,
+                    },
+                    &mut out,
+                    &shape,
+                    O::f32,
                 );
                 Ok(CpuStorage::F32(out))
             }
             (CpuStorage::F64(a), CpuStorage::F64(b)) => {
                 let mut out = vec![0.0f64; layout.size()];
                 strided_binary_op(
-                    a, layout.offset, &a_strides,
-                    b, other_layout.offset, &b_strides,
-                    &mut out, &shape, O::f64,
+                    StridedSlice {
+                        data: a,
+                        offset: layout.offset,
+                        strides: &a_strides,
+                    },
+                    StridedSlice {
+                        data: b,
+                        offset: other_layout.offset,
+                        strides: &b_strides,
+                    },
+                    &mut out,
+                    &shape,
+                    O::f64,
                 );
                 Ok(CpuStorage::F64(out))
             }
@@ -322,34 +342,55 @@ impl BackendStorage for CpuStorage {
     }
 }
 
+struct StridedSlice<'a, T> {
+    data: &'a [T],
+    offset: usize,
+    strides: &'a [isize],
+}
+
 /// Applies a binary function to two strided arrays, writing to a compact output.
 fn strided_binary_op<T: Copy, F: Fn(T, T) -> T>(
-    a: &[T], a_off: usize, a_strides: &[isize],
-    b: &[T], b_off: usize, b_strides: &[isize],
-    out: &mut [T], shape: &[usize], f: F,
+    a: StridedSlice<'_, T>,
+    b: StridedSlice<'_, T>,
+    out: &mut [T],
+    shape: &[usize],
+    f: F,
 ) {
-    strided_binary_op_inner(a, a_off, a_strides, b, b_off, b_strides, out, &mut 0, shape, &f);
+    strided_binary_op_inner(a, b, out, &mut 0, shape, &f);
 }
 
 fn strided_binary_op_inner<T: Copy, F: Fn(T, T) -> T>(
-    a: &[T], a_off: usize, a_strides: &[isize],
-    b: &[T], b_off: usize, b_strides: &[isize],
-    out: &mut [T], out_off: &mut usize,
-    shape: &[usize], f: &F,
+    a: StridedSlice<'_, T>,
+    b: StridedSlice<'_, T>,
+    out: &mut [T],
+    out_off: &mut usize,
+    shape: &[usize],
+    f: &F,
 ) {
     if shape.len() == 1 {
-        let (sa, sb) = (a_strides[0] as usize, b_strides[0] as usize);
+        let (sa, sb) = (a.strides[0] as usize, b.strides[0] as usize);
         for i in 0..shape[0] {
-            out[*out_off] = f(a[a_off + i * sa], b[b_off + i * sb]);
+            out[*out_off] = f(a.data[a.offset + i * sa], b.data[b.offset + i * sb]);
             *out_off += 1;
         }
     } else {
-        let (sa, sb) = (a_strides[0] as usize, b_strides[0] as usize);
+        let (sa, sb) = (a.strides[0] as usize, b.strides[0] as usize);
         for i in 0..shape[0] {
             strided_binary_op_inner(
-                a, a_off + i * sa, &a_strides[1..],
-                b, b_off + i * sb, &b_strides[1..],
-                out, out_off, &shape[1..], f,
+                StridedSlice {
+                    data: a.data,
+                    offset: a.offset + i * sa,
+                    strides: &a.strides[1..],
+                },
+                StridedSlice {
+                    data: b.data,
+                    offset: b.offset + i * sb,
+                    strides: &b.strides[1..],
+                },
+                out,
+                out_off,
+                &shape[1..],
+                f,
             );
         }
     }

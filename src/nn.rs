@@ -57,6 +57,7 @@ pub struct Sequential {
 }
 
 impl Sequential {
+    #[allow(clippy::should_implement_trait)]
     pub fn add<M: Module + 'static>(mut self, layer: M) -> Self {
         self.layers.push(Box::new(layer));
         self
