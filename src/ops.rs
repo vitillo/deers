@@ -790,7 +790,10 @@ pub struct Reshape {
 impl Reshape {
     pub fn new(arg: Tensor, new_shape: Shape) -> Self {
         assert!(arg.layout().size() == new_shape.size());
-        Self { arg, new_shape }
+        Self {
+            arg: arg.compact(),
+            new_shape,
+        }
     }
 }
 

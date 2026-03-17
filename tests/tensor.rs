@@ -329,10 +329,18 @@ fn test_permute_backward() {
 
 #[test]
 fn test_permute_backward_uses_inverse_permutation() {
-    let a = Tensor::from_vec((0..24).map(|v| v as f32).collect::<Vec<_>>(), (2, 3, 4), Device::Cpu)
-        .attach();
+    let a = Tensor::from_vec(
+        (0..24).map(|v| v as f32).collect::<Vec<_>>(),
+        (2, 3, 4),
+        Device::Cpu,
+    )
+    .attach();
     let b = a.permute(vec![1, 2, 0]);
-    let grad = Tensor::from_vec((0..24).map(|v| v as f32).collect::<Vec<_>>(), (3, 4, 2), Device::Cpu);
+    let grad = Tensor::from_vec(
+        (0..24).map(|v| v as f32).collect::<Vec<_>>(),
+        (3, 4, 2),
+        Device::Cpu,
+    );
     let loss = (&b * &grad).sum(vec![0, 1, 2], false);
 
     let grads = loss.backward().unwrap();
@@ -340,8 +348,8 @@ fn test_permute_backward_uses_inverse_permutation() {
     assert_eq!(
         grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
         vec![
-            0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0,
-            1.0, 3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0, 19.0, 21.0, 23.0,
+            0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 1.0, 3.0, 5.0, 7.0,
+            9.0, 11.0, 13.0, 15.0, 17.0, 19.0, 21.0, 23.0,
         ]
     );
 }
@@ -415,6 +423,19 @@ fn test_reshape() {
     assert_eq!(
         b.to_vec::<f32>().unwrap(),
         vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    );
+}
+
+#[test]
+fn test_reshape_after_permute_materializes_logical_order() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+    let b = a.permute(vec![1, 0]);
+    let c = b.reshape((2, 3));
+
+    assert_eq!(c.layout().shape, (2, 3).into());
+    assert_eq!(
+        c.to_vec::<f32>().unwrap(),
+        vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
     );
 }
 
@@ -779,8 +800,8 @@ fn test_cross_entropy_end_to_end() {
 
 // --- Var & SGD tests ---
 
-use deers::Var;
 use deers::optim::SGD;
+use deers::Var;
 
 #[test]
 fn test_var_basic() {
@@ -841,7 +862,10 @@ fn test_auto_broadcast_add() {
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
     let b = Tensor::from_vec(vec![10.0f32, 20.0, 30.0], (3,), Device::Cpu);
     let c = &a + &b;
-    assert_eq!(c.to_vec::<f32>().unwrap(), vec![11.0, 22.0, 33.0, 14.0, 25.0, 36.0]);
+    assert_eq!(
+        c.to_vec::<f32>().unwrap(),
+        vec![11.0, 22.0, 33.0, 14.0, 25.0, 36.0]
+    );
 }
 
 #[test]
@@ -850,7 +874,10 @@ fn test_auto_broadcast_mul() {
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
     let b = Tensor::from_vec(vec![2.0f32, 3.0], (2, 1), Device::Cpu);
     let c = &a * &b;
-    assert_eq!(c.to_vec::<f32>().unwrap(), vec![2.0, 4.0, 6.0, 12.0, 15.0, 18.0]);
+    assert_eq!(
+        c.to_vec::<f32>().unwrap(),
+        vec![2.0, 4.0, 6.0, 12.0, 15.0, 18.0]
+    );
 }
 
 #[test]
@@ -869,4 +896,3 @@ fn test_auto_broadcast_gradient() {
     let gb = grads.get(b.id()).unwrap();
     assert_eq!(gb.to_vec::<f32>().unwrap(), vec![2.0, 2.0, 2.0]);
 }
-
