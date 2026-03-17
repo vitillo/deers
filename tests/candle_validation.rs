@@ -109,6 +109,24 @@ fn validate_exp_backward() {
 }
 
 #[test]
+fn validate_scalar_powf_backward() {
+    let data = vec![1.0f32, 2.0, 3.0];
+
+    let da = Tensor::from_vec(data.clone(), (3,), Device::Cpu).attach();
+    let db = da.scalar_powf(3.0);
+    let dc = db.sum(vec![0], false);
+    let dgrads = dc.backward().unwrap();
+    let dgrad: Vec<f32> = dgrads.get(da.id()).unwrap().to_vec().unwrap();
+
+    let ca = cvar(data, &[3]);
+    let cb = ca.powf(3.0).unwrap();
+    let cc = cb.sum_all().unwrap();
+    let cgrads = cc.backward().unwrap();
+
+    assert_vecs_close(&dgrad, &cgrad(&cgrads, &ca), "scalar_powf");
+}
+
+#[test]
 fn validate_log_backward() {
     let data = vec![0.5f32, 1.0, 2.0, 3.0];
 
