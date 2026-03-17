@@ -534,7 +534,12 @@ impl TensorOp for Permute {
     }
 
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let arg_grad = out_grad.permute(self.1.clone());
+        let mut inverse = vec![0; self.1.ndim()];
+        for (new_axis, &old_axis) in self.1.iter().enumerate() {
+            inverse[old_axis] = new_axis;
+        }
+
+        let arg_grad = out_grad.permute(inverse);
         let sum_grad = store.get_or_insert_zero(&self.0);
         *sum_grad = &*sum_grad + arg_grad;
         Ok(())

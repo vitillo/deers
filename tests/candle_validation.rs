@@ -229,6 +229,27 @@ fn validate_broadcast_backward() {
 }
 
 #[test]
+fn validate_permute_backward() {
+    let data = (0..24).map(|v| v as f32).collect::<Vec<_>>();
+    let grad = (0..24).map(|v| v as f32).collect::<Vec<_>>();
+
+    let da = Tensor::from_vec(data.clone(), (2, 3, 4), Device::Cpu).attach();
+    let dgrad = Tensor::from_vec(grad.clone(), (3, 4, 2), Device::Cpu);
+    let db = da.permute(vec![1, 2, 0]);
+    let dloss = (&db * &dgrad).sum(vec![0, 1, 2], false);
+    let dgrads = dloss.backward().unwrap();
+    let dgrad_a: Vec<f32> = dgrads.get(da.id()).unwrap().to_vec().unwrap();
+
+    let ca = cvar(data, &[2, 3, 4]);
+    let cgrad_tensor = ctensor(grad, &[3, 4, 2]);
+    let cb = ca.permute((1, 2, 0)).unwrap();
+    let closs = cb.mul(&cgrad_tensor).unwrap().sum_all().unwrap();
+    let cgrads = closs.backward().unwrap();
+
+    assert_vecs_close(&dgrad_a, &cgrad(&cgrads, &ca), "permute");
+}
+
+#[test]
 fn validate_mlp_forward_backward() {
     // Simulate a small MLP: x @ w1 -> relu -> @ w2 -> sum
     // This validates the gradient flow through a realistic computation graph.
