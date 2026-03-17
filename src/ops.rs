@@ -919,9 +919,15 @@ impl TensorOp for LogSumExp {
             .exp()
             .sum(self.axes.clone(), false);
         let logsumexp = max_z.reshape(sum_z.layout().shape.clone()) + sum_z.log();
-        // TODO: This is required to avoid creating a computational graph for the above operations
-        // How do I prevent this from happening for all ops??
-        Ok(logsumexp.with_op(Box::new(self)))
+
+        Ok(Tensor::new(
+            logsumexp.storage_clone(),
+            logsumexp.layout().clone(),
+            logsumexp.device(),
+            logsumexp.dtype(),
+            false,
+            Some(Box::new(self)),
+        ))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
