@@ -402,7 +402,12 @@ impl Tensor {
             .to_vec::<f32>()
             .unwrap()
             .iter()
-            .map(|&v| v as usize)
+            .map(|&v| {
+                assert!(v.is_finite(), "gather indices must be finite");
+                assert!(v >= 0.0, "gather indices must be non-negative");
+                assert!(v.fract() == 0.0, "gather indices must be integers");
+                v as usize
+            })
             .collect();
         ops::Gather::new(self.clone(), dim, idx)
             .forward()
