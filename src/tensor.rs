@@ -599,7 +599,8 @@ impl<B: Borrow<Tensor>> Sub<B> for Tensor {
     type Output = Tensor;
 
     fn sub(self, rhs: B) -> Self::Output {
-        self + (-rhs.borrow())
+        let (a, b) = broadcast_pair(&self, rhs.borrow());
+        ops::EWiseSub::new(a, b).unwrap().forward().unwrap()
     }
 }
 
@@ -607,7 +608,8 @@ impl<B: Borrow<Tensor>> Sub<B> for &Tensor {
     type Output = Tensor;
 
     fn sub(self, rhs: B) -> Self::Output {
-        self + -rhs.borrow()
+        let (a, b) = broadcast_pair(self, rhs.borrow());
+        ops::EWiseSub::new(a, b).unwrap().forward().unwrap()
     }
 }
 
