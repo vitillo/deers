@@ -18,6 +18,26 @@ fn test_linear_vars() {
 }
 
 #[test]
+fn test_linear_to_device() {
+    let linear = nn::Linear::new(4, 3);
+    linear.to_device(Device::Mps).unwrap();
+
+    for var in linear.vars() {
+        assert_eq!(var.device(), Device::Mps);
+    }
+}
+
+#[test]
+fn test_linear_to_same_device_noop() {
+    let linear = nn::Linear::new(4, 3);
+    linear.to_device(Device::Cpu).unwrap();
+
+    for var in linear.vars() {
+        assert_eq!(var.device(), Device::Cpu);
+    }
+}
+
+#[test]
 fn test_sequential_forward() {
     let model = nn::seq()
         .add(nn::Linear::new(4, 3))
@@ -36,6 +56,17 @@ fn test_sequential_vars() {
         .add(nn::Linear::new(3, 2));
     // 2 Linear layers × 2 vars each (weight + bias)
     assert_eq!(model.vars().len(), 4);
+}
+
+#[test]
+fn test_sequential_to_device() {
+    let model = nn::seq()
+        .add(nn::Linear::new(4, 3))
+        .add(nn::ReLU)
+        .add(nn::Linear::new(3, 2));
+    model.to_device(Device::Mps).unwrap();
+
+    assert!(model.vars().iter().all(|var| var.device() == Device::Mps));
 }
 
 #[test]

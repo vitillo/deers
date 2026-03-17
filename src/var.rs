@@ -23,6 +23,14 @@ impl Var {
         *dst_guard = src_guard.clone();
         Ok(())
     }
+
+    pub fn to_device(&self, device: crate::Device) -> Result<()> {
+        if self.device() == device {
+            return Ok(());
+        }
+        let tensor = self.0.to_device(device)?;
+        self.set(&tensor)
+    }
 }
 
 impl Deref for Var {

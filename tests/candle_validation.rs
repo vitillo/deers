@@ -348,7 +348,7 @@ fn validate_nll_loss_backward() {
     // deers: logits -> log_softmax -> nll_loss -> backward
     let da = Tensor::from_vec(logits.clone(), (2, 3), Device::Cpu).attach();
     let db = da.log_softmax(1);
-    let dloss = deers::loss::nll_loss(&db, &Tensor::from_vec(vec![2.0f32, 0.0], (2,), Device::Cpu));
+    let dloss = deers::loss::nll_loss(&db, &Tensor::from_vec(vec![2u32, 0], (2,), Device::Cpu));
     let dgrads = dloss.backward().unwrap();
     let dgrad: Vec<f32> = dgrads.get(da.id()).unwrap().to_vec().unwrap();
 
@@ -406,7 +406,7 @@ fn validate_linear_cross_entropy_step() {
     let w2_data = vec![0.2f32, -0.1, 0.3, 0.4, -0.2, 0.1]; // (3, 2)
     let b2_data = vec![0.05f32, -0.05]; // (2,)
     let targets_u32 = vec![1u32, 0];
-    let targets_f32 = vec![1.0f32, 0.0];
+    let targets_u32_deers = vec![1u32, 0];
 
     // --- deers ---
     let dx = Tensor::from_vec(x_data.clone(), (2, 4), Device::Cpu);
@@ -434,7 +434,7 @@ fn validate_linear_cross_entropy_step() {
     let dlogits_vals: Vec<f32> = dlogits_bias.to_vec().unwrap();
 
     // cross_entropy
-    let dtargets = Tensor::from_vec(targets_f32.clone(), (2,), Device::Cpu);
+    let dtargets = Tensor::from_vec(targets_u32_deers.clone(), (2,), Device::Cpu);
     let dloss = deers::loss::cross_entropy(&dlogits_bias, &dtargets);
     let dloss_val: Vec<f32> = dloss.to_vec().unwrap();
 

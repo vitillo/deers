@@ -13,6 +13,13 @@ pub trait Module {
     fn vars(&self) -> Vec<Var> {
         vec![]
     }
+
+    fn to_device(&self, device: Device) -> Result<()> {
+        for var in self.vars() {
+            var.to_device(device)?;
+        }
+        Ok(())
+    }
 }
 
 /// Fully connected layer: `y = x @ weight + bias`.
@@ -25,7 +32,8 @@ impl Linear {
     /// Creates a Linear layer with uniform [-k, k] initialization (k = 1/sqrt(in)).
     pub fn new(in_features: usize, out_features: usize) -> Self {
         let k = 1.0 / (in_features as f64).sqrt();
-        let weight = Var::new(Tensor::rand((in_features, out_features), DType::F32, Device::Cpu) * 2.0 * k - k);
+        let weight =
+            Var::new(Tensor::rand((in_features, out_features), DType::F32, Device::Cpu) * 2.0 * k - k);
         let bias = Var::new(Tensor::rand((out_features,), DType::F32, Device::Cpu) * 2.0 * k - k);
         Self { weight, bias }
     }
