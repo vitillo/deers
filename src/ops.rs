@@ -583,7 +583,11 @@ impl TensorOp for Broadcast {
             }
         }
 
-        let layout = Layout::new(self.new_shape.clone(), new_strides, 0);
+        let layout = Layout::new(
+            self.new_shape.clone(),
+            new_strides,
+            self.arg.layout().offset,
+        );
         let storage = self.arg.storage_clone();
         Ok(Tensor::new(
             storage,
@@ -604,7 +608,9 @@ impl TensorOp for Broadcast {
             .collect();
 
         // Find axes that were broadcasted
-        let axes: Vec<_> = shape.into_iter().zip(self.new_shape.iter().copied())
+        let axes: Vec<_> = shape
+            .into_iter()
+            .zip(self.new_shape.iter().copied())
             .enumerate()
             .filter(|(_, (o, n))| o != n)
             .map(|(i, _)| i)
@@ -1018,11 +1024,11 @@ impl Gather {
 impl TensorOp for Gather {
     fn forward(self) -> Result<Tensor> {
         let rows = self.input.layout().shape()[0];
-        let storage = Arc::new(RwLock::new(
-            self.input
-                .storage()
-                .gather(self.input.layout(), self.dim, &self.indices)?,
-        ));
+        let storage = Arc::new(RwLock::new(self.input.storage().gather(
+            self.input.layout(),
+            self.dim,
+            &self.indices,
+        )?));
         let shape: Shape = (rows, 1).into();
         Ok(Tensor::new(
             storage,

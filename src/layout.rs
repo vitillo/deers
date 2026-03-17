@@ -177,9 +177,9 @@ impl Layout {
         }
     }
 
-    /// Returns true if this layout is contiguous row-major (no gaps or reordering).
+    /// Returns true if this layout is contiguous row-major (no gaps, reordering, or offset).
     pub fn is_compact(&self) -> bool {
-        self.shape.compact_strides() == self.strides
+        self.offset == 0 && self.shape.compact_strides() == self.strides
     }
 
 }
@@ -221,5 +221,11 @@ mod tests {
 
         assert_eq!(layout.shape.shape, vec![3, 4, 2]);
         assert_eq!(layout.strides.0, vec![4, 1, 12]);
+    }
+
+    #[test]
+    fn test_layout_with_offset_is_not_compact() {
+        let layout = Layout::new(Shape::from((2, 3)), Strides::from(vec![3, 1]), 1);
+        assert!(!layout.is_compact());
     }
 }
