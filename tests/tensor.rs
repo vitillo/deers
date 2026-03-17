@@ -315,6 +315,25 @@ fn test_permute_backward() {
 }
 
 #[test]
+fn test_permute_backward_uses_inverse_permutation() {
+    let a = Tensor::from_vec((0..24).map(|v| v as f32).collect::<Vec<_>>(), (2, 3, 4), Device::Cpu)
+        .attach();
+    let b = a.permute(vec![1, 2, 0]);
+    let grad = Tensor::from_vec((0..24).map(|v| v as f32).collect::<Vec<_>>(), (3, 4, 2), Device::Cpu);
+    let loss = (&b * &grad).sum(vec![0, 1, 2], false);
+
+    let grads = loss.backward().unwrap();
+
+    assert_eq!(
+        grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![
+            0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0,
+            1.0, 3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0, 19.0, 21.0, 23.0,
+        ]
+    );
+}
+
+#[test]
 fn test_broadcast() {
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu);
 
