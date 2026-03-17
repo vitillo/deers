@@ -498,7 +498,7 @@ impl TensorOp for ScalarPowf {
     }
 
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let arg_grad = (out_grad * &self.arg * self.e).scalar_powf(self.e - 1.0);
+        let arg_grad = out_grad * self.e * self.arg.scalar_powf(self.e - 1.0);
         let sum_grad = store.get_or_insert_zero(&self.arg);
         *sum_grad = &*sum_grad + arg_grad;
         Ok(())

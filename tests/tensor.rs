@@ -288,6 +288,19 @@ fn test_scalar_powf() {
 }
 
 #[test]
+fn test_scalar_powf_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu).attach();
+    let b = a.scalar_powf(3.0);
+
+    let grads = b.backward().unwrap();
+
+    assert_eq!(
+        grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![3.0, 12.0, 27.0]
+    );
+}
+
+#[test]
 fn test_permute() {
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
 
