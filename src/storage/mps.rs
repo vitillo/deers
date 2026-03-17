@@ -535,6 +535,73 @@ mod imp {
     }
 
     impl MpsStorage {
+        pub fn empty(len: usize, dtype: DType) -> Self {
+            let ctx = MpsContext::shared();
+            let buffer = match dtype {
+                DType::F32 => ctx.empty_f32_buffer(len),
+                DType::U32 => ctx.empty_u32_buffer(len),
+                DType::F64 => todo!(),
+                DType::F16 => todo!(),
+            };
+            Self {
+                inner: MpsInner::Accelerated {
+                    ctx,
+                    buffer,
+                    len,
+                    dtype,
+                },
+            }
+        }
+
+        pub fn zeros(len: usize, dtype: DType) -> Self {
+            let storage = Self::empty(len, dtype);
+            let (buffer, byte_len) = match &storage.inner {
+                MpsInner::Accelerated { buffer, len, dtype, .. } => {
+                    let elem_size = match dtype {
+                        DType::F32 => std::mem::size_of::<f32>(),
+                        DType::U32 => std::mem::size_of::<u32>(),
+                        DType::F64 => todo!(),
+                        DType::F16 => todo!(),
+                    };
+                    (buffer, len * elem_size)
+                }
+                MpsInner::Cpu(_) => unreachable!(),
+            };
+            unsafe {
+                std::ptr::write_bytes(buffer.contents(), 0, byte_len);
+            }
+            storage
+        }
+
+        pub fn ones(len: usize, dtype: DType) -> Self {
+            let storage = Self::empty(len, dtype);
+            match &storage.inner {
+                MpsInner::Accelerated {
+                    buffer,
+                    len,
+                    dtype: DType::F32,
+                    ..
+                } => {
+                    let slice =
+                        unsafe { std::slice::from_raw_parts_mut(buffer.contents().cast::<f32>(), *len) };
+                    slice.fill(1.0);
+                }
+                MpsInner::Accelerated {
+                    buffer,
+                    len,
+                    dtype: DType::U32,
+                    ..
+                } => {
+                    let slice =
+                        unsafe { std::slice::from_raw_parts_mut(buffer.contents().cast::<u32>(), *len) };
+                    slice.fill(1);
+                }
+                MpsInner::Accelerated { dtype, .. } => todo!("MPS ones for {dtype:?}"),
+                MpsInner::Cpu(_) => unreachable!(),
+            }
+            storage
+        }
+
         pub fn from_cpu_storage(inner: CpuStorage) -> Self {
             match inner {
                 CpuStorage::F32(data) => {
@@ -1104,6 +1171,7 @@ mod imp {
             MpsInner::Cpu(_) => unreachable!(),
         }
     }
+
 }
 
 #[cfg(not(target_os = "macos"))]

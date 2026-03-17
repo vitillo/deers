@@ -6,7 +6,7 @@ use std::{fmt, iter};
 use crate::backprop::GradientStore;
 use crate::error::Result;
 use crate::layout::{Layout, Shape};
-use crate::storage::{self, BackendStorage, ReduceMax, ReduceSum};
+use crate::storage::{self, BackendStorage, MpsStorage, ReduceMax, ReduceSum, Storage};
 use crate::tensor::Tensor;
 
 /// An operator in the computation graph with forward and backward passes.
@@ -105,6 +105,53 @@ impl TensorOp for EWiseAdd {
 
         let grad_sum = store.get_or_insert_zero(&self.arg2);
         *grad_sum = &*grad_sum + out_grad;
+
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg1, &self.arg2]
+    }
+}
+
+#[derive(Debug)]
+pub struct EWiseSub {
+    arg1: Tensor,
+    arg2: Tensor,
+}
+
+impl EWiseSub {
+    pub fn new(arg1: Tensor, arg2: Tensor) -> Result<Self> {
+        assert!(arg1.layout().shape() == arg2.layout().shape());
+        Ok(Self { arg1, arg2 })
+    }
+}
+
+impl TensorOp for EWiseSub {
+    fn forward(self) -> Result<Tensor> {
+        let storage = Arc::new(RwLock::new(
+            self.arg1.storage().binary_op::<storage::EWiseSub>(
+                self.arg1.layout(),
+                &self.arg2.storage(),
+                self.arg2.layout(),
+            )?,
+        ));
+        Ok(Tensor::new(
+            storage,
+            Layout::from(self.arg1.layout().shape().clone()),
+            self.arg1.device(),
+            self.arg1.dtype(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let grad_sum = store.get_or_insert_zero(&self.arg1);
+        *grad_sum = &*grad_sum + out_grad;
+
+        let grad_sum = store.get_or_insert_zero(&self.arg2);
+        *grad_sum = &*grad_sum - out_grad;
 
         Ok(())
     }
@@ -971,10 +1018,13 @@ impl Compact {
 
 impl TensorOp for Compact {
     fn forward(self) -> Result<Tensor> {
-        let mut storage = self
-            .arg
-            .device()
-            .zeros(self.arg.layout().size(), self.arg.dtype());
+        let mut storage = match self.arg.device() {
+            crate::Device::Mps => Storage::Mps(MpsStorage::empty(
+                self.arg.layout().size(),
+                self.arg.dtype(),
+            )),
+            _ => self.arg.device().zeros(self.arg.layout().size(), self.arg.dtype()),
+        };
         self.arg
             .storage()
             .copy_compact(self.arg.layout(), &mut storage)?;
