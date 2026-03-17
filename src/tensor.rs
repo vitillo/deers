@@ -206,7 +206,14 @@ impl Tensor {
             _ => unimplemented!(),
         };
         let layout: Layout = shape.into();
-        Tensor::new(Arc::new(RwLock::new(storage)), layout, device, dtype, false, None)
+        Tensor::new(
+            Arc::new(RwLock::new(storage)),
+            layout,
+            device,
+            dtype,
+            false,
+            None,
+        )
     }
 
     /// Create a tensor with values drawn from a standard normal distribution.
@@ -238,7 +245,14 @@ impl Tensor {
             _ => unimplemented!(),
         };
         let layout: Layout = shape.into();
-        Tensor::new(Arc::new(RwLock::new(storage)), layout, device, dtype, false, None)
+        Tensor::new(
+            Arc::new(RwLock::new(storage)),
+            layout,
+            device,
+            dtype,
+            false,
+            None,
+        )
     }
 
     /// Copies the tensor data into a flat `Vec`, respecting strides.
@@ -315,7 +329,7 @@ impl Tensor {
             .unwrap()
     }
 
-    /// Returns the maximum along the given axes. Backward is not yet implemented.
+    /// Returns the maximum along the given axes.
     pub fn max(&self, axis: Vec<usize>, keep_dims: bool) -> Tensor {
         ops::Max::new(self.clone(), axis, keep_dims)
             .forward()
@@ -374,6 +388,23 @@ impl Tensor {
         ops::Relu::new(self.clone()).unwrap().forward().unwrap()
     }
 
+    pub(crate) fn eq(&self, other: &Tensor) -> Tensor {
+        let (a, b) = broadcast_pair(self, other);
+        let storage = Arc::new(RwLock::new(
+            a.storage()
+                .binary_op::<crate::storage::EWiseEq>(a.layout(), &b.storage(), b.layout())
+                .unwrap(),
+        ));
+        Tensor::new(
+            storage,
+            Layout::from(a.layout().shape().clone()),
+            a.device(),
+            a.dtype(),
+            false,
+            None,
+        )
+    }
+
     /// Numerically stable `log(sum(exp(x)))` along the given axes.
     pub fn log_sum_exp(&self, axes: Vec<usize>) -> Tensor {
         ops::LogSumExp::new(self.clone(), axes).forward().unwrap()
@@ -409,9 +440,7 @@ impl Tensor {
                 v as usize
             })
             .collect();
-        ops::Gather::new(self.clone(), dim, idx)
-            .forward()
-            .unwrap()
+        ops::Gather::new(self.clone(), dim, idx).forward().unwrap()
     }
 }
 
@@ -420,9 +449,20 @@ fn broadcast_shape(a: &Shape, b: &Shape) -> Shape {
     let ndim = a.ndim().max(b.ndim());
     let mut out = Vec::with_capacity(ndim);
     for i in 0..ndim {
-        let da = if i < ndim - a.ndim() { 1 } else { a[i - (ndim - a.ndim())] };
-        let db = if i < ndim - b.ndim() { 1 } else { b[i - (ndim - b.ndim())] };
-        assert!(da == db || da == 1 || db == 1, "incompatible shapes for broadcast");
+        let da = if i < ndim - a.ndim() {
+            1
+        } else {
+            a[i - (ndim - a.ndim())]
+        };
+        let db = if i < ndim - b.ndim() {
+            1
+        } else {
+            b[i - (ndim - b.ndim())]
+        };
+        assert!(
+            da == db || da == 1 || db == 1,
+            "incompatible shapes for broadcast"
+        );
         out.push(da.max(db));
     }
     out.into()

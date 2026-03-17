@@ -247,6 +247,24 @@ fn validate_broadcast_backward() {
 }
 
 #[test]
+fn validate_max_backward() {
+    let data = vec![1.0f32, 3.0, 2.0, 4.0];
+
+    let da = Tensor::from_vec(data.clone(), (2, 2), Device::Cpu).attach();
+    let db = da.max(vec![1], false);
+    let dc = db.sum(vec![0], false);
+    let dgrads = dc.backward().unwrap();
+    let dgrad: Vec<f32> = dgrads.get(da.id()).unwrap().to_vec().unwrap();
+
+    let ca = cvar(data, &[2, 2]);
+    let cb = ca.max(1).unwrap();
+    let cc = cb.sum_all().unwrap();
+    let cgrads = cc.backward().unwrap();
+
+    assert_vecs_close(&dgrad, &cgrad(&cgrads, &ca), "max");
+}
+
+#[test]
 fn validate_permute_backward() {
     let data = (0..24).map(|v| v as f32).collect::<Vec<_>>();
     let grad = (0..24).map(|v| v as f32).collect::<Vec<_>>();

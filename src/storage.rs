@@ -138,6 +138,20 @@ impl_binary_op!(EWiseMul, "mul", mul);
 impl_binary_op!(EWiseDiv, "div", div);
 impl_binary_op!(EWisePow, "powf", powf);
 
+pub struct EWiseEq;
+
+impl BinaryOp for EWiseEq {
+    const KERNEL: &'static str = "eq";
+
+    fn f32(v: f32, w: f32) -> f32 {
+        if v == w { 1.0 } else { 0.0 }
+    }
+
+    fn f64(v: f64, w: f64) -> f64 {
+        if v == w { 1.0 } else { 0.0 }
+    }
+}
+
 /// A reduction operation that combines elements (e.g. sum, max).
 pub trait ReduceOp {
     const KERNEL: &'static str;
