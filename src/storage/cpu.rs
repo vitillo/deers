@@ -269,6 +269,10 @@ impl BackendStorage for CpuStorage {
         let cols = layout.shape[1];
         assert_eq!(indices.len(), rows);
 
+        for &idx in indices {
+            assert!(idx < cols, "gather index out of bounds");
+        }
+
         match self {
             CpuStorage::F32(data) => {
                 let out: Vec<f32> = indices
@@ -300,6 +304,10 @@ impl BackendStorage for CpuStorage {
         assert_eq!(dim, 1, "scatter_add only supports dim=1 for 2D tensors");
         let rows = full_shape[0];
         let cols = full_shape[1];
+
+        for &idx in indices {
+            assert!(idx < cols, "scatter index out of bounds");
+        }
 
         match self {
             CpuStorage::F32(data) => {
