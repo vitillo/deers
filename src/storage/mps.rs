@@ -11,8 +11,8 @@ use crate::{
 mod imp {
     use super::*;
     use metal::{
-        Buffer, CommandQueue, CompileOptions, ComputePipelineState, Device, Library, MTLResourceOptions,
-        MTLSize,
+        Buffer, CommandBuffer, CommandQueue, CompileOptions, ComputePipelineState, Device, Library,
+        MTLResourceOptions, MTLSize,
     };
     use std::collections::HashMap;
     use std::ffi::c_void;
@@ -378,6 +378,7 @@ mod imp {
         queue: CommandQueue,
         library: Library,
         pipelines: Mutex<HashMap<&'static str, ComputePipelineState>>,
+        active_command_buffer: Mutex<Option<CommandBuffer>>,
     }
 
     impl MpsContext {
@@ -398,7 +399,16 @@ mod imp {
                 queue,
                 library,
                 pipelines: Mutex::new(HashMap::new()),
+                active_command_buffer: Mutex::new(None),
             }
+        }
+
+        fn command_buffer(&self) -> std::sync::MutexGuard<'_, Option<CommandBuffer>> {
+            let mut guard = self.active_command_buffer.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(self.queue.new_command_buffer().to_owned());
+            }
+            guard
         }
 
         fn pipeline(&self, name: &'static str) -> ComputePipelineState {
@@ -452,9 +462,16 @@ mod imp {
         }
 
         fn synchronize(&self) {
-            let command_buffer = self.queue.new_command_buffer();
-            command_buffer.commit();
-            command_buffer.wait_until_completed();
+            let mut guard = self.active_command_buffer.lock().unwrap();
+            if let Some(cb) = guard.take() {
+                cb.commit();
+                cb.wait_until_completed();
+            } else {
+                // Nothing pending — still need a fence for shared-memory buffers
+                let cb = self.queue.new_command_buffer();
+                cb.commit();
+                cb.wait_until_completed();
+            }
         }
 
         fn param_buffer<T>(&self, value: &T) -> Buffer {
@@ -472,15 +489,15 @@ mod imp {
             configure: impl FnOnce(&metal::ComputeCommandEncoderRef),
         ) {
             let pipeline = self.pipeline(pipeline_name);
-            let command_buffer = self.queue.new_command_buffer();
-            let encoder = command_buffer.new_compute_command_encoder();
+            let guard = self.command_buffer();
+            let cb = guard.as_ref().unwrap();
+            let encoder = cb.new_compute_command_encoder();
             encoder.set_compute_pipeline_state(&pipeline);
             configure(&encoder);
             let width = total_threads.max(1) as u64;
             let tg = pipeline.max_total_threads_per_threadgroup().min(256) as u64;
             encoder.dispatch_threads(MTLSize::new(width, 1, 1), MTLSize::new(tg.max(1), 1, 1));
             encoder.end_encoding();
-            command_buffer.commit();
         }
 
         fn dispatch_2d(
@@ -491,8 +508,9 @@ mod imp {
             configure: impl FnOnce(&metal::ComputeCommandEncoderRef),
         ) {
             let pipeline = self.pipeline(pipeline_name);
-            let command_buffer = self.queue.new_command_buffer();
-            let encoder = command_buffer.new_compute_command_encoder();
+            let guard = self.command_buffer();
+            let cb = guard.as_ref().unwrap();
+            let encoder = cb.new_compute_command_encoder();
             encoder.set_compute_pipeline_state(&pipeline);
             configure(&encoder);
             encoder.dispatch_threads(
@@ -500,7 +518,6 @@ mod imp {
                 MTLSize::new(16, 16, 1),
             );
             encoder.end_encoding();
-            command_buffer.commit();
         }
     }
 
