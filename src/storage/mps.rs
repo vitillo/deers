@@ -11,7 +11,7 @@ use crate::{
 mod imp {
     use super::*;
     use metal::{
-        Buffer, CommandBuffer, CommandQueue, CompileOptions, ComputePipelineState, Device, Library,
+        Buffer, CommandBuffer, CommandQueue, CompileOptions, ComputePipelineState, Device,
         MTLResourceOptions, MTLSize,
     };
     use std::collections::HashMap;
@@ -394,12 +394,20 @@ mod imp {
         cols: u32,
     }
 
+    const ALL_KERNELS: &[&str] = &[
+        "neg_f32", "exp_f32", "log_f32", "relu_f32", "relu_backward_f32",
+        "scalar_add_f32", "scalar_mul_f32", "scalar_div_f32", "scalar_powf_f32",
+        "copy_compact_f32", "copy_compact_u32",
+        "add_f32", "sub_f32", "mul_f32", "div_f32", "pow_f32", "eq_f32",
+        "reduce_sum_f32", "reduce_max_f32",
+        "matmul_f32", "gather_f32", "scatter_f32",
+    ];
+
     #[derive(Debug)]
     struct MpsContext {
         device: Device,
         queue: CommandQueue,
-        library: Library,
-        pipelines: Mutex<HashMap<&'static str, ComputePipelineState>>,
+        pipelines: HashMap<&'static str, ComputePipelineState>,
         active_command_buffer: Mutex<Option<CommandBuffer>>,
     }
 
@@ -416,11 +424,23 @@ mod imp {
                 .new_library_with_source(KERNELS, &options)
                 .expect("failed to compile Metal kernels");
             let queue = device.new_command_queue();
+
+            // Pre-cache all pipelines at init — no locks needed on the hot path
+            let mut pipelines = HashMap::new();
+            for &name in ALL_KERNELS {
+                let function = library
+                    .get_function(name, None)
+                    .unwrap_or_else(|_| panic!("missing Metal function {name}"));
+                let pipeline = device
+                    .new_compute_pipeline_state_with_function(&function)
+                    .unwrap_or_else(|_| panic!("failed to build Metal pipeline {name}"));
+                pipelines.insert(name, pipeline);
+            }
+
             Self {
                 device,
                 queue,
-                library,
-                pipelines: Mutex::new(HashMap::new()),
+                pipelines,
                 active_command_buffer: Mutex::new(None),
             }
         }
@@ -433,22 +453,8 @@ mod imp {
             guard
         }
 
-        fn pipeline(&self, name: &'static str) -> ComputePipelineState {
-            let mut pipelines = self.pipelines.lock().unwrap();
-            if let Some(pipeline) = pipelines.get(name) {
-                return pipeline.to_owned();
-            }
-
-            let function = self
-                .library
-                .get_function(name, None)
-                .unwrap_or_else(|_| panic!("missing Metal function {name}"));
-            let pipeline = self
-                .device
-                .new_compute_pipeline_state_with_function(&function)
-                .unwrap_or_else(|_| panic!("failed to build Metal pipeline {name}"));
-            pipelines.insert(name, pipeline.to_owned());
-            pipeline
+        fn pipeline(&self, name: &'static str) -> &ComputePipelineState {
+            self.pipelines.get(name).unwrap_or_else(|| panic!("missing pipeline {name}"))
         }
 
         fn buffer_from_f32(&self, data: &[f32]) -> Buffer {
