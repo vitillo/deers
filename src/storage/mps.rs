@@ -284,19 +284,41 @@ mod imp {
             output[id] = acc;
         }
 
+        constant uint TILE = 16;
+
         kernel void matmul_f32(
             device const float* lhs [[buffer(0)]],
             device const float* rhs [[buffer(1)]],
             device float* output [[buffer(2)]],
             constant MatmulMeta& meta [[buffer(3)]],
-            uint2 gid [[thread_position_in_grid]]
+            uint2 gid [[thread_position_in_grid]],
+            uint2 tid [[thread_position_in_threadgroup]],
+            uint2 tgid [[threadgroup_position_in_grid]]
         ) {
-            if (gid.x >= meta.p || gid.y >= meta.m) return;
+            threadgroup float tileA[TILE][TILE];
+            threadgroup float tileB[TILE][TILE];
+
+            uint row = tgid.y * TILE + tid.y;
+            uint col = tgid.x * TILE + tid.x;
             float acc = 0.0f;
-            for (uint k = 0; k < meta.n; k++) {
-                acc += lhs[gid.y * meta.n + k] * rhs[k * meta.p + gid.x];
+
+            uint num_tiles = (meta.n + TILE - 1) / TILE;
+            for (uint t = 0; t < num_tiles; t++) {
+                uint ak = t * TILE + tid.x;
+                uint bk = t * TILE + tid.y;
+                tileA[tid.y][tid.x] = (row < meta.m && ak < meta.n) ? lhs[row * meta.n + ak] : 0.0f;
+                tileB[tid.y][tid.x] = (bk < meta.n && col < meta.p) ? rhs[bk * meta.p + col] : 0.0f;
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                for (uint k = 0; k < TILE; k++) {
+                    acc += tileA[tid.y][k] * tileB[k][tid.x];
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
             }
-            output[gid.y * meta.p + gid.x] = acc;
+
+            if (row < meta.m && col < meta.p) {
+                output[row * meta.p + col] = acc;
+            }
         }
 
         kernel void gather_f32(
