@@ -502,12 +502,12 @@ mod imp {
             }
         }
 
-        fn param_buffer<T>(&self, value: &T) -> Buffer {
-            self.device.new_buffer_with_data(
-                (value as *const T).cast::<c_void>(),
+        fn set_params<T>(encoder: &metal::ComputeCommandEncoderRef, index: u64, value: &T) {
+            encoder.set_bytes(
+                index,
                 std::mem::size_of::<T>() as u64,
-                MTLResourceOptions::StorageModeShared,
-            )
+                (value as *const T).cast::<c_void>(),
+            );
         }
 
         fn dispatch_1d(
@@ -803,11 +803,10 @@ mod imp {
                     pad1: 0,
                     pad2: 0,
                 };
-                let params = ctx.param_buffer(&params);
                 ctx.dispatch_1d("scalar_powf_f32", l.size(), |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(&out), 0);
-                    encoder.set_buffer(2, Some(&params), 0);
+                    MpsContext::set_params(encoder, 2, &params);
                 });
                 return Ok(Self {
                     inner: MpsInner::Accelerated {
@@ -827,11 +826,11 @@ mod imp {
             if let Some((ctx, input, _)) = self.accelerated(DType::F32) {
                 if let Some(kernel) = Self::unary_kernel_name::<O>() {
                     let out = ctx.empty_f32_buffer(l.size());
-                    let meta = ctx.param_buffer(&Self::strided_meta(l));
+                    let meta = Self::strided_meta(l);
                     ctx.dispatch_1d(kernel, l.size(), |encoder| {
                         encoder.set_buffer(0, Some(input), 0);
                         encoder.set_buffer(1, Some(&out), 0);
-                        encoder.set_buffer(2, Some(&meta), 0);
+                        MpsContext::set_params(encoder, 2, &meta);
                     });
                     return Ok(Self {
                         inner: MpsInner::Accelerated {
@@ -858,11 +857,10 @@ mod imp {
                         pad1: 0,
                         pad2: 0,
                     };
-                    let params = ctx.param_buffer(&params);
                     ctx.dispatch_1d(kernel, l.size(), |encoder| {
                         encoder.set_buffer(0, Some(input), 0);
                         encoder.set_buffer(1, Some(&out), 0);
-                        encoder.set_buffer(2, Some(&params), 0);
+                        MpsContext::set_params(encoder, 2, &params);
                     });
                     return Ok(Self {
                         inner: MpsInner::Accelerated {
@@ -894,12 +892,11 @@ mod imp {
                         lhs: Self::strided_meta(layout),
                         rhs: Self::strided_meta(other_layout),
                     };
-                    let meta = ctx.param_buffer(&meta);
                     ctx.dispatch_1d(kernel, layout.size(), |encoder| {
                         encoder.set_buffer(0, Some(lhs), 0);
                         encoder.set_buffer(1, Some(rhs), 0);
                         encoder.set_buffer(2, Some(&out), 0);
-                        encoder.set_buffer(3, Some(&meta), 0);
+                        MpsContext::set_params(encoder, 3, &meta);
                     });
                     return Ok(Self {
                         inner: MpsInner::Accelerated {
@@ -928,7 +925,6 @@ mod imp {
                     outer_size: out_len as u32,
                     reduce_size: reduce_size as u32,
                 };
-                let meta = ctx.param_buffer(&meta);
                 let kernel = match O::KERNEL {
                     "reduce_sum" => "reduce_sum_f32",
                     "reduce_max" => "reduce_max_f32",
@@ -937,7 +933,7 @@ mod imp {
                 ctx.dispatch_1d(kernel, out_len, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(output), 0);
-                    encoder.set_buffer(2, Some(&meta), 0);
+                    MpsContext::set_params(encoder, 2, &meta);
                 });
                 return Ok(());
             }
@@ -962,12 +958,11 @@ mod imp {
                     n: n as u32,
                     p: p as u32,
                 };
-                let meta = ctx.param_buffer(&meta);
                 ctx.dispatch_2d("matmul_f32", p, m, |encoder| {
                     encoder.set_buffer(0, Some(lhs), 0);
                     encoder.set_buffer(1, Some(rhs), 0);
                     encoder.set_buffer(2, Some(&out), 0);
-                    encoder.set_buffer(3, Some(&meta), 0);
+                    MpsContext::set_params(encoder, 3, &meta);
                 });
                 return Ok(Self {
                     inner: MpsInner::Accelerated {
@@ -1005,12 +1000,11 @@ mod imp {
                     rows: rows as u32,
                     cols: cols as u32,
                 };
-                let meta = ctx.param_buffer(&meta);
                 ctx.dispatch_1d("gather_f32", rows, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(index_buffer), 0);
                     encoder.set_buffer(2, Some(&out), 0);
-                    encoder.set_buffer(3, Some(&meta), 0);
+                    MpsContext::set_params(encoder, 3, &meta);
                 });
                 return Ok(Self {
                     inner: MpsInner::Accelerated {
@@ -1056,12 +1050,11 @@ mod imp {
                     rows: rows as u32,
                     cols: cols as u32,
                 };
-                let meta = ctx.param_buffer(&meta);
                 ctx.dispatch_1d("scatter_f32", rows, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(index_buffer), 0);
                     encoder.set_buffer(2, Some(&out), 0);
-                    encoder.set_buffer(3, Some(&meta), 0);
+                    MpsContext::set_params(encoder, 3, &meta);
                 });
                 return Ok(Self {
                     inner: MpsInner::Accelerated {
@@ -1119,11 +1112,11 @@ mod imp {
                 (self.accelerated(DType::F32), dst.accelerated(DType::F32))
             {
                 assert_eq!(src_layout.size(), out_len);
-                let meta = ctx.param_buffer(&Self::strided_meta(src_layout));
+                let meta = Self::strided_meta(src_layout);
                 ctx.dispatch_1d("copy_compact_f32", out_len, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(output), 0);
-                    encoder.set_buffer(2, Some(&meta), 0);
+                    MpsContext::set_params(encoder, 2, &meta);
                 });
                 return Ok(());
             }
@@ -1132,11 +1125,11 @@ mod imp {
                 (self.accelerated(DType::U32), dst.accelerated(DType::U32))
             {
                 assert_eq!(src_layout.size(), out_len);
-                let meta = ctx.param_buffer(&Self::strided_meta(src_layout));
+                let meta = Self::strided_meta(src_layout);
                 ctx.dispatch_1d("copy_compact_u32", out_len, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(output), 0);
-                    encoder.set_buffer(2, Some(&meta), 0);
+                    MpsContext::set_params(encoder, 2, &meta);
                 });
                 return Ok(());
             }
