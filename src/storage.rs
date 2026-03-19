@@ -58,6 +58,8 @@ macro_rules! unary_op {
 
 unary_op!(Exp, "exp", v, v.exp());
 unary_op!(Log, "log", v, v.ln());
+unary_op!(Sin, "sin", v, v.sin());
+unary_op!(Cos, "cos", v, v.cos());
 unary_op!(Tanh, "tanh", v, v.tanh());
 pub struct Relu;
 

@@ -247,6 +247,74 @@ fn test_ewise_exp_backward() {
 }
 
 #[test]
+fn test_ewise_sin() {
+    let a = Tensor::from_vec(
+        vec![0.0f32, std::f32::consts::FRAC_PI_2, std::f32::consts::PI],
+        (3,),
+        Device::Cpu,
+    );
+
+    let b = a.sin();
+
+    Vec::<_>::assert_approx_eq(b.to_vec::<f32>().unwrap(), vec![0.0, 1.0, 0.0]);
+}
+
+#[test]
+fn test_ewise_sin_backward() {
+    let a = Tensor::from_vec(
+        vec![0.0f32, std::f32::consts::FRAC_PI_2, std::f32::consts::PI],
+        (3,),
+        Device::Cpu,
+    )
+    .attach();
+    let b = &a.sin();
+
+    let grads = b.backward().unwrap();
+
+    Vec::<_>::assert_approx_eq(grads.get(a.id()).unwrap().to_vec().unwrap(), vec![1.0, 0.0, -1.0]);
+}
+
+#[test]
+fn test_ewise_cos() {
+    let a = Tensor::from_vec(
+        vec![0.0f32, std::f32::consts::FRAC_PI_2, std::f32::consts::PI],
+        (3,),
+        Device::Cpu,
+    );
+
+    let b = a.cos();
+
+    Vec::<_>::assert_approx_eq(b.to_vec::<f32>().unwrap(), vec![1.0, 0.0, -1.0]);
+}
+
+#[test]
+fn test_ewise_cos_backward() {
+    let a = Tensor::from_vec(
+        vec![0.0f32, std::f32::consts::FRAC_PI_2, std::f32::consts::PI],
+        (3,),
+        Device::Cpu,
+    )
+    .attach();
+    let b = &a.cos();
+
+    let grads = b.backward().unwrap();
+
+    Vec::<_>::assert_approx_eq(grads.get(a.id()).unwrap().to_vec().unwrap(), vec![0.0, -1.0, 0.0]);
+}
+
+#[test]
+fn test_mps_sin_cos() {
+    let a = Tensor::from_vec(
+        vec![0.0f32, std::f32::consts::FRAC_PI_2, std::f32::consts::PI],
+        (3,),
+        Device::Mps,
+    );
+
+    Vec::<_>::assert_approx_eq(a.sin().to_vec::<f32>().unwrap(), vec![0.0, 1.0, 0.0]);
+    Vec::<_>::assert_approx_eq(a.cos().to_vec::<f32>().unwrap(), vec![1.0, 0.0, -1.0]);
+}
+
+#[test]
 fn test_scalar_add() {
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu);
 
