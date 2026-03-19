@@ -137,11 +137,7 @@ pub struct Layout {
 impl Layout {
     /// Creates a layout with explicit shape, strides, and offset.
     pub fn new(shape: impl Into<Shape>, strides: impl Into<Strides>, offset: usize) -> Self {
-        Self {
-            shape: shape.into(),
-            strides: strides.into(),
-            offset,
-        }
+        Self { shape: shape.into(), strides: strides.into(), offset }
     }
 
     /// Returns the shape of this layout.
@@ -170,28 +166,19 @@ impl Layout {
 
         let shape = axis.iter().map(|&i| self.shape[i]).collect();
         let strides = axis.iter().map(|&i| self.strides.0[i]).collect();
-        Self {
-            shape: Shape::new(shape),
-            strides: Strides(strides),
-            offset: self.offset,
-        }
+        Self { shape: Shape::new(shape), strides: Strides(strides), offset: self.offset }
     }
 
     /// Returns true if this layout is contiguous row-major (no gaps, reordering, or offset).
     pub fn is_compact(&self) -> bool {
         self.offset == 0 && self.shape.compact_strides() == self.strides
     }
-
 }
 
 impl From<Shape> for Layout {
     fn from(shape: Shape) -> Self {
         let strides = shape.compact_strides();
-        Self {
-            shape,
-            strides,
-            offset: 0,
-        }
+        Self { shape, strides, offset: 0 }
     }
 }
 

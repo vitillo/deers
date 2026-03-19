@@ -20,10 +20,8 @@ fn main() {
     let train_labels = dataset.train_labels;
     let test_labels = dataset.test_labels;
 
-    let model = nn::seq()
-        .add(nn::Linear::new(784, 128))
-        .add(nn::ReLU)
-        .add(nn::Linear::new(128, 10));
+    let model =
+        nn::seq().add(nn::Linear::new(784, 128)).add(nn::ReLU).add(nn::Linear::new(128, 10));
     model.to_device(device).unwrap();
 
     println!("Device: {device:?}");
@@ -54,11 +52,7 @@ fn main() {
             sgd.backward_step(&batch_loss).unwrap();
 
             if batch_idx % 25 == 0 || batch_idx + 1 == num_batches {
-                println!(
-                    "batch {}/{num_batches} | loss: {:.4}",
-                    batch_idx + 1,
-                    loss_val[0]
-                );
+                println!("batch {}/{num_batches} | loss: {:.4}", batch_idx + 1, loss_val[0]);
             }
         }
 
@@ -105,12 +99,7 @@ fn usage(message: &str) -> ! {
     process::exit(if message.is_empty() { 0 } else { 1 });
 }
 
-fn evaluate(
-    model: &impl Module,
-    images: &Tensor,
-    labels: &Tensor,
-    batch_size: usize,
-) -> f64 {
+fn evaluate(model: &impl Module, images: &Tensor, labels: &Tensor, batch_size: usize) -> f64 {
     let num_batches = 10000 / batch_size;
     let mut correct = 0usize;
 
@@ -124,12 +113,8 @@ fn evaluate(
 
         for i in 0..batch_size {
             let row = &logit_vals[i * 10..(i + 1) * 10];
-            let pred = row
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                .unwrap()
-                .0;
+            let pred =
+                row.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
             if pred == batch_labels[i] as usize {
                 correct += 1;
             }

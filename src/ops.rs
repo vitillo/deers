@@ -40,11 +40,8 @@ impl Neg {
 
 impl TensorOp for Neg {
     fn forward(self) -> Result<Tensor> {
-        let storage = Arc::new(RwLock::new(
-            self.arg
-                .storage()
-                .unary_op(storage::Neg, self.arg.layout())?,
-        ));
+        let storage =
+            Arc::new(RwLock::new(self.arg.storage().unary_op(storage::Neg, self.arg.layout())?));
         let layout = Layout::from(self.arg.layout().shape().clone());
         Ok(Tensor::new(
             storage,
@@ -82,13 +79,11 @@ impl EWiseAdd {
 
 impl TensorOp for EWiseAdd {
     fn forward(self) -> Result<Tensor> {
-        let storage = Arc::new(RwLock::new(
-            self.arg1.storage().binary_op::<storage::EWiseAdd>(
-                self.arg1.layout(),
-                &self.arg2.storage(),
-                self.arg2.layout(),
-            )?,
-        ));
+        let storage = Arc::new(RwLock::new(self.arg1.storage().binary_op::<storage::EWiseAdd>(
+            self.arg1.layout(),
+            &self.arg2.storage(),
+            self.arg2.layout(),
+        )?));
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg1.layout().shape().clone()),
@@ -129,13 +124,11 @@ impl EWiseSub {
 
 impl TensorOp for EWiseSub {
     fn forward(self) -> Result<Tensor> {
-        let storage = Arc::new(RwLock::new(
-            self.arg1.storage().binary_op::<storage::EWiseSub>(
-                self.arg1.layout(),
-                &self.arg2.storage(),
-                self.arg2.layout(),
-            )?,
-        ));
+        let storage = Arc::new(RwLock::new(self.arg1.storage().binary_op::<storage::EWiseSub>(
+            self.arg1.layout(),
+            &self.arg2.storage(),
+            self.arg2.layout(),
+        )?));
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg1.layout().shape().clone()),
@@ -176,13 +169,11 @@ impl EWiseMul {
 
 impl TensorOp for EWiseMul {
     fn forward(self) -> Result<Tensor> {
-        let storage = Arc::new(RwLock::new(
-            self.arg1.storage().binary_op::<storage::EWiseMul>(
-                self.arg1.layout(),
-                &self.arg2.storage(),
-                self.arg2.layout(),
-            )?,
-        ));
+        let storage = Arc::new(RwLock::new(self.arg1.storage().binary_op::<storage::EWiseMul>(
+            self.arg1.layout(),
+            &self.arg2.storage(),
+            self.arg2.layout(),
+        )?));
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg1.layout().shape().clone()),
@@ -223,13 +214,11 @@ impl EWiseDiv {
 
 impl TensorOp for EWiseDiv {
     fn forward(self) -> Result<Tensor> {
-        let storage = Arc::new(RwLock::new(
-            self.arg1.storage().binary_op::<storage::EWiseDiv>(
-                self.arg1.layout(),
-                &self.arg2.storage(),
-                self.arg2.layout(),
-            )?,
-        ));
+        let storage = Arc::new(RwLock::new(self.arg1.storage().binary_op::<storage::EWiseDiv>(
+            self.arg1.layout(),
+            &self.arg2.storage(),
+            self.arg2.layout(),
+        )?));
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg1.layout().shape().clone()),
@@ -269,13 +258,11 @@ impl EWisePowf {
 
 impl TensorOp for EWisePowf {
     fn forward(self) -> Result<Tensor> {
-        let storage = Arc::new(RwLock::new(
-            self.arg.storage().binary_op::<storage::EWisePow>(
-                self.arg.layout(),
-                &self.e.storage(),
-                self.e.layout(),
-            )?,
-        ));
+        let storage = Arc::new(RwLock::new(self.arg.storage().binary_op::<storage::EWisePow>(
+            self.arg.layout(),
+            &self.e.storage(),
+            self.e.layout(),
+        )?));
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
@@ -316,11 +303,8 @@ impl EWiseLog {
 
 impl TensorOp for EWiseLog {
     fn forward(self) -> Result<Tensor> {
-        let storage = Arc::new(RwLock::new(
-            self.arg
-                .storage()
-                .unary_op(storage::Log, self.arg.layout())?,
-        ));
+        let storage =
+            Arc::new(RwLock::new(self.arg.storage().unary_op(storage::Log, self.arg.layout())?));
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
@@ -355,11 +339,8 @@ impl EWiseExp {
 
 impl TensorOp for EWiseExp {
     fn forward(self) -> Result<Tensor> {
-        let storage = Arc::new(RwLock::new(
-            self.arg
-                .storage()
-                .unary_op(storage::Exp, self.arg.layout())?,
-        ));
+        let storage =
+            Arc::new(RwLock::new(self.arg.storage().unary_op(storage::Exp, self.arg.layout())?));
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
@@ -394,11 +375,8 @@ impl Tanh {
 
 impl TensorOp for Tanh {
     fn forward(self) -> Result<Tensor> {
-        let storage = Arc::new(RwLock::new(
-            self.arg
-                .storage()
-                .unary_op(storage::Tanh, self.arg.layout())?,
-        ));
+        let storage =
+            Arc::new(RwLock::new(self.arg.storage().unary_op(storage::Tanh, self.arg.layout())?));
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
@@ -435,11 +413,8 @@ impl Relu {
 
 impl TensorOp for Relu {
     fn forward(self) -> Result<Tensor> {
-        let storage = Arc::new(RwLock::new(
-            self.arg
-                .storage()
-                .unary_op(storage::Relu, self.arg.layout())?,
-        ));
+        let storage =
+            Arc::new(RwLock::new(self.arg.storage().unary_op(storage::Relu, self.arg.layout())?));
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
@@ -453,9 +428,7 @@ impl TensorOp for Relu {
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         // grad is out_grad * (input > 0)
         let mask_storage = Arc::new(RwLock::new(
-            self.arg
-                .storage()
-                .unary_op(storage::ReluBackward, self.arg.layout())?,
+            self.arg.storage().unary_op(storage::ReluBackward, self.arg.layout())?,
         ));
         let mask = Tensor::new(
             mask_storage,
@@ -490,9 +463,7 @@ impl ScalarAdd {
 impl TensorOp for ScalarAdd {
     fn forward(self) -> Result<Tensor> {
         let storage = Arc::new(RwLock::new(
-            self.arg
-                .storage()
-                .unary_op(storage::ScalarAdd(self.scalar), self.arg.layout())?,
+            self.arg.storage().unary_op(storage::ScalarAdd(self.scalar), self.arg.layout())?,
         ));
         Ok(Tensor::new(
             storage,
@@ -531,9 +502,7 @@ impl ScalarMul {
 impl TensorOp for ScalarMul {
     fn forward(self) -> Result<Tensor> {
         let storage = Arc::new(RwLock::new(
-            self.arg
-                .storage()
-                .unary_op(storage::ScalarMul(self.scalar), self.arg.layout())?,
+            self.arg.storage().unary_op(storage::ScalarMul(self.scalar), self.arg.layout())?,
         ));
         Ok(Tensor::new(
             storage,
@@ -572,9 +541,8 @@ impl ScalarPowf {
 
 impl TensorOp for ScalarPowf {
     fn forward(self) -> Result<Tensor> {
-        let storage = Arc::new(RwLock::new(
-            self.arg.storage().ewise_powf(self.e, self.arg.layout())?,
-        ));
+        let storage =
+            Arc::new(RwLock::new(self.arg.storage().ewise_powf(self.e, self.arg.layout())?));
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
@@ -671,11 +639,7 @@ impl TensorOp for Broadcast {
             }
         }
 
-        let layout = Layout::new(
-            self.new_shape.clone(),
-            new_strides,
-            self.arg.layout().offset,
-        );
+        let layout = Layout::new(self.new_shape.clone(), new_strides, self.arg.layout().offset);
         let storage = self.arg.storage_clone();
         Ok(Tensor::new(
             storage,
@@ -705,9 +669,7 @@ impl TensorOp for Broadcast {
             .collect();
 
         // Sum out broadcasted axes
-        let out_grad = out_grad
-            .sum(axes, false)
-            .reshape(self.arg.layout().shape().clone());
+        let out_grad = out_grad.sum(axes, false).reshape(self.arg.layout().shape().clone());
 
         let sum_grad = grads.get_or_insert_zero(&self.arg);
         *sum_grad = &*sum_grad + out_grad;
@@ -729,11 +691,7 @@ pub struct Sum {
 impl Sum {
     pub fn new(arg: Tensor, axis: Vec<usize>, keep_dims: bool) -> Self {
         assert!(axis.iter().all(|&i| i < arg.layout().ndim()));
-        Self {
-            arg,
-            axis,
-            keep_dims,
-        }
+        Self { arg, axis, keep_dims }
     }
 }
 
@@ -767,8 +725,7 @@ impl TensorOp for Sum {
 
         let view = self.arg.permute(permuted_dims).compact();
         let mut out_storage = self.arg.device().zeros(new_shape.size(), self.arg.dtype());
-        view.storage()
-            .reduce::<ReduceSum>(view.layout(), &mut out_storage)?;
+        view.storage().reduce::<ReduceSum>(view.layout(), &mut out_storage)?;
         let storage = Arc::new(RwLock::new(out_storage));
         Ok(Tensor::new(
             storage,
@@ -791,9 +748,7 @@ impl TensorOp for Sum {
             .collect::<Vec<usize>>()
             .into();
 
-        let out_grad = out_grad
-            .reshape(shape)
-            .broadcast(self.arg.layout().shape().clone());
+        let out_grad = out_grad.reshape(shape).broadcast(self.arg.layout().shape().clone());
         let sum_grad = grads.get_or_insert_zero(&self.arg);
         *sum_grad = &*sum_grad + out_grad;
         Ok(())
@@ -815,11 +770,7 @@ impl Max {
     pub fn new(arg: Tensor, axis: Vec<usize>, keep_dims: bool) -> Self {
         // TODO: refactor with Sum forward implementation
         assert!(axis.iter().all(|&i| i < arg.layout().ndim()));
-        Self {
-            arg,
-            axis,
-            keep_dims,
-        }
+        Self { arg, axis, keep_dims }
     }
 }
 
@@ -853,8 +804,7 @@ impl TensorOp for Max {
 
         let view = self.arg.permute(permuted_dims).compact();
         let mut out_storage = self.arg.device().zeros(new_shape.size(), self.arg.dtype());
-        view.storage()
-            .reduce::<ReduceMax>(view.layout(), &mut out_storage)?;
+        view.storage().reduce::<ReduceMax>(view.layout(), &mut out_storage)?;
         let storage = Arc::new(RwLock::new(out_storage));
         Ok(Tensor::new(
             storage,
@@ -893,10 +843,7 @@ pub struct Reshape {
 impl Reshape {
     pub fn new(arg: Tensor, new_shape: Shape) -> Self {
         assert!(arg.layout().size() == new_shape.size());
-        Self {
-            arg: arg.compact(),
-            new_shape,
-        }
+        Self { arg: arg.compact(), new_shape }
     }
 }
 
@@ -951,13 +898,12 @@ impl MatMul {
             assert!(
                 a.shape()[i] == b.shape()[i],
                 "matmul batch dimension {} mismatch: {} vs {}",
-                i, a.shape()[i], b.shape()[i]
+                i,
+                a.shape()[i],
+                b.shape()[i]
             );
         }
-        Ok(Self {
-            arg1: arg1.compact(),
-            arg2: arg2.compact(),
-        })
+        Ok(Self { arg1: arg1.compact(), arg2: arg2.compact() })
     }
 }
 
@@ -1026,9 +972,7 @@ impl TensorOp for LogSumExp {
         // https://gregorygundersen.com/blog/2020/02/09/log-sum-exp/
         let max_z = self.arg.max(self.axes.clone(), true);
         let broadcast_max_z = max_z.broadcast(self.arg.layout().shape().clone());
-        let sum_z = (&self.arg - &broadcast_max_z)
-            .exp()
-            .sum(self.axes.clone(), false);
+        let sum_z = (&self.arg - &broadcast_max_z).exp().sum(self.axes.clone(), false);
         let logsumexp = max_z.reshape(sum_z.layout().shape.clone()) + sum_z.log();
 
         Ok(Tensor::new(
@@ -1054,9 +998,8 @@ impl TensorOp for LogSumExp {
             }
             shape
         };
-        let grad_sum_z = (out_grad / sum_z)
-            .reshape(expand_shape)
-            .broadcast(self.arg.layout().shape().clone());
+        let grad_sum_z =
+            (out_grad / sum_z).reshape(expand_shape).broadcast(self.arg.layout().shape().clone());
         let arg_grad = grad_sum_z * exp_z;
 
         let sum_grad = grads.get_or_insert_zero(&self.arg);
@@ -1083,15 +1026,12 @@ impl Compact {
 impl TensorOp for Compact {
     fn forward(self) -> Result<Tensor> {
         let mut storage = match self.arg.device() {
-            crate::Device::Mps => Storage::Mps(MpsStorage::empty(
-                self.arg.layout().size(),
-                self.arg.dtype(),
-            )),
+            crate::Device::Mps => {
+                Storage::Mps(MpsStorage::empty(self.arg.layout().size(), self.arg.dtype()))
+            }
             _ => self.arg.device().zeros(self.arg.layout().size(), self.arg.dtype()),
         };
-        self.arg
-            .storage()
-            .copy_compact(self.arg.layout(), &mut storage)?;
+        self.arg.storage().copy_compact(self.arg.layout(), &mut storage)?;
         let strides = self.arg.layout().shape().compact_strides();
         let layout = Layout::new(self.arg.layout().shape().clone(), strides, 0);
         Ok(Tensor::new(
@@ -1136,11 +1076,7 @@ impl Gather {
         assert_eq!(indices.layout().shape()[0], input.layout().shape()[0]);
         assert_eq!(indices.dtype(), crate::DType::U32, "gather indices must be u32");
         let indices = indices.to_device(input.device()).unwrap();
-        Self {
-            input: input.compact(),
-            dim,
-            indices: indices.compact(),
-        }
+        Self { input: input.compact(), dim, indices: indices.compact() }
     }
 }
 
@@ -1232,7 +1168,8 @@ impl TensorOp for Cat {
 
         let storage = {
             let guards: Vec<_> = self.args.iter().map(|a| a.storage()).collect();
-            let parts: Vec<(&Storage, usize)> = guards.iter()
+            let parts: Vec<(&Storage, usize)> = guards
+                .iter()
                 .zip(self.args.iter())
                 .map(|(g, a)| (&**g, a.layout().size()))
                 .collect();

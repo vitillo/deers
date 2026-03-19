@@ -137,12 +137,7 @@ mod imp {
                 pipelines.insert(name, pipeline);
             }
 
-            Self {
-                device,
-                queue,
-                pipelines,
-                active_command_buffer: Mutex::new(None),
-            }
+            Self { device, queue, pipelines, active_command_buffer: Mutex::new(None) }
         }
 
         fn command_buffer(&self) -> std::sync::MutexGuard<'_, Option<CommandBuffer>> {
@@ -262,12 +257,7 @@ mod imp {
 
     #[derive(Clone)]
     enum MpsInner {
-        Accelerated {
-            ctx: Arc<MpsContext>,
-            buffer: Buffer,
-            len: usize,
-            dtype: DType,
-        },
+        Accelerated { ctx: Arc<MpsContext>, buffer: Buffer, len: usize, dtype: DType },
         Cpu(CpuStorage),
     }
 
@@ -299,14 +289,7 @@ mod imp {
                 DType::F64 => todo!(),
                 DType::F16 => todo!(),
             };
-            Self {
-                inner: MpsInner::Accelerated {
-                    ctx,
-                    buffer,
-                    len,
-                    dtype,
-                },
-            }
+            Self { inner: MpsInner::Accelerated { ctx, buffer, len, dtype } }
         }
 
         pub fn zeros(len: usize, dtype: DType) -> Self {
@@ -332,24 +315,16 @@ mod imp {
         pub fn ones(len: usize, dtype: DType) -> Self {
             let storage = Self::empty(len, dtype);
             match &storage.inner {
-                MpsInner::Accelerated {
-                    buffer,
-                    len,
-                    dtype: DType::F32,
-                    ..
-                } => {
-                    let slice =
-                        unsafe { std::slice::from_raw_parts_mut(buffer.contents().cast::<f32>(), *len) };
+                MpsInner::Accelerated { buffer, len, dtype: DType::F32, .. } => {
+                    let slice = unsafe {
+                        std::slice::from_raw_parts_mut(buffer.contents().cast::<f32>(), *len)
+                    };
                     slice.fill(1.0);
                 }
-                MpsInner::Accelerated {
-                    buffer,
-                    len,
-                    dtype: DType::U32,
-                    ..
-                } => {
-                    let slice =
-                        unsafe { std::slice::from_raw_parts_mut(buffer.contents().cast::<u32>(), *len) };
+                MpsInner::Accelerated { buffer, len, dtype: DType::U32, .. } => {
+                    let slice = unsafe {
+                        std::slice::from_raw_parts_mut(buffer.contents().cast::<u32>(), *len)
+                    };
                     slice.fill(1);
                 }
                 MpsInner::Accelerated { dtype, .. } => todo!("MPS ones for {dtype:?}"),
@@ -384,9 +359,7 @@ mod imp {
                         },
                     }
                 }
-                storage => Self {
-                    inner: MpsInner::Cpu(storage),
-                },
+                storage => Self { inner: MpsInner::Cpu(storage) },
             }
         }
 
@@ -427,39 +400,22 @@ mod imp {
                 byte_offset += byte_len;
             }
             MpsStorage {
-                inner: MpsInner::Accelerated {
-                    ctx,
-                    buffer: out_buffer,
-                    len: total_len,
-                    dtype,
-                },
+                inner: MpsInner::Accelerated { ctx, buffer: out_buffer, len: total_len, dtype },
             }
         }
 
         pub fn into_cpu(self) -> CpuStorage {
             match self.inner {
-                MpsInner::Accelerated {
-                    ctx,
-                    buffer,
-                    len,
-                    dtype: DType::F32,
-                } => {
+                MpsInner::Accelerated { ctx, buffer, len, dtype: DType::F32 } => {
                     ctx.synchronize();
-                    let slice = unsafe {
-                        std::slice::from_raw_parts(buffer.contents().cast::<f32>(), len)
-                    };
+                    let slice =
+                        unsafe { std::slice::from_raw_parts(buffer.contents().cast::<f32>(), len) };
                     CpuStorage::F32(slice.to_vec())
                 }
-                MpsInner::Accelerated {
-                    ctx,
-                    buffer,
-                    len,
-                    dtype: DType::U32,
-                } => {
+                MpsInner::Accelerated { ctx, buffer, len, dtype: DType::U32 } => {
                     ctx.synchronize();
-                    let slice = unsafe {
-                        std::slice::from_raw_parts(buffer.contents().cast::<u32>(), len)
-                    };
+                    let slice =
+                        unsafe { std::slice::from_raw_parts(buffer.contents().cast::<u32>(), len) };
                     CpuStorage::U32(slice.to_vec())
                 }
                 MpsInner::Accelerated { dtype, .. } => todo!("MPS readback for {dtype:?}"),
@@ -526,12 +482,11 @@ mod imp {
 
         fn accelerated(&self, dtype: DType) -> Option<(&Arc<MpsContext>, &Buffer, usize)> {
             match &self.inner {
-                MpsInner::Accelerated {
-                    ctx,
-                    buffer,
-                    len,
-                    dtype: inner_dtype,
-                } if *inner_dtype == dtype => Some((ctx, buffer, *len)),
+                MpsInner::Accelerated { ctx, buffer, len, dtype: inner_dtype }
+                    if *inner_dtype == dtype =>
+                {
+                    Some((ctx, buffer, *len))
+                }
                 MpsInner::Cpu(_) => None,
                 MpsInner::Accelerated { .. } => None,
             }
@@ -667,9 +622,11 @@ mod imp {
                 }
             }
 
-            let inner = self
-                .as_cpu_storage()
-                .binary_op::<O>(layout, &other.as_cpu_storage(), other_layout)?;
+            let inner = self.as_cpu_storage().binary_op::<O>(
+                layout,
+                &other.as_cpu_storage(),
+                other_layout,
+            )?;
             Ok(Self::from_cpu_storage(inner))
         }
 
@@ -679,10 +636,8 @@ mod imp {
             {
                 assert!(layout.is_compact());
                 let reduce_size = layout.size() / out_len;
-                let meta = ReduceMeta {
-                    outer_size: out_len as u32,
-                    reduce_size: reduce_size as u32,
-                };
+                let meta =
+                    ReduceMeta { outer_size: out_len as u32, reduce_size: reduce_size as u32 };
                 let kernel = match O::KERNEL {
                     "reduce_sum" => "reduce_sum_f32",
                     "reduce_max" => "reduce_max_f32",
@@ -696,8 +651,7 @@ mod imp {
                 return Ok(());
             }
 
-            self.as_cpu_storage()
-                .reduce::<O>(layout, &mut dst.clone().into_cpu())?;
+            self.as_cpu_storage().reduce::<O>(layout, &mut dst.clone().into_cpu())?;
             *dst = Self::from_cpu_storage(dst.clone().into_cpu());
             Ok(())
         }
@@ -714,12 +668,8 @@ mod imp {
                 let batch: usize = (0..ndim - 2).map(|i| layout.shape()[i]).product();
                 let total = batch * m * n;
                 let out = ctx.empty_f32_buffer(total);
-                let meta = MatmulMeta {
-                    m: m as u32,
-                    k: k as u32,
-                    n: n as u32,
-                    batch: batch as u32,
-                };
+                let meta =
+                    MatmulMeta { m: m as u32, k: k as u32, n: n as u32, batch: batch as u32 };
                 // Matmul uses tiled algorithm — must dispatch full threadgroups
                 // so all 16x16 threads cooperate on tile loading.
                 let pipeline = ctx.pipeline("matmul_f32");
@@ -750,9 +700,8 @@ mod imp {
                 });
             }
 
-            let inner = self
-                .as_cpu_storage()
-                .matmul(layout, &other.as_cpu_storage(), layout_other)?;
+            let inner =
+                self.as_cpu_storage().matmul(layout, &other.as_cpu_storage(), layout_other)?;
             Ok(Self::from_cpu_storage(inner))
         }
 
@@ -772,10 +721,7 @@ mod imp {
                 let rows = layout.shape()[0];
                 let cols = layout.shape()[1];
                 let out = ctx.empty_f32_buffer(rows);
-                let meta = GatherMeta {
-                    rows: rows as u32,
-                    cols: cols as u32,
-                };
+                let meta = GatherMeta { rows: rows as u32, cols: cols as u32 };
                 ctx.dispatch_1d("gather_f32", rows, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(index_buffer), 0);
@@ -792,9 +738,12 @@ mod imp {
                 });
             }
 
-            let inner = self
-                .as_cpu_storage()
-                .gather(layout, dim, &indices.as_cpu_storage(), indices_layout)?;
+            let inner = self.as_cpu_storage().gather(
+                layout,
+                dim,
+                &indices.as_cpu_storage(),
+                indices_layout,
+            )?;
             Ok(Self::from_cpu_storage(inner))
         }
 
@@ -822,10 +771,7 @@ mod imp {
                         rows * cols * std::mem::size_of::<f32>(),
                     );
                 }
-                let meta = GatherMeta {
-                    rows: rows as u32,
-                    cols: cols as u32,
-                };
+                let meta = GatherMeta { rows: rows as u32, cols: cols as u32 };
                 ctx.dispatch_1d("scatter_f32", rows, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(index_buffer), 0);
@@ -842,9 +788,13 @@ mod imp {
                 });
             }
 
-            let inner = self
-                .as_cpu_storage()
-                .scatter(layout, dim, &indices.as_cpu_storage(), indices_layout, full_shape)?;
+            let inner = self.as_cpu_storage().scatter(
+                layout,
+                dim,
+                &indices.as_cpu_storage(),
+                indices_layout,
+                full_shape,
+            )?;
             Ok(Self::from_cpu_storage(inner))
         }
 
@@ -858,22 +808,12 @@ mod imp {
         fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D> {
             let layout = layout.borrow();
             match &self.inner {
-                MpsInner::Accelerated {
-                    ctx,
-                    buffer,
-                    len,
-                    dtype: DType::F32,
-                } => {
+                MpsInner::Accelerated { ctx, buffer, len, dtype: DType::F32 } => {
                     ctx.synchronize();
                     let data = read_f32(ctx, buffer, *len, layout);
                     D::to_vec(&CpuStorage::F32(data))
                 }
-                MpsInner::Accelerated {
-                    ctx,
-                    buffer,
-                    len,
-                    dtype: DType::U32,
-                } => {
+                MpsInner::Accelerated { ctx, buffer, len, dtype: DType::U32 } => {
                     ctx.synchronize();
                     let data = read_u32(ctx, buffer, *len, layout);
                     D::to_vec(&CpuStorage::U32(data))
@@ -944,10 +884,9 @@ mod imp {
         ctx.synchronize();
 
         match dst.inner {
-            MpsInner::Accelerated { buffer, len, .. } => unsafe {
-                std::slice::from_raw_parts(buffer.contents().cast::<f32>(), len)
+            MpsInner::Accelerated { buffer, len, .. } => {
+                unsafe { std::slice::from_raw_parts(buffer.contents().cast::<f32>(), len) }.to_vec()
             }
-            .to_vec(),
             MpsInner::Cpu(_) => unreachable!(),
         }
     }
@@ -978,14 +917,12 @@ mod imp {
         ctx.synchronize();
 
         match dst.inner {
-            MpsInner::Accelerated { buffer, len, .. } => unsafe {
-                std::slice::from_raw_parts(buffer.contents().cast::<u32>(), len)
+            MpsInner::Accelerated { buffer, len, .. } => {
+                unsafe { std::slice::from_raw_parts(buffer.contents().cast::<u32>(), len) }.to_vec()
             }
-            .to_vec(),
             MpsInner::Cpu(_) => unreachable!(),
         }
     }
-
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1000,33 +937,69 @@ mod imp {
             panic!("MPS backend requires macOS — use Device::Cpu instead")
         }
 
-        pub fn empty(_len: usize, _dtype: DType) -> Self { Self::unavailable() }
-        pub fn zeros(_len: usize, _dtype: DType) -> Self { Self::unavailable() }
-        pub fn ones(_len: usize, _dtype: DType) -> Self { Self::unavailable() }
-        pub fn from_cpu_storage(_inner: CpuStorage) -> Self { Self::unavailable() }
-        pub fn cat(_parts: &[(&MpsStorage, usize)]) -> Self { Self::unavailable() }
-        pub fn into_cpu(self) -> CpuStorage { Self::unavailable() }
+        pub fn empty(_len: usize, _dtype: DType) -> Self {
+            Self::unavailable()
+        }
+        pub fn zeros(_len: usize, _dtype: DType) -> Self {
+            Self::unavailable()
+        }
+        pub fn ones(_len: usize, _dtype: DType) -> Self {
+            Self::unavailable()
+        }
+        pub fn from_cpu_storage(_inner: CpuStorage) -> Self {
+            Self::unavailable()
+        }
+        pub fn cat(_parts: &[(&MpsStorage, usize)]) -> Self {
+            Self::unavailable()
+        }
+        pub fn into_cpu(self) -> CpuStorage {
+            Self::unavailable()
+        }
     }
 
     impl From<Vec<f32>> for MpsStorage {
-        fn from(_: Vec<f32>) -> Self { Self::unavailable() }
+        fn from(_: Vec<f32>) -> Self {
+            Self::unavailable()
+        }
     }
 
     impl From<Vec<f64>> for MpsStorage {
-        fn from(_: Vec<f64>) -> Self { Self::unavailable() }
+        fn from(_: Vec<f64>) -> Self {
+            Self::unavailable()
+        }
     }
 
     impl BackendStorage for MpsStorage {
-        fn ewise_powf(&self, _: f64, _: &Layout) -> Result<Self> { Self::unavailable() }
-        fn unary_op<O: UnaryOp>(&self, _: O, _: &Layout) -> Result<Self> { Self::unavailable() }
-        fn binary_op<O: BinaryOp>(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> { Self::unavailable() }
-        fn reduce<O: ReduceOp>(&self, _: &Layout, _: &mut Self) -> Result<()> { Self::unavailable() }
-        fn matmul(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> { Self::unavailable() }
-        fn gather(&self, _: &Layout, _: usize, _: &Self, _: &Layout) -> Result<Self> { Self::unavailable() }
-        fn scatter(&self, _: &Layout, _: usize, _: &Self, _: &Layout, _: &[usize]) -> Result<Self> { Self::unavailable() }
-        fn dtype(&self) -> DType { Self::unavailable() }
-        fn to_vec<D: WithDType>(&self, _: impl Borrow<Layout>) -> Vec<D> { Self::unavailable() }
-        fn copy_compact(&self, _: &Layout, _: &mut Self) -> Result<()> { Self::unavailable() }
+        fn ewise_powf(&self, _: f64, _: &Layout) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn unary_op<O: UnaryOp>(&self, _: O, _: &Layout) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn binary_op<O: BinaryOp>(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn reduce<O: ReduceOp>(&self, _: &Layout, _: &mut Self) -> Result<()> {
+            Self::unavailable()
+        }
+        fn matmul(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn gather(&self, _: &Layout, _: usize, _: &Self, _: &Layout) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn scatter(&self, _: &Layout, _: usize, _: &Self, _: &Layout, _: &[usize]) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn dtype(&self) -> DType {
+            Self::unavailable()
+        }
+        fn to_vec<D: WithDType>(&self, _: impl Borrow<Layout>) -> Vec<D> {
+            Self::unavailable()
+        }
+        fn copy_compact(&self, _: &Layout, _: &mut Self) -> Result<()> {
+            Self::unavailable()
+        }
     }
 }
 

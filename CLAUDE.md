@@ -61,7 +61,11 @@ Only `thiserror`. Everything else is pure Rust.
 ```bash
 cargo build
 cargo test
+cargo fmt-check
+cargo lint
 ```
+
+Run `cargo fmt-check` and `cargo lint` after code changes before marking work done.
 
 ## Design principles
 

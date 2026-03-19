@@ -4,16 +4,10 @@ fn main() {
     let batch_size = 256;
     let iterations = 50;
 
-    let x_data: Vec<f32> = (0..batch_size * 784)
-        .map(|i| (i as f32 % 256.0) / 255.0)
-        .collect();
-    let w1_data: Vec<f32> = (0..784 * 128)
-        .map(|i| (i as f32 * 0.001).sin() * 0.05)
-        .collect();
+    let x_data: Vec<f32> = (0..batch_size * 784).map(|i| (i as f32 % 256.0) / 255.0).collect();
+    let w1_data: Vec<f32> = (0..784 * 128).map(|i| (i as f32 * 0.001).sin() * 0.05).collect();
     let b1_data: Vec<f32> = vec![0.0; 128];
-    let w2_data: Vec<f32> = (0..128 * 10)
-        .map(|i| (i as f32 * 0.002).sin() * 0.05)
-        .collect();
+    let w2_data: Vec<f32> = (0..128 * 10).map(|i| (i as f32 * 0.002).sin() * 0.05).collect();
     let b2_data: Vec<f32> = vec![0.0; 10];
     let targets_u32: Vec<u32> = (0..batch_size).map(|i| (i % 10) as u32).collect();
 
@@ -131,9 +125,8 @@ fn bench_candle_cpu(
     let w1 =
         Var::from_tensor(&CTensor::from_vec(w1_data.to_vec(), (784, 128), &CDevice::Cpu).unwrap())
             .unwrap();
-    let b1 =
-        Var::from_tensor(&CTensor::from_vec(b1_data.to_vec(), (128,), &CDevice::Cpu).unwrap())
-            .unwrap();
+    let b1 = Var::from_tensor(&CTensor::from_vec(b1_data.to_vec(), (128,), &CDevice::Cpu).unwrap())
+        .unwrap();
     let w2 =
         Var::from_tensor(&CTensor::from_vec(w2_data.to_vec(), (128, 10), &CDevice::Cpu).unwrap())
             .unwrap();
@@ -191,16 +184,14 @@ fn bench_candle_metal(
     };
 
     let x = CTensor::from_vec(x_data.to_vec(), (batch_size, 784), &device).unwrap();
-    let w1 =
-        Var::from_tensor(&CTensor::from_vec(w1_data.to_vec(), (784, 128), &device).unwrap())
-            .unwrap();
-    let b1 = Var::from_tensor(&CTensor::from_vec(b1_data.to_vec(), (128,), &device).unwrap())
+    let w1 = Var::from_tensor(&CTensor::from_vec(w1_data.to_vec(), (784, 128), &device).unwrap())
         .unwrap();
-    let w2 =
-        Var::from_tensor(&CTensor::from_vec(w2_data.to_vec(), (128, 10), &device).unwrap())
-            .unwrap();
-    let b2 = Var::from_tensor(&CTensor::from_vec(b2_data.to_vec(), (10,), &device).unwrap())
+    let b1 =
+        Var::from_tensor(&CTensor::from_vec(b1_data.to_vec(), (128,), &device).unwrap()).unwrap();
+    let w2 = Var::from_tensor(&CTensor::from_vec(w2_data.to_vec(), (128, 10), &device).unwrap())
         .unwrap();
+    let b2 =
+        Var::from_tensor(&CTensor::from_vec(b2_data.to_vec(), (10,), &device).unwrap()).unwrap();
     let targets = CTensor::from_vec(targets_u32.to_vec(), batch_size, &device).unwrap();
 
     let h = x.matmul(&w1).unwrap().broadcast_add(&b1).unwrap().relu().unwrap();

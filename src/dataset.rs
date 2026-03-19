@@ -33,16 +33,9 @@ impl MNISTDataset {
 
         let mut images = vec![0u8; num_images * num_rows * num_cols];
         file.read_exact(&mut images)?;
-        let images = images
-            .into_iter()
-            .map(|v| v as f32 / 255.0)
-            .collect::<Vec<f32>>();
+        let images = images.into_iter().map(|v| v as f32 / 255.0).collect::<Vec<f32>>();
 
-        Ok(Tensor::from_vec(
-            images,
-            (num_images, num_rows, num_cols),
-            Device::Cpu,
-        ))
+        Ok(Tensor::from_vec(images, (num_images, num_rows, num_cols), Device::Cpu))
     }
 
     fn parse_labels(label_path: &Path) -> Result<Tensor> {
@@ -65,13 +58,7 @@ impl MNISTDataset {
         let train_labels = Self::parse_labels(Path::new("data/mnist/train-labels-idx1-ubyte"))?;
         let test_images = Self::parse_images(Path::new("data/mnist/t10k-images-idx3-ubyte"))?;
         let test_labels = Self::parse_labels(Path::new("data/mnist/t10k-labels-idx1-ubyte"))?;
-        Ok(Self {
-            train_images,
-            train_labels,
-            test_images,
-            test_labels,
-            num_classes: 10,
-        })
+        Ok(Self { train_images, train_labels, test_images, test_labels, num_classes: 10 })
     }
 }
 
@@ -93,18 +80,9 @@ mod tests {
 
         let dataset = MNISTDataset::load().unwrap();
 
-        assert_eq!(
-            *dataset.train_images.layout().shape(),
-            Shape::from((60000, 28, 28))
-        );
-        assert_eq!(
-            *dataset.train_labels.layout().shape(),
-            Shape::from((60000,))
-        );
-        assert_eq!(
-            *dataset.test_images.layout().shape(),
-            Shape::from((10000, 28, 28))
-        );
+        assert_eq!(*dataset.train_images.layout().shape(), Shape::from((60000, 28, 28)));
+        assert_eq!(*dataset.train_labels.layout().shape(), Shape::from((60000,)));
+        assert_eq!(*dataset.test_images.layout().shape(), Shape::from((10000, 28, 28)));
         assert_eq!(*dataset.test_labels.layout().shape(), Shape::from((10000,)));
     }
 }

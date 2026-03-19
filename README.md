@@ -104,4 +104,14 @@ cargo build
 cargo test
 ```
 
+## Development
+
+Use the repo-standard formatting and linting commands:
+
+```
+cargo fmt
+cargo fmt-check
+cargo lint
+```
+
 Dependencies: `thiserror`, `rand`, `gemm`, and `metal` on macOS.

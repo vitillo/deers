@@ -16,10 +16,7 @@ fn assert_vecs_close(deers: &[f32], candle: &[f32], label: &str) {
         candle.len()
     );
     for (i, (d, c)) in deers.iter().zip(candle.iter()).enumerate() {
-        assert!(
-            (d - c).abs() < TOL as f32,
-            "{label}[{i}]: deers={d}, candle={c}"
-        );
+        assert!((d - c).abs() < TOL as f32, "{label}[{i}]: deers={d}, candle={c}");
     }
 }
 
@@ -36,13 +33,7 @@ fn ctensor(data: Vec<f32>, shape: &[usize]) -> CTensor {
 
 /// Helper: extract gradient as flat Vec<f32>
 fn cgrad(grads: &candle_core::backprop::GradStore, var: &Var) -> Vec<f32> {
-    grads
-        .get(var.as_tensor())
-        .unwrap()
-        .flatten_all()
-        .unwrap()
-        .to_vec1()
-        .unwrap()
+    grads.get(var.as_tensor()).unwrap().flatten_all().unwrap().to_vec1().unwrap()
 }
 
 #[test]
@@ -291,9 +282,7 @@ fn validate_mlp_forward_backward() {
     // This validates the gradient flow through a realistic computation graph.
     // Use values where x @ w1 has no exact zeros (to avoid ReLU subgradient convention differences)
     let x_data = vec![1.1f32, 0.7, -0.9, 2.1, 0.3, 1.4]; // (2, 3)
-    let w1_data = vec![
-        0.1f32, 0.2, 0.3, 0.4, 0.5, -0.1, 0.2, 0.3, -0.1, 0.6, -0.4, 0.2,
-    ]; // (3, 4)
+    let w1_data = vec![0.1f32, 0.2, 0.3, 0.4, 0.5, -0.1, 0.2, 0.3, -0.1, 0.6, -0.4, 0.2]; // (3, 4)
     let w2_data = vec![0.3f32, -0.2, 0.5, 0.1]; // (4, 1)
 
     // deers
@@ -371,11 +360,7 @@ fn validate_sgd_matches_candle() {
 
     // --- deers ---
     let dx = deers::Tensor::from_vec(x_data.clone(), (2, 2), deers::Device::Cpu);
-    let dw = deers::Var::new(deers::Tensor::from_vec(
-        w_data.clone(),
-        (2, 2),
-        deers::Device::Cpu,
-    ));
+    let dw = deers::Var::new(deers::Tensor::from_vec(w_data.clone(), (2, 2), deers::Device::Cpu));
     let mut dsgd = deers::optim::SGD::new(vec![dw.clone()], lr);
 
     let dout = dx.matmul(&dw).relu();

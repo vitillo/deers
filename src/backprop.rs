@@ -72,9 +72,7 @@ pub struct GradientStore {
 impl GradientStore {
     /// Creates an empty gradient store.
     pub fn new() -> Self {
-        Self {
-            store: HashMap::new(),
-        }
+        Self { store: HashMap::new() }
     }
 
     /// Returns the gradient for the given tensor id, if it exists.
@@ -87,9 +85,7 @@ impl GradientStore {
     }
 
     pub fn get_or_insert_zero(&mut self, tensor: &Tensor) -> &mut Tensor {
-        self.store
-            .entry(tensor.id())
-            .or_insert_with(|| tensor.zeros_like())
+        self.store.entry(tensor.id()).or_insert_with(|| tensor.zeros_like())
     }
 
     pub fn insert(&mut self, id: TensorId, tensor: Tensor) {
