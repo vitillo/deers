@@ -382,6 +382,47 @@ impl TensorOp for EWiseExp {
 }
 
 #[derive(Debug)]
+pub struct Tanh {
+    arg: Tensor,
+}
+
+impl Tanh {
+    pub fn new(arg: Tensor) -> Result<Self> {
+        Ok(Self { arg })
+    }
+}
+
+impl TensorOp for Tanh {
+    fn forward(self) -> Result<Tensor> {
+        let storage = Arc::new(RwLock::new(
+            self.arg
+                .storage()
+                .unary_op(storage::Tanh, self.arg.layout())?,
+        ));
+        Ok(Tensor::new(
+            storage,
+            Layout::from(self.arg.layout().shape().clone()),
+            self.arg.device(),
+            self.arg.dtype(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let out = self.arg.tanh();
+        let arg_grad = out_grad * (&out.square() * -1.0 + 1.0);
+        let arg_grad_sum = grads.get_or_insert_zero(&self.arg);
+        *arg_grad_sum = &*arg_grad_sum + arg_grad;
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
+#[derive(Debug)]
 pub struct Relu {
     arg: Tensor,
 }

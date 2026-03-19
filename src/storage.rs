@@ -55,6 +55,7 @@ macro_rules! unary_op {
 
 unary_op!(Exp, "exp", v, v.exp());
 unary_op!(Log, "log", v, v.ln());
+unary_op!(Tanh, "tanh", v, v.tanh());
 pub struct Relu;
 
 impl UnaryOp for Relu {

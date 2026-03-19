@@ -570,16 +570,14 @@ fn test_mps_matmul_batched_3d() {
     // Same test as test_matmul_batched_3d but on MPS
     let a = Tensor::from_vec(
         vec![
-            1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0,
-            7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
         ],
         vec![2, 2, 3],
         Device::Mps,
     );
     let b = Tensor::from_vec(
         vec![
-            1.0f32, 0.0, 0.0, 1.0, 1.0, 0.0,
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            1.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
         ],
         vec![2, 3, 2],
         Device::Mps,
@@ -644,8 +642,7 @@ fn test_matmul_batched_3d() {
     let a = Tensor::from_vec(
         vec![
             // batch 0: [[1,2,3],[4,5,6]]
-            1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0,
-            // batch 1: [[7,8,9],[10,11,12]]
+            1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, // batch 1: [[7,8,9],[10,11,12]]
             7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
         ],
         vec![2, 2, 3],
@@ -654,8 +651,7 @@ fn test_matmul_batched_3d() {
     let b = Tensor::from_vec(
         vec![
             // batch 0: [[1,0],[0,1],[1,0]]
-            1.0f32, 0.0, 0.0, 1.0, 1.0, 0.0,
-            // batch 1: [[1,1],[1,1],[1,1]]
+            1.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, // batch 1: [[1,1],[1,1],[1,1]]
             1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
         ],
         vec![2, 3, 2],
@@ -675,13 +671,17 @@ fn test_matmul_batched_3d() {
 #[test]
 fn test_matmul_batched_3d_backward() {
     let a = Tensor::from_vec(
-        vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+        vec![
+            1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ],
         vec![2, 2, 3],
         Device::Cpu,
     )
     .attach();
     let b = Tensor::from_vec(
-        vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        vec![
+            1.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        ],
         vec![2, 3, 2],
         Device::Cpu,
     )
@@ -946,6 +946,14 @@ fn test_tanh() {
 }
 
 #[test]
+fn test_tanh_large_values_saturate() {
+    let a = Tensor::from_vec(vec![1000.0f32, -1000.0], (2,), Device::Cpu);
+    let result: Vec<f32> = a.tanh().to_vec().unwrap();
+    let expected = vec![1.0, -1.0];
+    Vec::assert_approx_eq(&result, &expected);
+}
+
+#[test]
 fn test_tanh_backward() {
     let a = Tensor::from_vec(vec![0.0f32, 1.0], (2,), Device::Cpu).attach();
     let b = a.tanh();
@@ -1009,7 +1017,10 @@ fn test_cat_dim0() {
     let b = Tensor::from_vec(vec![4.0f32, 5.0, 6.0], (1, 3), Device::Cpu);
     let c = Tensor::cat(&[a, b], 0);
     assert_eq!(c.layout().shape, (2, 3).into());
-    assert_eq!(c.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert_eq!(
+        c.to_vec::<f32>().unwrap(),
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    );
 }
 
 #[test]
@@ -1018,7 +1029,10 @@ fn test_cat_dim1() {
     let b = Tensor::from_vec(vec![5.0f32, 6.0, 7.0, 8.0], (2, 2), Device::Cpu);
     let c = Tensor::cat(&[a, b], 1);
     assert_eq!(c.layout().shape, (2, 4).into());
-    assert_eq!(c.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 5.0, 6.0, 3.0, 4.0, 7.0, 8.0]);
+    assert_eq!(
+        c.to_vec::<f32>().unwrap(),
+        vec![1.0, 2.0, 5.0, 6.0, 3.0, 4.0, 7.0, 8.0]
+    );
 }
 
 #[test]
@@ -1028,8 +1042,14 @@ fn test_cat_backward() {
     let c = Tensor::cat(&[a.clone(), b.clone()], 0);
     let loss = c.sum(vec![0, 1], false);
     let grads = loss.backward().unwrap();
-    assert_eq!(grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(), vec![1.0, 1.0, 1.0]);
-    assert_eq!(grads.get(b.id()).unwrap().to_vec::<f32>().unwrap(), vec![1.0, 1.0, 1.0]);
+    assert_eq!(
+        grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![1.0, 1.0, 1.0]
+    );
+    assert_eq!(
+        grads.get(b.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![1.0, 1.0, 1.0]
+    );
 }
 
 #[test]
@@ -1038,7 +1058,10 @@ fn test_cat_mps() {
     let b = Tensor::from_vec(vec![4.0f32, 5.0, 6.0], (1, 3), Device::Mps);
     let c = Tensor::cat(&[a, b], 0);
     assert_eq!(c.layout().shape, (2, 3).into());
-    assert_eq!(c.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert_eq!(
+        c.to_vec::<f32>().unwrap(),
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    );
 }
 
 #[test]
@@ -1230,10 +1253,17 @@ fn test_mps_cross_entropy_end_to_end() {
 
 #[test]
 fn test_mps_narrow_to_vec() {
-    let a = Tensor::from_vec((0..32).map(|v| v as f32).collect::<Vec<_>>(), (8, 4), Device::Mps);
+    let a = Tensor::from_vec(
+        (0..32).map(|v| v as f32).collect::<Vec<_>>(),
+        (8, 4),
+        Device::Mps,
+    );
     let b = a.narrow(0, 2, 3);
 
-    assert_eq!(b.to_vec::<f32>().unwrap(), vec![8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0]);
+    assert_eq!(
+        b.to_vec::<f32>().unwrap(),
+        vec![8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0]
+    );
 }
 
 // --- Var & SGD tests ---

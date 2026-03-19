@@ -90,6 +90,16 @@ kernel void log_f32(
     output[id] = log(input[linear_to_offset(id, meta)]);
 }
 
+kernel void tanh_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = tanh(input[linear_to_offset(id, meta)]);
+}
+
 kernel void relu_f32(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
