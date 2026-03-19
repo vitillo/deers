@@ -389,7 +389,7 @@ impl TensorOp for Tanh {
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let out = self.arg.tanh();
-        let arg_grad = out_grad * (&out.square() * -1.0 + 1.0);
+        let arg_grad = out_grad * (&(&out * &out) * -1.0 + 1.0);
         let arg_grad_sum = grads.get_or_insert_zero(&self.arg);
         *arg_grad_sum = &*arg_grad_sum + arg_grad;
         Ok(())
@@ -1120,6 +1120,55 @@ impl TensorOp for Gather {
         let sum_grad = grads.get_or_insert_zero(&self.input);
         *sum_grad = &*sum_grad + &grad_tensor;
         Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.input, &self.indices]
+    }
+}
+
+/// Selects rows from a 2D tensor by index.
+/// Input shape: (rows, cols), indices: 1D u32 → output: (num_indices, cols).
+#[derive(Debug)]
+pub struct IndexSelect {
+    input: Tensor,
+    indices: Tensor,
+}
+
+impl IndexSelect {
+    pub fn new(input: Tensor, indices: Tensor) -> Self {
+        assert_eq!(input.layout().ndim(), 2, "index_select requires 2D input");
+        assert_eq!(indices.layout().ndim(), 1, "index_select requires 1D indices");
+        assert_eq!(indices.dtype(), crate::DType::U32, "index_select indices must be u32");
+        let indices = indices.to_device(input.device()).unwrap();
+        Self { input: input.compact(), indices: indices.compact() }
+    }
+}
+
+impl TensorOp for IndexSelect {
+    fn forward(self) -> Result<Tensor> {
+        let num_indices = self.indices.layout().shape()[0];
+        let cols = self.input.layout().shape()[1];
+        let storage = Arc::new(RwLock::new(self.input.storage().index_select(
+            self.input.layout(),
+            &self.indices.storage(),
+            self.indices.layout(),
+        )?));
+        let shape: Shape = (num_indices, cols).into();
+        Ok(Tensor::new(
+            storage,
+            shape.into(),
+            self.input.device(),
+            self.input.dtype(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, _grads: &mut GradientStore, _out_grad: &Tensor) -> Result<()> {
+        Err(crate::error::Error::NotImplemented(
+            "IndexSelect backward not yet implemented",
+        ))
     }
 
     fn dependencies(&self) -> Vec<&Tensor> {

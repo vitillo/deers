@@ -361,6 +361,11 @@ impl Tensor {
         ops::EWiseLog::new(self.clone()).unwrap().forward().unwrap()
     }
 
+    /// Element-wise square root.
+    pub fn sqrt(&self) -> Tensor {
+        self.scalar_powf(0.5)
+    }
+
     /// Element-wise exponential.
     pub fn exp(&self) -> Tensor {
         ops::EWiseExp::new(self.clone()).unwrap().forward().unwrap()
@@ -432,11 +437,6 @@ impl Tensor {
         ops::Cat::new(tensors.to_vec()).forward().unwrap()
     }
 
-    /// Element-wise square: `x²`.
-    pub fn square(&self) -> Tensor {
-        self * self
-    }
-
     /// Element-wise sigmoid: `1 / (1 + exp(-x))`.
     pub fn sigmoid(&self) -> Tensor {
         let denom = (-self).exp() + 1.0;
@@ -468,6 +468,12 @@ impl Tensor {
     /// returns shape `(rows, 1)` where `out[i, 0] = self[i, indices[i]]`.
     pub fn gather(&self, dim: usize, indices: &Tensor) -> Tensor {
         ops::Gather::new(self.clone(), dim, indices.clone()).forward().unwrap()
+    }
+
+    /// Selects rows from a 2D tensor by index.
+    /// Input: (rows, cols), indices: 1D u32 → output: (num_indices, cols).
+    pub fn index_select(&self, indices: &Tensor) -> Tensor {
+        ops::IndexSelect::new(self.clone(), indices.clone()).forward().unwrap()
     }
 }
 

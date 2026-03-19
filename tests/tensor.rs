@@ -799,23 +799,6 @@ fn test_relu_backward_with_mul() {
 }
 
 #[test]
-fn test_square() {
-    let a = Tensor::from_vec(vec![-2.0f32, -1.0, 0.0, 1.0, 2.0, 3.0], (2, 3), Device::Cpu);
-    let b = a.square();
-    assert_eq!(b.to_vec::<f32>().unwrap(), vec![4.0, 1.0, 0.0, 1.0, 4.0, 9.0]);
-}
-
-#[test]
-fn test_square_backward() {
-    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu).attach();
-    let b = a.square();
-    let loss = b.sum(vec![0], false);
-    let grads = loss.backward().unwrap();
-    // d(x²)/dx = 2x
-    assert_eq!(grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(), vec![2.0, 4.0, 6.0]);
-}
-
-#[test]
 fn test_sigmoid() {
     let a = Tensor::from_vec(vec![0.0f32, 1.0, -1.0, 10.0], (4,), Device::Cpu);
     let b = a.sigmoid();
@@ -949,6 +932,37 @@ fn test_cat_mps() {
     let c = Tensor::cat(&[a, b], 0);
     assert_eq!(c.layout().shape, (2, 3).into());
     assert_eq!(c.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+}
+
+#[test]
+fn test_index_select() {
+    // 4 rows × 3 cols
+    let data = Tensor::from_vec(
+        vec![10.0f32, 11.0, 12.0, 20.0, 21.0, 22.0, 30.0, 31.0, 32.0, 40.0, 41.0, 42.0],
+        (4, 3), Device::Cpu,
+    );
+    let indices = Tensor::from_vec(vec![2u32, 0, 3], (3,), Device::Cpu);
+    let out = data.index_select(&indices);
+    assert_eq!(out.layout().shape, (3, 3).into());
+    assert_eq!(
+        out.to_vec::<f32>().unwrap(),
+        vec![30.0, 31.0, 32.0, 10.0, 11.0, 12.0, 40.0, 41.0, 42.0]
+    );
+}
+
+#[test]
+fn test_index_select_mps() {
+    let data = Tensor::from_vec(
+        vec![10.0f32, 11.0, 12.0, 20.0, 21.0, 22.0, 30.0, 31.0, 32.0, 40.0, 41.0, 42.0],
+        (4, 3), Device::Mps,
+    );
+    let indices = Tensor::from_vec(vec![2u32, 0, 3], (3,), Device::Mps);
+    let out = data.index_select(&indices);
+    assert_eq!(out.layout().shape, (3, 3).into());
+    assert_eq!(
+        out.to_vec::<f32>().unwrap(),
+        vec![30.0, 31.0, 32.0, 10.0, 11.0, 12.0, 40.0, 41.0, 42.0]
+    );
 }
 
 #[test]

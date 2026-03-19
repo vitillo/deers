@@ -355,3 +355,21 @@ kernel void scatter_f32(
     if (id >= meta.rows) return;
     output[id * meta.cols + indices[id]] = input[id];
 }
+
+struct IndexSelectMeta {
+    uint num_indices;
+    uint cols;
+};
+
+kernel void index_select_f32(
+    device const float* input [[buffer(0)]],
+    device const uint* indices [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant IndexSelectMeta& meta [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    if (row >= meta.num_indices || col >= meta.cols) return;
+    output[row * meta.cols + col] = input[indices[row] * meta.cols + col];
+}
