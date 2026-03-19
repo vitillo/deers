@@ -97,7 +97,7 @@ kernel void exp_f16(
     uint id [[thread_position_in_grid]]
 ) {
     if (id >= meta.size) return;
-    output[id] = half(exp(float(input[linear_to_offset(id, meta)])));
+    output[id] = exp(input[linear_to_offset(id, meta)]);
 }
 
 kernel void log_f32(
@@ -117,7 +117,47 @@ kernel void log_f16(
     uint id [[thread_position_in_grid]]
 ) {
     if (id >= meta.size) return;
-    output[id] = half(log(float(input[linear_to_offset(id, meta)])));
+    output[id] = log(input[linear_to_offset(id, meta)]);
+}
+
+kernel void sin_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = sin(input[linear_to_offset(id, meta)]);
+}
+
+kernel void sin_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = sin(input[linear_to_offset(id, meta)]);
+}
+
+kernel void cos_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = cos(input[linear_to_offset(id, meta)]);
+}
+
+kernel void cos_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = cos(input[linear_to_offset(id, meta)]);
 }
 
 kernel void tanh_f32(
@@ -137,7 +177,7 @@ kernel void tanh_f16(
     uint id [[thread_position_in_grid]]
 ) {
     if (id >= meta.size) return;
-    output[id] = half(tanh(float(input[linear_to_offset(id, meta)])));
+    output[id] = tanh(input[linear_to_offset(id, meta)]);
 }
 
 kernel void relu_f32(

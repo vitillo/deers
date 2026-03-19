@@ -373,6 +373,16 @@ impl Tensor {
         ops::EWiseExp::new(self.clone()).unwrap().forward().unwrap()
     }
 
+    /// Element-wise sine.
+    pub fn sin(&self) -> Tensor {
+        ops::EWiseSin::new(self.clone()).unwrap().forward().unwrap()
+    }
+
+    /// Element-wise cosine.
+    pub fn cos(&self) -> Tensor {
+        ops::EWiseCos::new(self.clone()).unwrap().forward().unwrap()
+    }
+
     /// Raises every element to the scalar power `e`.
     pub fn scalar_powf(&self, e: f64) -> Tensor {
         ops::ScalarPowf::new(self.clone(), e).unwrap().forward().unwrap()

@@ -363,6 +363,78 @@ impl TensorOp for EWiseExp {
 }
 
 #[derive(Debug)]
+pub struct EWiseSin {
+    arg: Tensor,
+}
+
+impl EWiseSin {
+    pub fn new(arg: Tensor) -> Result<Self> {
+        Ok(Self { arg })
+    }
+}
+
+impl TensorOp for EWiseSin {
+    fn forward(self) -> Result<Tensor> {
+        let storage =
+            Arc::new(RwLock::new(self.arg.storage().unary_op(storage::Sin, self.arg.layout())?));
+        Ok(Tensor::new(
+            storage,
+            Layout::from(self.arg.layout().shape().clone()),
+            self.arg.device(),
+            self.arg.dtype(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let arg_grad_sum = grads.get_or_insert_zero(&self.arg);
+        *arg_grad_sum = &*arg_grad_sum + out_grad * &self.arg.cos();
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
+#[derive(Debug)]
+pub struct EWiseCos {
+    arg: Tensor,
+}
+
+impl EWiseCos {
+    pub fn new(arg: Tensor) -> Result<Self> {
+        Ok(Self { arg })
+    }
+}
+
+impl TensorOp for EWiseCos {
+    fn forward(self) -> Result<Tensor> {
+        let storage =
+            Arc::new(RwLock::new(self.arg.storage().unary_op(storage::Cos, self.arg.layout())?));
+        Ok(Tensor::new(
+            storage,
+            Layout::from(self.arg.layout().shape().clone()),
+            self.arg.device(),
+            self.arg.dtype(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let arg_grad_sum = grads.get_or_insert_zero(&self.arg);
+        *arg_grad_sum = &*arg_grad_sum + out_grad * &self.arg.sin() * -1.0;
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
+#[derive(Debug)]
 pub struct Tanh {
     arg: Tensor,
 }
