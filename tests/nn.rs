@@ -18,6 +18,16 @@ fn test_linear_vars() {
 }
 
 #[test]
+fn test_linear_no_bias() {
+    let linear = nn::Linear::no_bias(4, 3);
+    let vars = linear.vars();
+    assert_eq!(vars.len(), 1); // weight only
+    let x = Tensor::from_vec(vec![1.0f32; 8], (2, 4), Device::Cpu);
+    let out = linear.forward(&x).unwrap();
+    assert_eq!(out.layout().shape, (2, 3).into());
+}
+
+#[test]
 fn test_linear_to_device() {
     let linear = nn::Linear::new(4, 3);
     linear.to_device(Device::Mps).unwrap();

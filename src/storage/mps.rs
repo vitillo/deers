@@ -373,6 +373,52 @@ mod imp {
             }
         }
 
+        /// Concatenates compact MPS storages by memcpy into a single output buffer.
+        pub fn cat(parts: &[(&MpsStorage, usize)]) -> MpsStorage {
+            assert!(!parts.is_empty());
+            let total_len: usize = parts.iter().map(|(_, len)| *len).sum();
+            let dtype = match &parts[0].0.inner {
+                MpsInner::Accelerated { dtype, .. } => *dtype,
+                MpsInner::Cpu(_) => panic!("cat requires accelerated MPS storage"),
+            };
+            let ctx = MpsContext::shared();
+            ctx.synchronize();
+            let elem_size = match dtype {
+                DType::F32 => std::mem::size_of::<f32>(),
+                DType::U32 => std::mem::size_of::<u32>(),
+                _ => todo!("MPS cat for {dtype:?}"),
+            };
+            let out_buffer = match dtype {
+                DType::F32 => ctx.empty_f32_buffer(total_len),
+                DType::U32 => ctx.empty_u32_buffer(total_len),
+                _ => unreachable!(),
+            };
+            let mut byte_offset = 0usize;
+            for (storage, len) in parts {
+                let src_buffer = match &storage.inner {
+                    MpsInner::Accelerated { buffer, .. } => buffer,
+                    MpsInner::Cpu(_) => panic!("cat requires accelerated MPS storage"),
+                };
+                let byte_len = len * elem_size;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        src_buffer.contents().cast::<u8>(),
+                        out_buffer.contents().cast::<u8>().add(byte_offset),
+                        byte_len,
+                    );
+                }
+                byte_offset += byte_len;
+            }
+            MpsStorage {
+                inner: MpsInner::Accelerated {
+                    ctx,
+                    buffer: out_buffer,
+                    len: total_len,
+                    dtype,
+                },
+            }
+        }
+
         pub fn into_cpu(self) -> CpuStorage {
             match self.inner {
                 MpsInner::Accelerated {
@@ -940,6 +986,7 @@ mod imp {
         pub fn zeros(_len: usize, _dtype: DType) -> Self { Self::unavailable() }
         pub fn ones(_len: usize, _dtype: DType) -> Self { Self::unavailable() }
         pub fn from_cpu_storage(_inner: CpuStorage) -> Self { Self::unavailable() }
+        pub fn cat(_parts: &[(&MpsStorage, usize)]) -> Self { Self::unavailable() }
         pub fn into_cpu(self) -> CpuStorage { Self::unavailable() }
     }
 

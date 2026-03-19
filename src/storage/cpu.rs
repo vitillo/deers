@@ -39,6 +39,44 @@ impl CpuStorage {
         }
     }
 
+    /// Concatenates compact storages. Each pair is (storage, num_elements).
+    pub fn cat(parts: &[(&CpuStorage, usize)]) -> CpuStorage {
+        assert!(!parts.is_empty());
+        let total_len: usize = parts.iter().map(|(_, len)| *len).sum();
+        match &parts[0].0 {
+            CpuStorage::F32(_) => {
+                let mut data = Vec::with_capacity(total_len);
+                for (storage, _) in parts {
+                    match storage {
+                        CpuStorage::F32(v) => data.extend_from_slice(v),
+                        _ => panic!("dtype mismatch in cat"),
+                    }
+                }
+                CpuStorage::F32(data)
+            }
+            CpuStorage::F64(_) => {
+                let mut data = Vec::with_capacity(total_len);
+                for (storage, _) in parts {
+                    match storage {
+                        CpuStorage::F64(v) => data.extend_from_slice(v),
+                        _ => panic!("dtype mismatch in cat"),
+                    }
+                }
+                CpuStorage::F64(data)
+            }
+            CpuStorage::U32(_) => {
+                let mut data = Vec::with_capacity(total_len);
+                for (storage, _) in parts {
+                    match storage {
+                        CpuStorage::U32(v) => data.extend_from_slice(v),
+                        _ => panic!("dtype mismatch in cat"),
+                    }
+                }
+                CpuStorage::U32(data)
+            }
+        }
+    }
+
     fn gemm_f32(left: &[f32], right: &[f32], out: &mut [f32], m: usize, n: usize, p: usize) {
         unsafe {
             gemm::gemm(

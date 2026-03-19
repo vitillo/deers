@@ -22,19 +22,32 @@ pub trait Module {
     }
 }
 
-/// Fully connected layer: `y = x @ weight + bias`.
+/// Fully connected layer: `y = x @ weight` (+ optional bias).
 pub struct Linear {
     weight: Var,
-    bias: Var,
+    bias: Option<Var>,
 }
 
 impl Linear {
     /// Creates a Linear layer with uniform [-k, k] initialization (k = 1/sqrt(in)).
     pub fn new(in_features: usize, out_features: usize) -> Self {
+        Self::new_inner(in_features, out_features, true)
+    }
+
+    /// Creates a Linear layer without bias.
+    pub fn no_bias(in_features: usize, out_features: usize) -> Self {
+        Self::new_inner(in_features, out_features, false)
+    }
+
+    fn new_inner(in_features: usize, out_features: usize, bias: bool) -> Self {
         let k = 1.0 / (in_features as f64).sqrt();
         let weight =
             Var::new(Tensor::rand((in_features, out_features), DType::F32, Device::Cpu) * 2.0 * k - k);
-        let bias = Var::new(Tensor::rand((out_features,), DType::F32, Device::Cpu) * 2.0 * k - k);
+        let bias = if bias {
+            Some(Var::new(Tensor::rand((out_features,), DType::F32, Device::Cpu) * 2.0 * k - k))
+        } else {
+            None
+        };
         Self { weight, bias }
     }
 }
@@ -42,11 +55,18 @@ impl Linear {
 impl Module for Linear {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let out = x.matmul(&self.weight);
-        Ok(&out + &*self.bias)
+        match &self.bias {
+            Some(bias) => Ok(&out + &**bias),
+            None => Ok(out),
+        }
     }
 
     fn vars(&self) -> Vec<Var> {
-        vec![self.weight.clone(), self.bias.clone()]
+        let mut vars = vec![self.weight.clone()];
+        if let Some(bias) = &self.bias {
+            vars.push(bias.clone());
+        }
+        vars
     }
 }
 
