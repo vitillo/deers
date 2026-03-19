@@ -51,8 +51,9 @@ struct ReduceMeta {
 #[derive(Clone, Copy)]
 struct MatmulMeta {
     m: u32,
+    k: u32,
     n: u32,
-    p: u32,
+    batch: u32,
 }
 
 #[repr(C)]
@@ -217,6 +218,17 @@ mod imp {
             height: usize,
             configure: impl FnOnce(&metal::ComputeCommandEncoderRef),
         ) {
+            self.dispatch_3d(pipeline_name, width, height, 1, configure);
+        }
+
+        fn dispatch_3d(
+            &self,
+            pipeline_name: &'static str,
+            width: usize,
+            height: usize,
+            depth: usize,
+            configure: impl FnOnce(&metal::ComputeCommandEncoderRef),
+        ) {
             let pipeline = self.pipeline(pipeline_name);
             let guard = self.command_buffer();
             let cb = guard.as_ref().unwrap();
@@ -224,7 +236,7 @@ mod imp {
             encoder.set_compute_pipeline_state(&pipeline);
             configure(&encoder);
             encoder.dispatch_threads(
-                MTLSize::new(width as u64, height as u64, 1),
+                MTLSize::new(width as u64, height as u64, depth as u64),
                 MTLSize::new(16, 16, 1),
             );
             encoder.end_encoding();
@@ -631,26 +643,44 @@ mod imp {
                 (self.accelerated(DType::F32), other.accelerated(DType::F32))
             {
                 assert!(layout.is_compact() && layout_other.is_compact());
-                let n = layout.shape()[layout.ndim() - 1];
-                let m = layout.size() / n;
-                let p = layout_other.size() / n;
-                let out = ctx.empty_f32_buffer(m * p);
+                let ndim = layout.ndim();
+                let m = layout.shape()[ndim - 2];
+                let k = layout.shape()[ndim - 1];
+                let n = layout_other.shape()[ndim - 1];
+                let batch: usize = (0..ndim - 2).map(|i| layout.shape()[i]).product();
+                let total = batch * m * n;
+                let out = ctx.empty_f32_buffer(total);
                 let meta = MatmulMeta {
                     m: m as u32,
+                    k: k as u32,
                     n: n as u32,
-                    p: p as u32,
+                    batch: batch as u32,
                 };
-                ctx.dispatch_2d("matmul_f32", p, m, |encoder| {
-                    encoder.set_buffer(0, Some(lhs), 0);
-                    encoder.set_buffer(1, Some(rhs), 0);
-                    encoder.set_buffer(2, Some(&out), 0);
-                    MpsContext::set_params(encoder, 3, &meta);
-                });
+                // Matmul uses tiled algorithm — must dispatch full threadgroups
+                // so all 16x16 threads cooperate on tile loading.
+                let pipeline = ctx.pipeline("matmul_f32");
+                let guard = ctx.command_buffer();
+                let cb = guard.as_ref().unwrap();
+                let encoder = cb.new_compute_command_encoder();
+                encoder.set_compute_pipeline_state(&pipeline);
+                encoder.set_buffer(0, Some(lhs), 0);
+                encoder.set_buffer(1, Some(rhs), 0);
+                encoder.set_buffer(2, Some(&out), 0);
+                MpsContext::set_params(&encoder, 3, &meta);
+                let tile = 16u64;
+                let groups = MTLSize::new(
+                    (n as u64 + tile - 1) / tile,
+                    (m as u64 + tile - 1) / tile,
+                    batch as u64,
+                );
+                let tg_size = MTLSize::new(tile, tile, 1);
+                encoder.dispatch_thread_groups(groups, tg_size);
+                encoder.end_encoding();
                 return Ok(Self {
                     inner: MpsInner::Accelerated {
                         ctx: ctx.clone(),
                         buffer: out,
-                        len: m * p,
+                        len: total,
                         dtype: DType::F32,
                     },
                 });

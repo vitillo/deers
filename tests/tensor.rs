@@ -566,6 +566,34 @@ fn test_mps_matmul_backward_values() {
 }
 
 #[test]
+fn test_mps_matmul_batched_3d() {
+    // Same test as test_matmul_batched_3d but on MPS
+    let a = Tensor::from_vec(
+        vec![
+            1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0,
+            7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ],
+        vec![2, 2, 3],
+        Device::Mps,
+    );
+    let b = Tensor::from_vec(
+        vec![
+            1.0f32, 0.0, 0.0, 1.0, 1.0, 0.0,
+            1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        ],
+        vec![2, 3, 2],
+        Device::Mps,
+    );
+
+    let c = a.matmul(&b);
+    assert_eq!(c.layout().shape, vec![2, 2, 2].into());
+    assert_eq!(
+        c.to_vec::<f32>().unwrap(),
+        vec![4.0, 2.0, 10.0, 5.0, 24.0, 24.0, 33.0, 33.0]
+    );
+}
+
+#[test]
 fn test_matmul_non_square() {
     // (2,3) @ (3,2) = (2,2)
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
@@ -607,6 +635,76 @@ fn test_matmul_non_square_backward() {
     assert_eq!(
         grads.get(b.id()).unwrap().to_vec::<f32>().unwrap(),
         vec![5.0, 5.0, 7.0, 7.0, 9.0, 9.0]
+    );
+}
+
+#[test]
+fn test_matmul_batched_3d() {
+    // (2, 2, 3) @ (2, 3, 2) = (2, 2, 2) — two independent matmuls
+    let a = Tensor::from_vec(
+        vec![
+            // batch 0: [[1,2,3],[4,5,6]]
+            1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0,
+            // batch 1: [[7,8,9],[10,11,12]]
+            7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ],
+        vec![2, 2, 3],
+        Device::Cpu,
+    );
+    let b = Tensor::from_vec(
+        vec![
+            // batch 0: [[1,0],[0,1],[1,0]]
+            1.0f32, 0.0, 0.0, 1.0, 1.0, 0.0,
+            // batch 1: [[1,1],[1,1],[1,1]]
+            1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        ],
+        vec![2, 3, 2],
+        Device::Cpu,
+    );
+
+    let c = a.matmul(&b);
+    assert_eq!(c.layout().shape, vec![2, 2, 2].into());
+    // batch 0: [[1+0+3, 0+2+0],[4+0+6, 0+5+0]] = [[4,2],[10,5]]
+    // batch 1: [[7+8+9, 7+8+9],[10+11+12, 10+11+12]] = [[24,24],[33,33]]
+    assert_eq!(
+        c.to_vec::<f32>().unwrap(),
+        vec![4.0, 2.0, 10.0, 5.0, 24.0, 24.0, 33.0, 33.0]
+    );
+}
+
+#[test]
+fn test_matmul_batched_3d_backward() {
+    let a = Tensor::from_vec(
+        vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+        vec![2, 2, 3],
+        Device::Cpu,
+    )
+    .attach();
+    let b = Tensor::from_vec(
+        vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        vec![2, 3, 2],
+        Device::Cpu,
+    )
+    .attach();
+    let c = a.matmul(&b);
+    let loss = c.sum(vec![0, 1, 2], true);
+    let grads = loss.backward().unwrap();
+
+    // dA = ones(2,2,2) @ B^T
+    // batch 0: ones(2,2) @ [[1,0,1],[0,1,0]] = [[1,1,1],[1,1,1]]
+    // batch 1: ones(2,2) @ [[1,1,1],[1,1,1]] = [[2,2,2],[2,2,2]]
+    assert_eq!(
+        grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+    );
+
+    // dB = A^T @ ones(2,2,2)
+    // batch 0: [[1,4],[2,5],[3,6]]^T... wait, A^T @ ones
+    // A^T for batch 0 = [[1,4],[2,5],[3,6]], @ ones(2,2) = [[5,5],[7,7],[9,9]]
+    // A^T for batch 1 = [[7,10],[8,11],[9,12]], @ ones(2,2) = [[17,17],[19,19],[21,21]]
+    assert_eq!(
+        grads.get(b.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![5.0, 5.0, 7.0, 7.0, 9.0, 9.0, 17.0, 17.0, 19.0, 19.0, 21.0, 21.0]
     );
 }
 

@@ -402,19 +402,38 @@ impl BackendStorage for CpuStorage {
 
     fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self> {
         assert!(layout.is_compact() && layout_other.is_compact());
-        let n = layout.shape[layout.shape.ndim() - 1]; // cols of self, rows of other
-        let m = layout.size() / n; // rows of self
-        let p = layout_other.size() / n; // cols of other
+        let ndim = layout.shape.ndim();
+        let k = layout.shape[ndim - 1];
+        let m = layout.shape[ndim - 2];
+        let n = layout_other.shape[ndim - 1];
+        let batch: usize = (0..ndim - 2).map(|i| layout.shape[i]).product();
+        let a_skip = m * k;
+        let b_skip = k * n;
+        let c_skip = m * n;
 
         match (self, other) {
             (CpuStorage::F32(left), CpuStorage::F32(right)) => {
-                let mut out = vec![0.0; m * p];
-                CpuStorage::gemm_f32(left, right, &mut out, m, n, p);
+                let mut out = vec![0.0f32; batch * m * n];
+                for i in 0..batch {
+                    CpuStorage::gemm_f32(
+                        &left[i * a_skip..],
+                        &right[i * b_skip..],
+                        &mut out[i * c_skip..],
+                        m, k, n,
+                    );
+                }
                 Ok(CpuStorage::F32(out))
             }
             (CpuStorage::F64(left), CpuStorage::F64(right)) => {
-                let mut out = vec![0.0; m * p];
-                CpuStorage::gemm_f64(left, right, &mut out, m, n, p);
+                let mut out = vec![0.0f64; batch * m * n];
+                for i in 0..batch {
+                    CpuStorage::gemm_f64(
+                        &left[i * a_skip..],
+                        &right[i * b_skip..],
+                        &mut out[i * c_skip..],
+                        m, k, n,
+                    );
+                }
                 Ok(CpuStorage::F64(out))
             }
             (CpuStorage::F32(_), CpuStorage::F64(_)) => unreachable!(),
