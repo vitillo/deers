@@ -76,11 +76,19 @@ impl UnaryOp for ReluBackward {
     const KERNEL: &'static str = "relu_backward";
 
     fn f32(&self, v: f32) -> f32 {
-        if v > 0.0 { 1.0 } else { 0.0 }
+        if v > 0.0 {
+            1.0
+        } else {
+            0.0
+        }
     }
 
     fn f64(&self, v: f64) -> f64 {
-        if v > 0.0 { 1.0 } else { 0.0 }
+        if v > 0.0 {
+            1.0
+        } else {
+            0.0
+        }
     }
 }
 
@@ -147,11 +155,19 @@ impl BinaryOp for EWiseEq {
     const KERNEL: &'static str = "eq";
 
     fn f32(v: f32, w: f32) -> f32 {
-        if v == w { 1.0 } else { 0.0 }
+        if v == w {
+            1.0
+        } else {
+            0.0
+        }
     }
 
     fn f64(v: f64, w: f64) -> f64 {
-        if v == w { 1.0 } else { 0.0 }
+        if v == w {
+            1.0
+        } else {
+            0.0
+        }
     }
 }
 

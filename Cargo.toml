@@ -14,3 +14,11 @@ metal = "0.33"
 [dev-dependencies]
 candle-core = { version = "0.8", features = ["metal"] }
 candle-nn = { version = "0.8", features = ["metal"] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+too_many_arguments = "allow"
+enum_variant_names = "allow"
+needless_borrow = "allow"
+manual_div_ceil = "allow"
+unnecessary_cast = "allow"

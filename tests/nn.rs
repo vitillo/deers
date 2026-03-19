@@ -49,10 +49,7 @@ fn test_linear_to_same_device_noop() {
 
 #[test]
 fn test_sequential_forward() {
-    let model = nn::seq()
-        .add(nn::Linear::new(4, 3))
-        .add(nn::ReLU)
-        .add(nn::Linear::new(3, 2));
+    let model = nn::seq().add(nn::Linear::new(4, 3)).add(nn::ReLU).add(nn::Linear::new(3, 2));
     let x = Tensor::from_vec(vec![1.0f32; 8], (2, 4), Device::Cpu);
     let out = model.forward(&x).unwrap();
     assert_eq!(out.layout().shape, (2, 2).into());
@@ -60,20 +57,14 @@ fn test_sequential_forward() {
 
 #[test]
 fn test_sequential_vars() {
-    let model = nn::seq()
-        .add(nn::Linear::new(4, 3))
-        .add(nn::ReLU)
-        .add(nn::Linear::new(3, 2));
+    let model = nn::seq().add(nn::Linear::new(4, 3)).add(nn::ReLU).add(nn::Linear::new(3, 2));
     // 2 Linear layers × 2 vars each (weight + bias)
     assert_eq!(model.vars().len(), 4);
 }
 
 #[test]
 fn test_sequential_to_device() {
-    let model = nn::seq()
-        .add(nn::Linear::new(4, 3))
-        .add(nn::ReLU)
-        .add(nn::Linear::new(3, 2));
+    let model = nn::seq().add(nn::Linear::new(4, 3)).add(nn::ReLU).add(nn::Linear::new(3, 2));
     model.to_device(Device::Mps).unwrap();
 
     assert!(model.vars().iter().all(|var| var.device() == Device::Mps));
@@ -81,10 +72,7 @@ fn test_sequential_to_device() {
 
 #[test]
 fn test_sequential_trains() {
-    let model = nn::seq()
-        .add(nn::Linear::new(2, 4))
-        .add(nn::ReLU)
-        .add(nn::Linear::new(4, 1));
+    let model = nn::seq().add(nn::Linear::new(2, 4)).add(nn::ReLU).add(nn::Linear::new(4, 1));
     let mut sgd = SGD::new(model.vars(), 0.01);
 
     let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);

@@ -73,16 +73,7 @@ impl Tensor {
                 .map(|o| o.dependencies().iter().any(|dep| dep.requires_grad()))
                 .unwrap_or(false);
 
-        TensorInternal {
-            id,
-            storage,
-            layout,
-            device,
-            dtype,
-            op,
-            requires_grad,
-        }
-        .into()
+        TensorInternal { id, storage, layout, device, dtype, op, requires_grad }.into()
     }
 
     pub(crate) fn with_op(self, op: Box<dyn TensorOp>) -> Self {
@@ -94,14 +85,7 @@ impl Tensor {
             Storage::Mps(_) => Device::Mps,
         };
         drop(storage);
-        Tensor::new(
-            tensor.storage,
-            tensor.layout,
-            device,
-            dtype,
-            false,
-            Some(op),
-        )
+        Tensor::new(tensor.storage, tensor.layout, device, dtype, false, Some(op))
     }
 
     /// Returns the operation that produced this tensor, if any.
@@ -186,8 +170,6 @@ impl Tensor {
     }
 
     /// Creates a tensor from a CPU vector with the given shape.
-    ///
-    /// Currently supports `Vec<f32>`, `Vec<f64>`, and `Vec<u32>`.
     pub fn from_vec(vec: impl Into<CpuStorage>, shape: impl Into<Shape>, device: Device) -> Tensor {
         let shape: Shape = shape.into();
         let storage = vec.into().to(device);
@@ -213,14 +195,7 @@ impl Tensor {
             _ => unimplemented!(),
         };
         let layout: Layout = shape.into();
-        Tensor::new(
-            Arc::new(RwLock::new(storage)),
-            layout,
-            device,
-            dtype,
-            false,
-            None,
-        )
+        Tensor::new(Arc::new(RwLock::new(storage)), layout, device, dtype, false, None)
     }
 
     /// Create a tensor with values drawn from a standard normal distribution.
@@ -252,14 +227,7 @@ impl Tensor {
             _ => unimplemented!(),
         };
         let layout: Layout = shape.into();
-        Tensor::new(
-            Arc::new(RwLock::new(storage)),
-            layout,
-            device,
-            dtype,
-            false,
-            None,
-        )
+        Tensor::new(Arc::new(RwLock::new(storage)), layout, device, dtype, false, None)
     }
 
     /// Copies the tensor data into a flat `Vec`, respecting strides.
@@ -286,9 +254,7 @@ impl Tensor {
     /// Creates a tensor of ones with the same shape, dtype, and device.
     pub fn ones_like(&self) -> Tensor {
         Tensor::new(
-            Arc::new(RwLock::new(
-                self.device().ones(self.layout.size(), self.dtype()),
-            )),
+            Arc::new(RwLock::new(self.device().ones(self.layout.size(), self.dtype()))),
             self.layout.clone(),
             self.device(),
             self.dtype(),
@@ -300,9 +266,7 @@ impl Tensor {
     /// Creates a tensor of zeros with the same shape, dtype, and device.
     pub fn zeros_like(&self) -> Tensor {
         Tensor::new(
-            Arc::new(RwLock::new(
-                self.device().zeros(self.layout.size(), self.dtype()),
-            )),
+            Arc::new(RwLock::new(self.device().zeros(self.layout.size(), self.dtype()))),
             self.layout.clone(),
             self.device(),
             self.dtype(),
@@ -317,10 +281,7 @@ impl Tensor {
     /// The returned tensor does not keep gradient history.
     pub fn narrow(&self, dim: usize, start: usize, len: usize) -> Tensor {
         assert!(dim < self.layout().ndim(), "narrow dim out of bounds");
-        assert!(
-            start + len <= self.layout().shape()[dim],
-            "narrow out of bounds"
-        );
+        assert!(start + len <= self.layout().shape()[dim], "narrow out of bounds");
         assert!(self.is_compact(), "narrow requires compact tensors");
 
         let mut shape: Vec<usize> = self.layout().shape().iter().copied().collect();
@@ -340,23 +301,17 @@ impl Tensor {
 
     /// Reorders the dimensions of the tensor. Does not copy data.
     pub fn permute(&self, axis: impl Into<Shape>) -> Tensor {
-        ops::Permute::new(self.clone(), axis.into())
-            .forward()
-            .unwrap()
+        ops::Permute::new(self.clone(), axis.into()).forward().unwrap()
     }
 
     /// Expands dimensions of size 1 to match `new_shape`. Does not copy data.
     pub fn broadcast(&self, new_shape: impl Into<Shape>) -> Tensor {
-        ops::Broadcast::new(self.clone(), new_shape.into())
-            .forward()
-            .unwrap()
+        ops::Broadcast::new(self.clone(), new_shape.into()).forward().unwrap()
     }
 
     /// Returns a view with a different shape but the same total number of elements.
     pub fn reshape(&self, new_shape: impl Into<Shape>) -> Tensor {
-        ops::Reshape::new(self.clone(), new_shape.into())
-            .forward()
-            .unwrap()
+        ops::Reshape::new(self.clone(), new_shape.into()).forward().unwrap()
     }
 
     /// Swaps two dimensions. Defaults to the last two if `axes` is `None`.
@@ -375,16 +330,12 @@ impl Tensor {
 
     /// Sums elements along the given axes. If `keep_dims`, reduced axes become size 1.
     pub fn sum(&self, axis: Vec<usize>, keep_dims: bool) -> Tensor {
-        ops::Sum::new(self.clone(), axis, keep_dims)
-            .forward()
-            .unwrap()
+        ops::Sum::new(self.clone(), axis, keep_dims).forward().unwrap()
     }
 
     /// Returns the maximum along the given axes.
     pub fn max(&self, axis: Vec<usize>, keep_dims: bool) -> Tensor {
-        ops::Max::new(self.clone(), axis, keep_dims)
-            .forward()
-            .unwrap()
+        ops::Max::new(self.clone(), axis, keep_dims).forward().unwrap()
     }
 
     /// Returns true if the tensor's memory layout is contiguous (row-major).
@@ -402,10 +353,7 @@ impl Tensor {
 
     /// Element-wise power: `self^e`.
     pub fn powf<B: Borrow<Tensor>>(&self, e: B) -> Tensor {
-        ops::EWisePowf::new(self.clone(), e.borrow().clone())
-            .unwrap()
-            .forward()
-            .unwrap()
+        ops::EWisePowf::new(self.clone(), e.borrow().clone()).unwrap().forward().unwrap()
     }
 
     /// Element-wise natural logarithm.
@@ -420,18 +368,12 @@ impl Tensor {
 
     /// Raises every element to the scalar power `e`.
     pub fn scalar_powf(&self, e: f64) -> Tensor {
-        ops::ScalarPowf::new(self.clone(), e)
-            .unwrap()
-            .forward()
-            .unwrap()
+        ops::ScalarPowf::new(self.clone(), e).unwrap().forward().unwrap()
     }
 
     /// Matrix multiplication: `[..., m, k] @ [..., k, n] -> [..., m, n]`.
     pub fn matmul(&self, other: &Tensor) -> Tensor {
-        ops::MatMul::new(self.clone(), other.clone())
-            .unwrap()
-            .forward()
-            .unwrap()
+        ops::MatMul::new(self.clone(), other.clone()).unwrap().forward().unwrap()
     }
 
     /// Element-wise ReLU: `max(0, x)`.
@@ -525,9 +467,7 @@ impl Tensor {
     /// For a 2D tensor of shape `(rows, cols)` with `dim=1` and indices of shape `(rows,)`,
     /// returns shape `(rows, 1)` where `out[i, 0] = self[i, indices[i]]`.
     pub fn gather(&self, dim: usize, indices: &Tensor) -> Tensor {
-        ops::Gather::new(self.clone(), dim, indices.clone())
-            .forward()
-            .unwrap()
+        ops::Gather::new(self.clone(), dim, indices.clone()).forward().unwrap()
     }
 }
 
@@ -536,20 +476,9 @@ fn broadcast_shape(a: &Shape, b: &Shape) -> Shape {
     let ndim = a.ndim().max(b.ndim());
     let mut out = Vec::with_capacity(ndim);
     for i in 0..ndim {
-        let da = if i < ndim - a.ndim() {
-            1
-        } else {
-            a[i - (ndim - a.ndim())]
-        };
-        let db = if i < ndim - b.ndim() {
-            1
-        } else {
-            b[i - (ndim - b.ndim())]
-        };
-        assert!(
-            da == db || da == 1 || db == 1,
-            "incompatible shapes for broadcast"
-        );
+        let da = if i < ndim - a.ndim() { 1 } else { a[i - (ndim - a.ndim())] };
+        let db = if i < ndim - b.ndim() { 1 } else { b[i - (ndim - b.ndim())] };
+        assert!(da == db || da == 1 || db == 1, "incompatible shapes for broadcast");
         out.push(da.max(db));
     }
     out.into()
@@ -622,10 +551,7 @@ impl Add<f64> for Tensor {
     type Output = Tensor;
 
     fn add(self, rhs: f64) -> Self::Output {
-        ops::ScalarAdd::new(self.clone(), rhs)
-            .unwrap()
-            .forward()
-            .unwrap()
+        ops::ScalarAdd::new(self.clone(), rhs).unwrap().forward().unwrap()
     }
 }
 
@@ -633,10 +559,7 @@ impl Add<f64> for &Tensor {
     type Output = Tensor;
 
     fn add(self, rhs: f64) -> Self::Output {
-        ops::ScalarAdd::new(self.clone(), rhs)
-            .unwrap()
-            .forward()
-            .unwrap()
+        ops::ScalarAdd::new(self.clone(), rhs).unwrap().forward().unwrap()
     }
 }
 
@@ -714,10 +637,7 @@ impl Mul<f64> for Tensor {
     type Output = Tensor;
 
     fn mul(self, rhs: f64) -> Self::Output {
-        ops::ScalarMul::new(self.clone(), rhs)
-            .unwrap()
-            .forward()
-            .unwrap()
+        ops::ScalarMul::new(self.clone(), rhs).unwrap().forward().unwrap()
     }
 }
 
@@ -725,9 +645,6 @@ impl Mul<f64> for &Tensor {
     type Output = Tensor;
 
     fn mul(self, rhs: f64) -> Self::Output {
-        ops::ScalarMul::new(self.clone(), rhs)
-            .unwrap()
-            .forward()
-            .unwrap()
+        ops::ScalarMul::new(self.clone(), rhs).unwrap().forward().unwrap()
     }
 }

@@ -41,8 +41,9 @@ impl Linear {
 
     fn new_inner(in_features: usize, out_features: usize, bias: bool) -> Self {
         let k = 1.0 / (in_features as f64).sqrt();
-        let weight =
-            Var::new(Tensor::rand((in_features, out_features), DType::F32, Device::Cpu) * 2.0 * k - k);
+        let weight = Var::new(
+            Tensor::rand((in_features, out_features), DType::F32, Device::Cpu) * 2.0 * k - k,
+        );
         let bias = if bias {
             Some(Var::new(Tensor::rand((out_features,), DType::F32, Device::Cpu) * 2.0 * k - k))
         } else {

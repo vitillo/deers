@@ -80,7 +80,9 @@ impl CpuStorage {
     fn gemm_f32(left: &[f32], right: &[f32], out: &mut [f32], m: usize, n: usize, p: usize) {
         unsafe {
             gemm::gemm(
-                m, p, n,
+                m,
+                p,
+                n,
                 out.as_mut_ptr(),
                 1,          // dst_cs
                 p as isize, // dst_rs
@@ -93,7 +95,9 @@ impl CpuStorage {
                 p as isize, // rhs_rs
                 0.0,        // alpha (dst = alpha*dst + beta*lhs*rhs)
                 1.0,        // beta
-                false, false, false,
+                false,
+                false,
+                false,
                 gemm::Parallelism::Rayon(0),
             );
         }
@@ -102,7 +106,9 @@ impl CpuStorage {
     fn gemm_f64(left: &[f64], right: &[f64], out: &mut [f64], m: usize, n: usize, p: usize) {
         unsafe {
             gemm::gemm(
-                m, p, n,
+                m,
+                p,
+                n,
                 out.as_mut_ptr(),
                 1,
                 p as isize,
@@ -115,7 +121,9 @@ impl CpuStorage {
                 p as isize,
                 0.0,
                 1.0,
-                false, false, false,
+                false,
+                false,
+                false,
                 gemm::Parallelism::Rayon(0),
             );
         }
@@ -209,12 +217,12 @@ impl BackendStorage for CpuStorage {
     ) -> Result<Self> {
         if layout.is_compact() && other_layout.is_compact() {
             return match (self, other) {
-                (CpuStorage::F32(a), CpuStorage::F32(b)) => {
-                    Ok(CpuStorage::F32(a.iter().zip(b.iter()).map(|(a, b)| O::f32(*a, *b)).collect()))
-                }
-                (CpuStorage::F64(a), CpuStorage::F64(b)) => {
-                    Ok(CpuStorage::F64(a.iter().zip(b.iter()).map(|(a, b)| O::f64(*a, *b)).collect()))
-                }
+                (CpuStorage::F32(a), CpuStorage::F32(b)) => Ok(CpuStorage::F32(
+                    a.iter().zip(b.iter()).map(|(a, b)| O::f32(*a, *b)).collect(),
+                )),
+                (CpuStorage::F64(a), CpuStorage::F64(b)) => Ok(CpuStorage::F64(
+                    a.iter().zip(b.iter()).map(|(a, b)| O::f64(*a, *b)).collect(),
+                )),
                 _ => unreachable!(),
             };
         }
@@ -225,16 +233,8 @@ impl BackendStorage for CpuStorage {
             (CpuStorage::F32(a), CpuStorage::F32(b)) => {
                 let mut out = vec![0.0f32; layout.size()];
                 strided_binary_op(
-                    StridedSlice {
-                        data: a,
-                        offset: layout.offset,
-                        strides: &a_strides,
-                    },
-                    StridedSlice {
-                        data: b,
-                        offset: other_layout.offset,
-                        strides: &b_strides,
-                    },
+                    StridedSlice { data: a, offset: layout.offset, strides: &a_strides },
+                    StridedSlice { data: b, offset: other_layout.offset, strides: &b_strides },
                     &mut out,
                     &shape,
                     O::f32,
@@ -244,16 +244,8 @@ impl BackendStorage for CpuStorage {
             (CpuStorage::F64(a), CpuStorage::F64(b)) => {
                 let mut out = vec![0.0f64; layout.size()];
                 strided_binary_op(
-                    StridedSlice {
-                        data: a,
-                        offset: layout.offset,
-                        strides: &a_strides,
-                    },
-                    StridedSlice {
-                        data: b,
-                        offset: other_layout.offset,
-                        strides: &b_strides,
-                    },
+                    StridedSlice { data: a, offset: layout.offset, strides: &a_strides },
+                    StridedSlice { data: b, offset: other_layout.offset, strides: &b_strides },
                     &mut out,
                     &shape,
                     O::f64,
@@ -345,11 +337,9 @@ impl BackendStorage for CpuStorage {
         assert_eq!(indices_layout.shape()[0], rows);
 
         let indices: Vec<usize> = match indices {
-            CpuStorage::U32(_) => indices
-                .to_vec::<u32>(indices_layout)
-                .into_iter()
-                .map(|v| v as usize)
-                .collect(),
+            CpuStorage::U32(_) => {
+                indices.to_vec::<u32>(indices_layout).into_iter().map(|v| v as usize).collect()
+            }
             _ => todo!(),
         };
         assert_eq!(indices.len(), rows);
@@ -360,27 +350,18 @@ impl BackendStorage for CpuStorage {
 
         match self {
             CpuStorage::F32(data) => {
-                let out: Vec<f32> = indices
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &idx)| data[i * cols + idx])
-                    .collect();
+                let out: Vec<f32> =
+                    indices.iter().enumerate().map(|(i, &idx)| data[i * cols + idx]).collect();
                 Ok(CpuStorage::F32(out))
             }
             CpuStorage::F64(data) => {
-                let out: Vec<f64> = indices
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &idx)| data[i * cols + idx])
-                    .collect();
+                let out: Vec<f64> =
+                    indices.iter().enumerate().map(|(i, &idx)| data[i * cols + idx]).collect();
                 Ok(CpuStorage::F64(out))
             }
             CpuStorage::U32(data) => {
-                let out: Vec<u32> = indices
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &idx)| data[i * cols + idx])
-                    .collect();
+                let out: Vec<u32> =
+                    indices.iter().enumerate().map(|(i, &idx)| data[i * cols + idx]).collect();
                 Ok(CpuStorage::U32(out))
             }
         }
@@ -401,11 +382,9 @@ impl BackendStorage for CpuStorage {
         let rows = full_shape[0];
         let cols = full_shape[1];
         let indices: Vec<usize> = match indices {
-            CpuStorage::U32(_) => indices
-                .to_vec::<u32>(indices_layout)
-                .into_iter()
-                .map(|v| v as usize)
-                .collect(),
+            CpuStorage::U32(_) => {
+                indices.to_vec::<u32>(indices_layout).into_iter().map(|v| v as usize).collect()
+            }
             _ => todo!(),
         };
 
@@ -457,7 +436,9 @@ impl BackendStorage for CpuStorage {
                         &left[i * a_skip..],
                         &right[i * b_skip..],
                         &mut out[i * c_skip..],
-                        m, k, n,
+                        m,
+                        k,
+                        n,
                     );
                 }
                 Ok(CpuStorage::F32(out))
@@ -469,7 +450,9 @@ impl BackendStorage for CpuStorage {
                         &left[i * a_skip..],
                         &right[i * b_skip..],
                         &mut out[i * c_skip..],
-                        m, k, n,
+                        m,
+                        k,
+                        n,
                     );
                 }
                 Ok(CpuStorage::F64(out))
@@ -517,16 +500,8 @@ fn strided_binary_op_inner<T: Copy, F: Fn(T, T) -> T>(
         let (sa, sb) = (a.strides[0] as usize, b.strides[0] as usize);
         for i in 0..shape[0] {
             strided_binary_op_inner(
-                StridedSlice {
-                    data: a.data,
-                    offset: a.offset + i * sa,
-                    strides: &a.strides[1..],
-                },
-                StridedSlice {
-                    data: b.data,
-                    offset: b.offset + i * sb,
-                    strides: &b.strides[1..],
-                },
+                StridedSlice { data: a.data, offset: a.offset + i * sa, strides: &a.strides[1..] },
+                StridedSlice { data: b.data, offset: b.offset + i * sb, strides: &b.strides[1..] },
                 out,
                 out_off,
                 &shape[1..],
@@ -538,16 +513,24 @@ fn strided_binary_op_inner<T: Copy, F: Fn(T, T) -> T>(
 
 /// Applies a unary function to a strided array, writing to a compact output.
 fn strided_unary_op<T: Copy, F: Fn(T) -> T>(
-    a: &[T], a_off: usize, a_strides: &[isize],
-    out: &mut [T], shape: &[usize], f: F,
+    a: &[T],
+    a_off: usize,
+    a_strides: &[isize],
+    out: &mut [T],
+    shape: &[usize],
+    f: F,
 ) {
     strided_unary_op_inner(a, a_off, a_strides, out, &mut 0, shape, &f);
 }
 
 fn strided_unary_op_inner<T: Copy, F: Fn(T) -> T>(
-    a: &[T], a_off: usize, a_strides: &[isize],
-    out: &mut [T], out_off: &mut usize,
-    shape: &[usize], f: &F,
+    a: &[T],
+    a_off: usize,
+    a_strides: &[isize],
+    out: &mut [T],
+    out_off: &mut usize,
+    shape: &[usize],
+    f: &F,
 ) {
     if shape.len() == 1 {
         let sa = a_strides[0] as usize;
@@ -559,15 +542,26 @@ fn strided_unary_op_inner<T: Copy, F: Fn(T) -> T>(
         let sa = a_strides[0] as usize;
         for i in 0..shape[0] {
             strided_unary_op_inner(
-                a, a_off + i * sa, &a_strides[1..],
-                out, out_off, &shape[1..], f,
+                a,
+                a_off + i * sa,
+                &a_strides[1..],
+                out,
+                out_off,
+                &shape[1..],
+                f,
             );
         }
     }
 }
 
 /// Copies a strided src into a contiguous dst using direct index computation.
-fn copy_strided<T: Copy>(src: &[T], dst: &mut [T], offset: usize, shape: &[usize], strides: &[usize]) {
+fn copy_strided<T: Copy>(
+    src: &[T],
+    dst: &mut [T],
+    offset: usize,
+    shape: &[usize],
+    strides: &[usize],
+) {
     // Recurse over dimensions, accumulating the source offset.
     copy_strided_inner(src, dst, offset, shape, strides, &mut 0);
 }
@@ -591,7 +585,14 @@ fn copy_strided_inner<T: Copy>(
         let size = shape[0];
         let stride = strides[0];
         for i in 0..size {
-            copy_strided_inner(src, dst, src_offset + i * stride, &shape[1..], &strides[1..], dst_offset);
+            copy_strided_inner(
+                src,
+                dst,
+                src_offset + i * stride,
+                &shape[1..],
+                &strides[1..],
+                dst_offset,
+            );
         }
     }
 }
@@ -606,12 +607,7 @@ pub struct Iter<'a, D: WithDType> {
 impl<'a, D: WithDType> Iter<'a, D> {
     fn new(storage: &'a CpuStorage, layout: &'a Layout) -> Self {
         let array = D::as_slice(storage);
-        Self {
-            array,
-            cursor: vec![0; layout.ndim()],
-            layout,
-            index: 0,
-        }
+        Self { array, cursor: vec![0; layout.ndim()], layout, index: 0 }
     }
 
     fn increment(&mut self) {
