@@ -17,12 +17,12 @@ impl Device {
     /// Allocates a zero-filled storage buffer of `size` elements.
     pub fn zeros(&self, size: usize, dtype: DType) -> Storage {
         match (self, dtype) {
+            (Device::Cpu, DType::F16) => Storage::Cpu(CpuStorage::F16(vec![half::f16::from_f32(0.0); size])),
             (Device::Cpu, DType::F32) => Storage::Cpu(CpuStorage::F32(vec![0.0; size])),
-            (Device::Cpu, DType::F64) => Storage::Cpu(CpuStorage::F64(vec![0.0; size])),
-            (Device::Cpu, DType::U32) => Storage::Cpu(CpuStorage::U32(vec![0; size])),
+            (Device::Cpu, DType::I64) => Storage::Cpu(CpuStorage::I64(vec![0; size])),
+            (Device::Mps, DType::F16) => Storage::Mps(MpsStorage::zeros(size, DType::F16)),
             (Device::Mps, DType::F32) => Storage::Mps(MpsStorage::zeros(size, DType::F32)),
-            (Device::Mps, DType::F64) => todo!(),
-            (Device::Mps, DType::U32) => Storage::Mps(MpsStorage::zeros(size, DType::U32)),
+            (Device::Mps, DType::I64) => Storage::Mps(MpsStorage::zeros(size, DType::I64)),
             (Device::Mps, _) => todo!(),
             (Device::Cpu, _) => todo!(),
             (Device::Cuda, _) => todo!(),
@@ -32,12 +32,12 @@ impl Device {
     /// Allocates a storage buffer of `size` elements filled with ones.
     pub fn ones(&self, size: usize, dtype: DType) -> Storage {
         match (self, dtype) {
+            (Device::Cpu, DType::F16) => Storage::Cpu(CpuStorage::F16(vec![half::f16::from_f32(1.0); size])),
             (Device::Cpu, DType::F32) => Storage::Cpu(CpuStorage::F32(vec![1.0; size])),
-            (Device::Cpu, DType::F64) => Storage::Cpu(CpuStorage::F64(vec![1.0; size])),
-            (Device::Cpu, DType::U32) => Storage::Cpu(CpuStorage::U32(vec![1; size])),
+            (Device::Cpu, DType::I64) => Storage::Cpu(CpuStorage::I64(vec![1; size])),
+            (Device::Mps, DType::F16) => Storage::Mps(MpsStorage::ones(size, DType::F16)),
             (Device::Mps, DType::F32) => Storage::Mps(MpsStorage::ones(size, DType::F32)),
-            (Device::Mps, DType::F64) => todo!(),
-            (Device::Mps, DType::U32) => Storage::Mps(MpsStorage::ones(size, DType::U32)),
+            (Device::Mps, DType::I64) => Storage::Mps(MpsStorage::ones(size, DType::I64)),
             (Device::Mps, _) => todo!(),
             (Device::Cpu, _) => todo!(),
             (Device::Cuda, _) => todo!(),

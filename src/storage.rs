@@ -5,6 +5,8 @@ mod mps;
 
 use std::borrow::Borrow;
 
+use half::f16;
+
 use crate::{
     dtype::{DType, WithDType},
     error::{Error, Result},
@@ -18,8 +20,8 @@ pub use mps::*;
 pub trait UnaryOp {
     const KERNEL: &'static str;
 
+    fn f16(&self, v: f16) -> f16;
     fn f32(&self, v: f32) -> f32;
-    fn f64(&self, v: f64) -> f64;
 }
 
 pub struct Neg;
@@ -27,11 +29,11 @@ pub struct Neg;
 impl UnaryOp for Neg {
     const KERNEL: &'static str = "Neg";
 
-    fn f32(&self, v: f32) -> f32 {
+    fn f16(&self, v: f16) -> f16 {
         -v
     }
 
-    fn f64(&self, v: f64) -> f64 {
+    fn f32(&self, v: f32) -> f32 {
         -v
     }
 }
@@ -42,11 +44,12 @@ macro_rules! unary_op {
 
         impl UnaryOp for $op {
             const KERNEL: &'static str = $name;
-            fn f32(&self, $a: f32) -> f32 {
-                $e
+            fn f16(&self, $a: f16) -> f16 {
+                let $a = $a.to_f32();
+                f16::from_f32($e)
             }
 
-            fn f64(&self, $a: f64) -> f64 {
+            fn f32(&self, $a: f32) -> f32 {
                 $e
             }
         }
@@ -61,11 +64,11 @@ pub struct Relu;
 impl UnaryOp for Relu {
     const KERNEL: &'static str = "relu";
 
-    fn f32(&self, v: f32) -> f32 {
-        v.max(0.0)
+    fn f16(&self, v: f16) -> f16 {
+        v.max(f16::from_f32(0.0))
     }
 
-    fn f64(&self, v: f64) -> f64 {
+    fn f32(&self, v: f32) -> f32 {
         v.max(0.0)
     }
 }
@@ -75,15 +78,15 @@ pub struct ReluBackward;
 impl UnaryOp for ReluBackward {
     const KERNEL: &'static str = "relu_backward";
 
-    fn f32(&self, v: f32) -> f32 {
-        if v > 0.0 {
-            1.0
+    fn f16(&self, v: f16) -> f16 {
+        if v > f16::from_f32(0.0) {
+            f16::from_f32(1.0)
         } else {
-            0.0
+            f16::from_f32(0.0)
         }
     }
 
-    fn f64(&self, v: f64) -> f64 {
+    fn f32(&self, v: f32) -> f32 {
         if v > 0.0 {
             1.0
         } else {
@@ -98,12 +101,12 @@ macro_rules! scalar_op {
 
         impl UnaryOp for $op {
             const KERNEL: &'static str = $name;
-            fn f32(&self, v: f32) -> f32 {
-                v $e self.0 as f32
+            fn f16(&self, v: f16) -> f16 {
+                v $e f16::from_f32(self.0 as f32)
             }
 
-            fn f64(&self, v: f64) -> f64 {
-                v $e self.0
+            fn f32(&self, v: f32) -> f32 {
+                v $e self.0 as f32
             }
         }
     };
@@ -117,8 +120,8 @@ scalar_op!(ScalarDiv, "scalar_div", /);
 pub trait BinaryOp {
     const KERNEL: &'static str;
 
+    fn f16(v: f16, w: f16) -> f16;
     fn f32(v: f32, w: f32) -> f32;
-    fn f64(v: f64, w: f64) -> f64;
 }
 
 macro_rules! impl_binary_op {
@@ -128,13 +131,13 @@ macro_rules! impl_binary_op {
         impl BinaryOp for $op {
             const KERNEL: &'static str = $name;
 
-            fn f32(v: f32, w: f32) -> f32 {
+            fn f16(v: f16, w: f16) -> f16 {
                 #[allow(unused_imports)]
                 use std::ops::*;
                 v.$e(w)
             }
 
-            fn f64(v: f64, w: f64) -> f64 {
+            fn f32(v: f32, w: f32) -> f32 {
                 #[allow(unused_imports)]
                 use std::ops::*;
                 v.$e(w)
@@ -147,22 +150,34 @@ impl_binary_op!(EWiseAdd, "add", add);
 impl_binary_op!(EWiseSub, "sub", sub);
 impl_binary_op!(EWiseMul, "mul", mul);
 impl_binary_op!(EWiseDiv, "div", div);
-impl_binary_op!(EWisePow, "powf", powf);
+pub struct EWisePow;
+
+impl BinaryOp for EWisePow {
+    const KERNEL: &'static str = "powf";
+
+    fn f16(v: f16, w: f16) -> f16 {
+        f16::from_f32(v.to_f32().powf(w.to_f32()))
+    }
+
+    fn f32(v: f32, w: f32) -> f32 {
+        v.powf(w)
+    }
+}
 
 pub struct EWiseEq;
 
 impl BinaryOp for EWiseEq {
     const KERNEL: &'static str = "eq";
 
-    fn f32(v: f32, w: f32) -> f32 {
+    fn f16(v: f16, w: f16) -> f16 {
         if v == w {
-            1.0
+            f16::from_f32(1.0)
         } else {
-            0.0
+            f16::from_f32(0.0)
         }
     }
 
-    fn f64(v: f64, w: f64) -> f64 {
+    fn f32(v: f32, w: f32) -> f32 {
         if v == w {
             1.0
         } else {
@@ -175,19 +190,19 @@ impl BinaryOp for EWiseEq {
 pub trait ReduceOp {
     const KERNEL: &'static str;
 
+    fn f16(v: f16, w: f16) -> f16;
     fn f32(v: f32, w: f32) -> f32;
-    fn f64(v: f64, w: f64) -> f64;
 }
 
 pub struct ReduceSum;
 impl ReduceOp for ReduceSum {
     const KERNEL: &'static str = "reduce_sum";
 
-    fn f32(acc: f32, x: f32) -> f32 {
+    fn f16(acc: f16, x: f16) -> f16 {
         acc + x
     }
 
-    fn f64(acc: f64, x: f64) -> f64 {
+    fn f32(acc: f32, x: f32) -> f32 {
         acc + x
     }
 }
@@ -196,11 +211,11 @@ pub struct ReduceMax;
 impl ReduceOp for ReduceMax {
     const KERNEL: &'static str = "reduce_max";
 
-    fn f32(acc: f32, x: f32) -> f32 {
+    fn f16(acc: f16, x: f16) -> f16 {
         acc.max(x)
     }
 
-    fn f64(acc: f64, x: f64) -> f64 {
+    fn f32(acc: f32, x: f32) -> f32 {
         acc.max(x)
     }
 }

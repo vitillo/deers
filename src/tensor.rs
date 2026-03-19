@@ -5,6 +5,7 @@ use std::ops::{Add, Deref, Div, Mul, Neg, Sub};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use half::f16;
 use rand::Rng;
 
 use crate::device::Device;
@@ -117,7 +118,7 @@ impl Tensor {
         &self.layout
     }
 
-    /// Returns the data type (F32, F64) of this tensor.
+    /// Returns the tensor element type.
     pub fn dtype(&self) -> DType {
         self.storage().dtype()
     }
@@ -184,12 +185,13 @@ impl Tensor {
         let shape: Shape = shape.into();
         let mut rng = rand::thread_rng();
         let storage = match dtype {
-            DType::F32 => {
-                let data: Vec<f32> = (0..shape.size()).map(|_| rng.gen()).collect();
+            DType::F16 => {
+                let data: Vec<f16> =
+                    (0..shape.size()).map(|_| f16::from_f32(rng.gen::<f32>())).collect();
                 CpuStorage::from(data).to(device)
             }
-            DType::F64 => {
-                let data: Vec<f64> = (0..shape.size()).map(|_| rng.gen()).collect();
+            DType::F32 => {
+                let data: Vec<f32> = (0..shape.size()).map(|_| rng.gen()).collect();
                 CpuStorage::from(data).to(device)
             }
             _ => unimplemented!(),
@@ -204,22 +206,23 @@ impl Tensor {
         let mut rng = rand::thread_rng();
         // Box-Muller transform
         let storage = match dtype {
+            DType::F16 => {
+                let data: Vec<f16> = (0..shape.size())
+                    .map(|_| {
+                        let u1: f32 = rng.gen();
+                        let u2: f32 = rng.gen();
+                        let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos();
+                        f16::from_f32(z)
+                    })
+                    .collect();
+                CpuStorage::from(data).to(device)
+            }
             DType::F32 => {
                 let data: Vec<f32> = (0..shape.size())
                     .map(|_| {
                         let u1: f32 = rng.gen();
                         let u2: f32 = rng.gen();
                         (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
-                    })
-                    .collect();
-                CpuStorage::from(data).to(device)
-            }
-            DType::F64 => {
-                let data: Vec<f64> = (0..shape.size())
-                    .map(|_| {
-                        let u1: f64 = rng.gen();
-                        let u2: f64 = rng.gen();
-                        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
                     })
                     .collect();
                 CpuStorage::from(data).to(device)
@@ -243,10 +246,9 @@ impl Tensor {
 
         let shape: Vec<usize> = self.layout().shape().iter().copied().collect();
         let out = match self.dtype() {
+            DType::F16 => Tensor::from_vec(self.to_vec::<f16>()?, shape, device),
             DType::F32 => Tensor::from_vec(self.to_vec::<f32>()?, shape, device),
-            DType::F64 => Tensor::from_vec(self.to_vec::<f64>()?, shape, device),
-            DType::U32 => Tensor::from_vec(self.to_vec::<u32>()?, shape, device),
-            DType::F16 => todo!(),
+            DType::I64 => Tensor::from_vec(self.to_vec::<i64>()?, shape, device),
         };
         Ok(out)
     }
@@ -471,7 +473,7 @@ impl Tensor {
     }
 
     /// Selects rows from a 2D tensor by index.
-    /// Input: (rows, cols), indices: 1D u32 → output: (num_indices, cols).
+    /// Input: (rows, cols), indices: 1D i64 -> output: (num_indices, cols).
     pub fn index_select(&self, indices: &Tensor) -> Tensor {
         ops::IndexSelect::new(self.clone(), indices.clone()).forward().unwrap()
     }
@@ -503,14 +505,14 @@ impl PartialEq for Tensor {
     fn eq(&self, other: &Self) -> bool {
         self.layout().shape == other.layout().shape
             && match (self.dtype(), other.dtype()) {
+                (DType::F16, DType::F16) => {
+                    self.to_vec::<f16>().unwrap() == other.to_vec::<f16>().unwrap()
+                }
                 (DType::F32, DType::F32) => {
                     self.to_vec::<f32>().unwrap() == other.to_vec::<f32>().unwrap()
                 }
-                (DType::F64, DType::F64) => {
-                    self.to_vec::<f64>().unwrap() == other.to_vec::<f64>().unwrap()
-                }
-                (DType::U32, DType::U32) => {
-                    self.to_vec::<u32>().unwrap() == other.to_vec::<u32>().unwrap()
+                (DType::I64, DType::I64) => {
+                    self.to_vec::<i64>().unwrap() == other.to_vec::<i64>().unwrap()
                 }
                 _ => false,
             }

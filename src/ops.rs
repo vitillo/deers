@@ -1074,7 +1074,7 @@ impl Gather {
         assert_eq!(dim, 1, "gather only supports dim=1");
         assert_eq!(indices.layout().ndim(), 1, "gather indices must be 1D");
         assert_eq!(indices.layout().shape()[0], input.layout().shape()[0]);
-        assert_eq!(indices.dtype(), crate::DType::U32, "gather indices must be u32");
+        assert_eq!(indices.dtype(), crate::DType::I64, "gather indices must be i64");
         let indices = indices.to_device(input.device()).unwrap();
         Self { input: input.compact(), dim, indices: indices.compact() }
     }
@@ -1128,7 +1128,7 @@ impl TensorOp for Gather {
 }
 
 /// Selects rows from a 2D tensor by index.
-/// Input shape: (rows, cols), indices: 1D u32 → output: (num_indices, cols).
+/// Input shape: (rows, cols), indices: 1D i64 -> output: (num_indices, cols).
 #[derive(Debug)]
 pub struct IndexSelect {
     input: Tensor,
@@ -1139,7 +1139,7 @@ impl IndexSelect {
     pub fn new(input: Tensor, indices: Tensor) -> Self {
         assert_eq!(input.layout().ndim(), 2, "index_select requires 2D input");
         assert_eq!(indices.layout().ndim(), 1, "index_select requires 1D indices");
-        assert_eq!(indices.dtype(), crate::DType::U32, "index_select indices must be u32");
+        assert_eq!(indices.dtype(), crate::DType::I64, "index_select indices must be i64");
         let indices = indices.to_device(input.device()).unwrap();
         Self { input: input.compact(), indices: indices.compact() }
     }
