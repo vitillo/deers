@@ -71,6 +71,60 @@ impl Module for Linear {
     }
 }
 
+/// Embedding lookup table: maps integer indices to dense vectors.
+pub struct Embedding {
+    weight: Var,
+}
+
+impl Embedding {
+    pub fn new(vocab_size: usize, hidden_size: usize) -> Self {
+        let weight = Var::new(Tensor::randn((vocab_size, hidden_size), DType::F32, Device::Cpu));
+        Self { weight }
+    }
+}
+
+impl Module for Embedding {
+    fn forward(&self, indices: &Tensor) -> Result<Tensor> {
+        let hidden_size = self.weight.layout().shape()[1];
+        let mut final_dims: Vec<usize> = indices.layout().shape().iter().copied().collect();
+        final_dims.push(hidden_size);
+        let flat = indices.reshape(vec![indices.layout().size()]);
+        let selected = self.weight.index_select(&flat);
+        Ok(selected.reshape(final_dims))
+    }
+
+    fn vars(&self) -> Vec<Var> {
+        vec![self.weight.clone()]
+    }
+}
+
+/// RMSNorm: `x / sqrt(mean(x²) + eps) * weight`.
+pub struct RMSNorm {
+    weight: Var,
+    eps: f64,
+}
+
+impl RMSNorm {
+    pub fn new(size: usize, eps: f64) -> Self {
+        let weight = Var::new(Tensor::ones(vec![size], DType::F32, Device::Cpu));
+        Self { weight, eps }
+    }
+}
+
+impl Module for RMSNorm {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let last_axis = x.layout().ndim() - 1;
+        let mean_sq = (x * x).mean(vec![last_axis], true);
+        let inv_norm = (mean_sq + self.eps).scalar_powf(-0.5);
+        let normalized = x * &inv_norm;
+        Ok(&normalized * &*self.weight)
+    }
+
+    fn vars(&self) -> Vec<Var> {
+        vec![self.weight.clone()]
+    }
+}
+
 /// Element-wise ReLU activation.
 pub struct ReLU;
 

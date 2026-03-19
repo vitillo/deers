@@ -417,6 +417,40 @@ impl BackendStorage for CpuStorage {
         }
     }
 
+    fn index_select(&self, layout: &Layout, indices: &Self, indices_layout: &Layout) -> Result<Self> {
+        assert!(layout.is_compact());
+        assert!(layout.ndim() == 2, "index_select requires 2D input");
+        assert!(indices_layout.is_compact());
+        let cols = layout.shape[1];
+        let indices: Vec<usize> = match indices {
+            CpuStorage::U32(_) => {
+                indices.to_vec::<u32>(indices_layout).into_iter().map(|v| v as usize).collect()
+            }
+            _ => todo!("index_select only supports U32 indices"),
+        };
+        let rows = layout.shape[0];
+        for idx in &indices {
+            assert!(*idx < rows, "index_select index {} out of bounds ({})", idx, rows);
+        }
+        match self {
+            CpuStorage::F32(data) => {
+                let mut out = Vec::with_capacity(indices.len() * cols);
+                for &idx in &indices {
+                    out.extend_from_slice(&data[idx * cols..(idx + 1) * cols]);
+                }
+                Ok(CpuStorage::F32(out))
+            }
+            CpuStorage::F64(data) => {
+                let mut out = Vec::with_capacity(indices.len() * cols);
+                for &idx in &indices {
+                    out.extend_from_slice(&data[idx * cols..(idx + 1) * cols]);
+                }
+                Ok(CpuStorage::F64(out))
+            }
+            CpuStorage::U32(_) => todo!("index_select for U32 data"),
+        }
+    }
+
     fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self> {
         assert!(layout.is_compact() && layout_other.is_compact());
         let ndim = layout.shape.ndim();

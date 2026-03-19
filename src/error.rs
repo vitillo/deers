@@ -11,6 +11,9 @@ pub enum Error {
     #[error("Operation {op} requires tensors on the same device")]
     DeviceMismatch { op: &'static str },
 
+    #[error("{0}")]
+    NotImplemented(&'static str),
+
     #[error(transparent)]
     DatasetParseError(#[from] io::Error),
 }

@@ -63,6 +63,12 @@ struct GatherMeta {
     cols: u32,
 }
 
+#[repr(C)]
+struct IndexSelectMeta {
+    num_indices: u32,
+    cols: u32,
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use super::*;
@@ -101,6 +107,7 @@ mod imp {
         "matmul_f32",
         "gather_f32",
         "scatter_f32",
+        "index_select_f32",
     ];
 
     #[derive(Debug)]
@@ -798,6 +805,40 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
+        fn index_select(&self, layout: &Layout, indices: &Self, indices_layout: &Layout) -> Result<Self> {
+            if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
+                (self.accelerated(DType::F32), indices.accelerated(DType::U32))
+            {
+                assert!(layout.is_compact());
+                assert!(indices_layout.is_compact());
+                let num_indices = indices_layout.shape()[0];
+                let cols = layout.shape()[1];
+                let out = ctx.empty_f32_buffer(num_indices * cols);
+                let meta = IndexSelectMeta { num_indices: num_indices as u32, cols: cols as u32 };
+                ctx.dispatch_2d("index_select_f32", cols, num_indices, |encoder| {
+                    encoder.set_buffer(0, Some(input), 0);
+                    encoder.set_buffer(1, Some(index_buffer), 0);
+                    encoder.set_buffer(2, Some(&out), 0);
+                    MpsContext::set_params(encoder, 3, &meta);
+                });
+                return Ok(Self {
+                    inner: MpsInner::Accelerated {
+                        ctx: ctx.clone(),
+                        buffer: out,
+                        len: num_indices * cols,
+                        dtype: DType::F32,
+                    },
+                });
+            }
+
+            let inner = self.as_cpu_storage().index_select(
+                layout,
+                &indices.as_cpu_storage(),
+                indices_layout,
+            )?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
         fn dtype(&self) -> DType {
             match &self.inner {
                 MpsInner::Accelerated { dtype, .. } => *dtype,
@@ -989,6 +1030,9 @@ mod imp {
             Self::unavailable()
         }
         fn scatter(&self, _: &Layout, _: usize, _: &Self, _: &Layout, _: &[usize]) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn index_select(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
             Self::unavailable()
         }
         fn dtype(&self) -> DType {
