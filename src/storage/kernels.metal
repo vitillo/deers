@@ -34,8 +34,9 @@ struct ReduceMeta {
 
 struct MatmulMeta {
     uint m;
+    uint k;
     uint n;
-    uint p;
+    uint batch;
 };
 
 struct GatherMeta {
@@ -283,10 +284,18 @@ kernel void matmul_f32(
     device const float* rhs [[buffer(1)]],
     device float* output [[buffer(2)]],
     constant MatmulMeta& meta [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]],
-    uint2 tid [[thread_position_in_threadgroup]],
-    uint2 tgid [[threadgroup_position_in_grid]]
+    uint3 tid [[thread_position_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 gid [[thread_position_in_grid]]
 ) {
+    uint batch_idx = gid.z;
+    if (batch_idx >= meta.batch) return;
+
+    // Offset pointers to the current batch
+    device const float* a = lhs + batch_idx * meta.m * meta.k;
+    device const float* b = rhs + batch_idx * meta.k * meta.n;
+    device float* c = output + batch_idx * meta.m * meta.n;
+
     threadgroup float tileA[TILE][TILE];
     threadgroup float tileB[TILE][TILE];
 
@@ -294,22 +303,22 @@ kernel void matmul_f32(
     uint col = tgid.x * TILE + tid.x;
     float acc = 0.0f;
 
-    uint num_tiles = (meta.n + TILE - 1) / TILE;
+    uint num_tiles = (meta.k + TILE - 1) / TILE;
     for (uint t = 0; t < num_tiles; t++) {
         uint ak = t * TILE + tid.x;
         uint bk = t * TILE + tid.y;
-        tileA[tid.y][tid.x] = (row < meta.m && ak < meta.n) ? lhs[row * meta.n + ak] : 0.0f;
-        tileB[tid.y][tid.x] = (bk < meta.n && col < meta.p) ? rhs[bk * meta.p + col] : 0.0f;
+        tileA[tid.y][tid.x] = (row < meta.m && ak < meta.k) ? a[row * meta.k + ak] : 0.0f;
+        tileB[tid.y][tid.x] = (bk < meta.k && col < meta.n) ? b[bk * meta.n + col] : 0.0f;
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        for (uint k = 0; k < TILE; k++) {
-            acc += tileA[tid.y][k] * tileB[k][tid.x];
+        for (uint kk = 0; kk < TILE; kk++) {
+            acc += tileA[tid.y][kk] * tileB[kk][tid.x];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    if (row < meta.m && col < meta.p) {
-        output[row * meta.p + col] = acc;
+    if (row < meta.m && col < meta.n) {
+        c[row * meta.n + col] = acc;
     }
 }
 

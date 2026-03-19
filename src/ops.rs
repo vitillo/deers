@@ -893,8 +893,26 @@ pub struct MatMul {
 
 impl MatMul {
     pub fn new(arg1: Tensor, arg2: Tensor) -> Result<Self> {
-        assert!(arg1.layout().ndim() == 2 && arg2.layout().ndim() == 2);
-        assert!(arg1.layout().shape()[1] == arg2.layout().shape()[0]);
+        let a = arg1.layout();
+        let b = arg2.layout();
+        assert!(a.ndim() >= 2 && b.ndim() >= 2, "matmul requires ndim >= 2");
+        assert!(
+            a.ndim() == b.ndim(),
+            "matmul requires same number of dimensions, got {} and {}",
+            a.ndim(),
+            b.ndim()
+        );
+        let k1 = a.shape()[a.ndim() - 1];
+        let k2 = b.shape()[b.ndim() - 2];
+        assert!(k1 == k2, "matmul inner dimensions must match: {} vs {}", k1, k2);
+        // Batch dimensions must match
+        for i in 0..a.ndim() - 2 {
+            assert!(
+                a.shape()[i] == b.shape()[i],
+                "matmul batch dimension {} mismatch: {} vs {}",
+                i, a.shape()[i], b.shape()[i]
+            );
+        }
         Ok(Self {
             arg1: arg1.compact(),
             arg2: arg2.compact(),
@@ -904,7 +922,15 @@ impl MatMul {
 
 impl TensorOp for MatMul {
     fn forward(self) -> Result<Tensor> {
-        let shape: Shape = (self.arg1.layout().shape[0], self.arg2.layout().shape[1]).into();
+        let a_shape = self.arg1.layout().shape();
+        let b_shape = self.arg2.layout().shape();
+        let ndim = a_shape.ndim();
+        let m = a_shape[ndim - 2];
+        let n = b_shape[ndim - 1];
+        let mut out_dims: Vec<usize> = (0..ndim - 2).map(|i| a_shape[i]).collect();
+        out_dims.push(m);
+        out_dims.push(n);
+        let shape: Shape = out_dims.into();
         let storage = Arc::new(RwLock::new(self.arg1.storage().matmul(
             self.arg1.layout(),
             &self.arg2.storage(),
@@ -922,12 +948,9 @@ impl TensorOp for MatMul {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        // a * b, da = b, db = a
-        // a = n x p
-        // b = p x k
-        // out = n x k
-        // out @ b^t = n x p
-        // a^t @ out = p x k
+        // a = [..., m, k], b = [..., k, n], out = [..., m, n]
+        // da = out_grad @ b^T   -> [..., m, k]
+        // db = a^T @ out_grad   -> [..., k, n]
 
         let arg1_grad = out_grad.matmul(&self.arg2.transpose(None));
         let sum_grad = grads.get_or_insert_zero(&self.arg1);

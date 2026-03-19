@@ -426,7 +426,7 @@ impl Tensor {
             .unwrap()
     }
 
-    /// 2-D matrix multiplication: `(m, n) @ (n, p) -> (m, p)`.
+    /// Matrix multiplication: `[..., m, k] @ [..., k, n] -> [..., m, n]`.
     pub fn matmul(&self, other: &Tensor) -> Tensor {
         ops::MatMul::new(self.clone(), other.clone())
             .unwrap()
