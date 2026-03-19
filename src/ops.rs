@@ -43,14 +43,7 @@ impl TensorOp for Neg {
         let storage =
             Arc::new(RwLock::new(self.arg.storage().unary_op(storage::Neg, self.arg.layout())?));
         let layout = Layout::from(self.arg.layout().shape().clone());
-        Ok(Tensor::new(
-            storage,
-            layout,
-            self.arg.device(),
-            self.arg.dtype(),
-            false,
-            Some(Box::new(self)),
-        ))
+        Ok(Tensor::new(storage, layout, false, Some(Box::new(self))))
     }
 
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -87,8 +80,6 @@ impl TensorOp for EWiseAdd {
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg1.layout().shape().clone()),
-            self.arg1.device(),
-            self.arg1.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -132,8 +123,6 @@ impl TensorOp for EWiseSub {
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg1.layout().shape().clone()),
-            self.arg1.device(),
-            self.arg1.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -177,8 +166,6 @@ impl TensorOp for EWiseMul {
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg1.layout().shape().clone()),
-            self.arg1.device(),
-            self.arg1.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -222,8 +209,6 @@ impl TensorOp for EWiseDiv {
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg1.layout().shape().clone()),
-            self.arg1.device(),
-            self.arg1.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -266,8 +251,6 @@ impl TensorOp for EWisePowf {
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
-            self.arg.device(),
-            self.arg.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -308,8 +291,6 @@ impl TensorOp for EWiseLog {
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
-            self.arg.device(),
-            self.arg.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -344,8 +325,6 @@ impl TensorOp for EWiseExp {
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
-            self.arg.device(),
-            self.arg.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -380,8 +359,6 @@ impl TensorOp for EWiseSin {
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
-            self.arg.device(),
-            self.arg.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -416,8 +393,6 @@ impl TensorOp for EWiseCos {
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
-            self.arg.device(),
-            self.arg.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -452,8 +427,6 @@ impl TensorOp for Tanh {
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
-            self.arg.device(),
-            self.arg.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -490,8 +463,6 @@ impl TensorOp for Relu {
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
-            self.arg.device(),
-            self.arg.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -502,14 +473,8 @@ impl TensorOp for Relu {
         let mask_storage = Arc::new(RwLock::new(
             self.arg.storage().unary_op(storage::ReluBackward, self.arg.layout())?,
         ));
-        let mask = Tensor::new(
-            mask_storage,
-            Layout::from(self.arg.layout().shape().clone()),
-            self.arg.device(),
-            self.arg.dtype(),
-            false,
-            None,
-        );
+        let mask =
+            Tensor::new(mask_storage, Layout::from(self.arg.layout().shape().clone()), false, None);
         let grad_sum = grads.get_or_insert_zero(&self.arg);
         *grad_sum = &*grad_sum + out_grad * &mask;
         Ok(())
@@ -540,8 +505,6 @@ impl TensorOp for ScalarAdd {
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
-            self.arg.device(),
-            self.arg.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -579,8 +542,6 @@ impl TensorOp for ScalarMul {
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
-            self.arg.device(),
-            self.arg.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -618,8 +579,6 @@ impl TensorOp for ScalarPowf {
         Ok(Tensor::new(
             storage,
             Layout::from(self.arg.layout().shape().clone()),
-            self.arg.device(),
-            self.arg.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -651,14 +610,7 @@ impl TensorOp for Permute {
     fn forward(self) -> Result<Tensor> {
         let storage = self.0.storage_clone();
         let layout = self.0.layout().permute(&self.1);
-        Ok(Tensor::new(
-            storage,
-            layout,
-            self.0.device(),
-            self.0.dtype(),
-            false,
-            Some(Box::new(self)),
-        ))
+        Ok(Tensor::new(storage, layout, false, Some(Box::new(self))))
     }
 
     fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -713,14 +665,7 @@ impl TensorOp for Broadcast {
 
         let layout = Layout::new(self.new_shape.clone(), new_strides, self.arg.layout().offset);
         let storage = self.arg.storage_clone();
-        Ok(Tensor::new(
-            storage,
-            layout,
-            self.arg.device(),
-            self.arg.dtype(),
-            false,
-            Some(Box::new(self)),
-        ))
+        Ok(Tensor::new(storage, layout, false, Some(Box::new(self))))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -799,14 +744,7 @@ impl TensorOp for Sum {
         let mut out_storage = self.arg.device().zeros(new_shape.size(), self.arg.dtype());
         view.storage().reduce::<ReduceSum>(view.layout(), &mut out_storage)?;
         let storage = Arc::new(RwLock::new(out_storage));
-        Ok(Tensor::new(
-            storage,
-            Layout::from(new_shape),
-            self.arg.device(),
-            self.arg.dtype(),
-            false,
-            Some(Box::new(self)),
-        ))
+        Ok(Tensor::new(storage, Layout::from(new_shape), false, Some(Box::new(self))))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -878,14 +816,7 @@ impl TensorOp for Max {
         let mut out_storage = self.arg.device().zeros(new_shape.size(), self.arg.dtype());
         view.storage().reduce::<ReduceMax>(view.layout(), &mut out_storage)?;
         let storage = Arc::new(RwLock::new(out_storage));
-        Ok(Tensor::new(
-            storage,
-            Layout::from(new_shape),
-            self.arg.device(),
-            self.arg.dtype(),
-            false,
-            Some(Box::new(self)),
-        ))
+        Ok(Tensor::new(storage, Layout::from(new_shape), false, Some(Box::new(self))))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -923,14 +854,7 @@ impl TensorOp for Reshape {
     fn forward(self) -> Result<Tensor> {
         let storage = self.arg.storage_clone();
 
-        Ok(Tensor::new(
-            storage,
-            Layout::from(self.new_shape.clone()),
-            self.arg.device(),
-            self.arg.dtype(),
-            false,
-            Some(Box::new(self)),
-        ))
+        Ok(Tensor::new(storage, Layout::from(self.new_shape.clone()), false, Some(Box::new(self))))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -972,8 +896,6 @@ impl TensorOp for Narrow {
         Ok(Tensor::new(
             self.arg.storage_clone(),
             Layout::new(shape, self.arg.layout().strides().clone(), offset),
-            self.arg.device(),
-            self.arg.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -1059,14 +981,7 @@ impl TensorOp for MatMul {
             self.arg2.layout(),
         )?));
 
-        Ok(Tensor::new(
-            storage,
-            shape.into(),
-            self.arg1.device(),
-            self.arg1.dtype(),
-            false,
-            Some(Box::new(self)),
-        ))
+        Ok(Tensor::new(storage, shape.into(), false, Some(Box::new(self))))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -1113,8 +1028,6 @@ impl TensorOp for LogSumExp {
         Ok(Tensor::new(
             logsumexp.storage_clone(),
             logsumexp.layout().clone(),
-            logsumexp.device(),
-            logsumexp.dtype(),
             false,
             Some(Box::new(self)),
         ))
@@ -1169,14 +1082,7 @@ impl TensorOp for Compact {
         self.arg.storage().copy_compact(self.arg.layout(), &mut storage)?;
         let strides = self.arg.layout().shape().compact_strides();
         let layout = Layout::new(self.arg.layout().shape().clone(), strides, 0);
-        Ok(Tensor::new(
-            Arc::new(RwLock::new(storage)),
-            layout,
-            self.arg.device(),
-            self.arg.dtype(),
-            false,
-            Some(Box::new(self)),
-        ))
+        Ok(Tensor::new(Arc::new(RwLock::new(storage)), layout, false, Some(Box::new(self))))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -1225,14 +1131,7 @@ impl TensorOp for Gather {
             self.indices.layout(),
         )?));
         let shape: Shape = (rows, 1).into();
-        Ok(Tensor::new(
-            storage,
-            shape.into(),
-            self.input.device(),
-            self.input.dtype(),
-            false,
-            Some(Box::new(self)),
-        ))
+        Ok(Tensor::new(storage, shape.into(), false, Some(Box::new(self))))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -1247,8 +1146,6 @@ impl TensorOp for Gather {
         let grad_tensor = Tensor::new(
             Arc::new(RwLock::new(grad_storage)),
             full_shape.clone().into(),
-            self.input.device(),
-            self.input.dtype(),
             false,
             None,
         );
@@ -1290,14 +1187,7 @@ impl TensorOp for IndexSelect {
             self.indices.layout(),
         )?));
         let shape: Shape = (num_indices, cols).into();
-        Ok(Tensor::new(
-            storage,
-            shape.into(),
-            self.input.device(),
-            self.input.dtype(),
-            false,
-            Some(Box::new(self)),
-        ))
+        Ok(Tensor::new(storage, shape.into(), false, Some(Box::new(self))))
     }
 
     fn backward(&self, _grads: &mut GradientStore, _out_grad: &Tensor) -> Result<()> {
@@ -1340,8 +1230,6 @@ impl Cat {
 
 impl TensorOp for Cat {
     fn forward(self) -> Result<Tensor> {
-        let device = self.args[0].device();
-        let dtype = self.args[0].dtype();
         let total_dim0: usize = self.args.iter().map(|a| a.layout().shape()[0]).sum();
 
         let mut out_dims: Vec<usize> = self.args[0].layout().shape().iter().copied().collect();
@@ -1361,8 +1249,6 @@ impl TensorOp for Cat {
         Ok(Tensor::new(
             Arc::new(RwLock::new(storage)),
             out_shape.into(),
-            device,
-            dtype,
             false,
             Some(Box::new(self)),
         ))

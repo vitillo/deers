@@ -40,3 +40,22 @@ impl Deref for Var {
         &self.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Var;
+    use crate::{Device, Tensor};
+
+    #[test]
+    fn test_new() {
+        // Arrange
+        let tensor = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu);
+
+        // Act
+        let var = Var::new(tensor);
+
+        // Assert
+        assert!(var.requires_grad());
+        assert_eq!(var.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
+    }
+}

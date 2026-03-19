@@ -15,6 +15,13 @@ DEERS is a minimal PyTorch clone in Rust for learning. Optimize for readability 
 - Build incrementally: one small piece at a time.
 - Prioritize correctness, with tests for new behavior and gradients where applicable.
 
+## Error handling
+
+- Prefer explicit panics for unrecoverable programmer errors where there is no meaningful local recovery path.
+- Invalid tensor program states should fail loudly rather than hiding the issue behind defensive abstractions.
+- Example: mixing incompatible tensor dtypes in an operation is allowed to panic if the operation cannot sensibly continue.
+- Use `Result` for operations that can realistically fail at runtime, such as backend execution or data movement.
+
 ## Structure
 
 - Keep `Tensor` focused on general tensor operations.
@@ -26,6 +33,12 @@ DEERS is a minimal PyTorch clone in Rust for learning. Optimize for readability 
 - Explain the reasoning behind design choices, not just the diff.
 - When multiple valid approaches exist, present the options and tradeoffs.
 - Don’t preserve awkward code just to preserve old tests; update tests when the design improves.
+
+## Testing
+
+- Structure tests in three explicit phases: `Arrange`, `Act`, and `Assert`.
+- Keep test setup small and local so each phase is easy to scan.
+- Prefer one clear behavior per test over broad scenario tests.
 
 ## Commits
 
