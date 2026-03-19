@@ -4,6 +4,9 @@ A minimal deep learning framework in Rust. Built for understanding, not producti
 
 Deers implements reverse-mode automatic differentiation over a define-by-run computation graph: operations build the graph during the forward pass, and `.backward()` traverses it in reverse to compute gradients.
 
+The project favors readability and explicit tensor construction over production-grade robustness.
+Most `Tensor` methods return values directly and may panic on invalid inputs (shape or device mismatches), so beginners get a minimal learning path while keeping the call sites compact.
+
 ## Quick example
 
 ```rust
@@ -67,7 +70,7 @@ cargo run --release --example mnist_train -- --device mps
 
 **Devices** — CPU and MPS (Metal-backed on macOS)
 
-**DTypes** — `f32`, `f64`, and `u32` tensors (`u32` is used for integer targets / indices)
+**DTypes** — `f16`, `f32`, and `i64` tensors (`i64` is used for integer targets / indices)
 
 **Tensor ops** — neg, add, sub, mul, div, powf, log, exp, relu, matmul, gather
 
@@ -82,6 +85,17 @@ cargo run --release --example mnist_train -- --device mps
 **Optimizers** — SGD
 
 **Losses** — `cross_entropy`, `nll_loss`
+
+**Notable conventions**:
+
+- Gradients are enabled by calling `.attach()` on tensors or using `Var`, which wraps a trainable tensor.
+- `Tensor::sum`, `Tensor::mean`, and reductions are explicit (e.g. `sum(vec![0, 1], true)`), and there are no hidden defaults.
+- Device movement is explicit and value-oriented through `to_device`.
+
+## Quick caveats
+
+- Unsupported backend combinations return clear errors where possible, but this library intentionally avoids extra abstraction layers.
+- `Device::Cuda` is currently a placeholder and not implemented.
 
 **Data** — MNIST loader
 

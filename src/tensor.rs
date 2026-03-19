@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::borrow::Borrow;
-use std::ops::{Add, Deref, Div, Mul, Neg, Sub};
+use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -19,13 +19,16 @@ use crate::storage::{BackendStorage, CpuStorage, Storage};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TensorId(usize);
 
+/// Shared backing state for a [`Tensor`].
+///
+/// Most code should use [`Tensor`] rather than interacting with this type
+/// directly. It stores the tensor's storage, layout, autograd metadata,
+/// and unique identifier behind the `Arc` owned by [`Tensor`].
 #[derive(Debug)]
-pub struct TensorInternal {
+struct TensorInternal {
     id: TensorId,
     storage: Arc<RwLock<Storage>>,
     layout: Layout,
-    device: Device,
-    dtype: DType,
     op: Option<Box<dyn TensorOp>>,
     requires_grad: bool,
 }
@@ -48,20 +51,15 @@ impl From<TensorInternal> for Tensor {
     }
 }
 
-impl Deref for Tensor {
-    type Target = TensorInternal;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
 impl Tensor {
+    fn from_plain_storage(storage: Storage, shape: Shape) -> Self {
+        let layout: Layout = shape.into();
+        Tensor::new(Arc::new(RwLock::new(storage)), layout, false, None)
+    }
+
     pub(crate) fn new(
         storage: Arc<RwLock<Storage>>,
         layout: Layout,
-        device: Device,
-        dtype: DType,
         requires_grad: bool,
         op: Option<Box<dyn TensorOp>>,
     ) -> Self {
@@ -74,48 +72,36 @@ impl Tensor {
                 .map(|o| o.dependencies().iter().any(|dep| dep.requires_grad()))
                 .unwrap_or(false);
 
-        TensorInternal { id, storage, layout, device, dtype, op, requires_grad }.into()
-    }
-
-    pub(crate) fn with_op(self, op: Box<dyn TensorOp>) -> Self {
-        let tensor = Arc::into_inner(self.0).unwrap();
-        let storage = tensor.storage.read().unwrap();
-        let dtype = storage.dtype();
-        let device = match &*storage {
-            Storage::Cpu(_) => Device::Cpu,
-            Storage::Mps(_) => Device::Mps,
-        };
-        drop(storage);
-        Tensor::new(tensor.storage, tensor.layout, device, dtype, false, Some(op))
+        TensorInternal { id, storage, layout, op, requires_grad }.into()
     }
 
     /// Returns the operation that produced this tensor, if any.
     pub fn op(&self) -> &Option<Box<dyn TensorOp>> {
-        &self.op
+        &self.0.op
     }
 
     /// Returns this tensor's unique identifier.
     pub fn id(&self) -> TensorId {
-        self.id
+        self.0.id
     }
 
     /// Returns a read guard to the underlying storage.
     pub fn storage(&self) -> RwLockReadGuard<'_, Storage> {
-        self.storage.read().unwrap()
+        self.0.storage.read().unwrap()
     }
 
     pub(crate) fn storage_clone(&self) -> Arc<RwLock<Storage>> {
-        self.storage.clone()
+        self.0.storage.clone()
     }
 
     /// Returns a write guard to the underlying storage.
     pub(crate) fn storage_mut(&self) -> RwLockWriteGuard<'_, Storage> {
-        self.storage.write().unwrap()
+        self.0.storage.write().unwrap()
     }
 
     /// Returns the layout (shape, strides, offset) of this tensor.
     pub fn layout(&self) -> &Layout {
-        &self.layout
+        &self.0.layout
     }
 
     /// Returns the tensor element type.
@@ -123,7 +109,7 @@ impl Tensor {
         self.storage().dtype()
     }
 
-    /// Returns the device (CPU, CUDA) where this tensor is stored.
+    /// Returns the device (CPU, MPS) where this tensor is stored.
     pub fn device(&self) -> Device {
         match &*self.storage() {
             Storage::Cpu(_) => Device::Cpu,
@@ -133,51 +119,36 @@ impl Tensor {
 
     /// Returns whether this tensor tracks gradients.
     pub fn requires_grad(&self) -> bool {
-        self.requires_grad
+        self.0.requires_grad
     }
 
     /// Enables gradient tracking for this tensor. This is the equivalent of
     /// PyTorch's `requires_grad_(True)`. Tensors produced by operations on an
     /// attached tensor will also track gradients.
     pub fn attach(self) -> Tensor {
-        if self.requires_grad {
+        if self.0.requires_grad {
             return self.clone();
         }
 
-        Tensor::new(
-            self.storage.clone(),
-            self.layout.clone(),
-            self.device(),
-            self.dtype(),
-            true,
-            None,
-        )
+        Tensor::new(self.0.storage.clone(), self.0.layout.clone(), true, None)
     }
 
     /// Creates a tensor filled with zeros.
     pub fn zeros(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
-        let storage = Arc::new(RwLock::new(device.zeros(shape.size(), dtype)));
-        let layout: Layout = shape.into();
-        Tensor::new(storage, layout, device, dtype, false, None)
+        Tensor::from_plain_storage(device.zeros(shape.size(), dtype), shape)
     }
 
     /// Creates a tensor filled with ones.
     pub fn ones(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
-        let storage = Arc::new(RwLock::new(device.ones(shape.size(), dtype)));
-        let layout: Layout = shape.into();
-        Tensor::new(storage, layout, device, dtype, false, None)
+        Tensor::from_plain_storage(device.ones(shape.size(), dtype), shape)
     }
 
     /// Creates a tensor from a CPU vector with the given shape.
     pub fn from_vec(vec: impl Into<CpuStorage>, shape: impl Into<Shape>, device: Device) -> Tensor {
         let shape: Shape = shape.into();
-        let storage = vec.into().to(device);
-        let layout: Layout = shape.into();
-        let dtype = storage.dtype();
-        let storage = Arc::new(RwLock::new(storage));
-        Tensor::new(storage, layout, device, dtype, false, None)
+        Tensor::from_plain_storage(vec.into().to(device), shape)
     }
 
     /// Create a tensor with values drawn from a uniform distribution in [0, 1).
@@ -196,8 +167,7 @@ impl Tensor {
             }
             _ => unimplemented!(),
         };
-        let layout: Layout = shape.into();
-        Tensor::new(Arc::new(RwLock::new(storage)), layout, device, dtype, false, None)
+        Tensor::from_plain_storage(storage, shape)
     }
 
     /// Create a tensor with values drawn from a standard normal distribution.
@@ -229,13 +199,12 @@ impl Tensor {
             }
             _ => unimplemented!(),
         };
-        let layout: Layout = shape.into();
-        Tensor::new(Arc::new(RwLock::new(storage)), layout, device, dtype, false, None)
+        Tensor::from_plain_storage(storage, shape)
     }
 
     /// Copies the tensor data into a flat `Vec`, respecting strides.
     pub fn to_vec<S: WithDType>(&self) -> Result<Vec<S>> {
-        Ok(self.storage().to_vec(&self.layout))
+        Ok(self.storage().to_vec(&self.0.layout))
     }
 
     /// Returns a copy of this tensor on the target device.
@@ -255,26 +224,12 @@ impl Tensor {
 
     /// Creates a tensor of ones with the same shape, dtype, and device.
     pub fn ones_like(&self) -> Tensor {
-        Tensor::new(
-            Arc::new(RwLock::new(self.device().ones(self.layout.size(), self.dtype()))),
-            Layout::from(self.layout().shape().clone()),
-            self.device(),
-            self.dtype(),
-            false,
-            None,
-        )
+        Tensor::ones(self.layout().shape().clone(), self.dtype(), self.device())
     }
 
     /// Creates a tensor of zeros with the same shape, dtype, and device.
     pub fn zeros_like(&self) -> Tensor {
-        Tensor::new(
-            Arc::new(RwLock::new(self.device().zeros(self.layout.size(), self.dtype()))),
-            Layout::from(self.layout().shape().clone()),
-            self.device(),
-            self.dtype(),
-            false,
-            None,
-        )
+        Tensor::zeros(self.layout().shape().clone(), self.dtype(), self.device())
     }
 
     /// Returns a no-copy view over a contiguous range on the given dimension.
@@ -307,7 +262,7 @@ impl Tensor {
             axes.0 < self.layout().ndim() && axes.1 < self.layout().ndim(),
             "Transpose axes must be less than tensor dimensions",
         );
-        let mut reshaped_axes: Vec<_> = (0..self.layout.ndim()).collect();
+        let mut reshaped_axes: Vec<_> = (0..self.0.layout.ndim()).collect();
         (reshaped_axes[axes.0], reshaped_axes[axes.1]) =
             (reshaped_axes[axes.1], reshaped_axes[axes.0]);
         self.permute(reshaped_axes)
@@ -325,7 +280,7 @@ impl Tensor {
 
     /// Returns true if the tensor's memory layout is contiguous (row-major).
     pub fn is_compact(&self) -> bool {
-        self.layout.is_compact()
+        self.0.layout.is_compact()
     }
 
     /// Returns a contiguous copy of the tensor. No-op if already compact.
@@ -388,14 +343,7 @@ impl Tensor {
                 .binary_op::<crate::storage::EWiseEq>(a.layout(), &b.storage(), b.layout())
                 .unwrap(),
         ));
-        Tensor::new(
-            storage,
-            Layout::from(a.layout().shape().clone()),
-            a.device(),
-            a.dtype(),
-            false,
-            None,
-        )
+        Tensor::new(storage, Layout::from(a.layout().shape().clone()), false, None)
     }
 
     /// Numerically stable `log(sum(exp(x)))` along the given axes.
@@ -634,6 +582,22 @@ impl<B: Borrow<Tensor>> Div<B> for &Tensor {
     }
 }
 
+impl Div<f64> for Tensor {
+    type Output = Tensor;
+
+    fn div(self, rhs: f64) -> Self::Output {
+        self * (1.0 / rhs)
+    }
+}
+
+impl Div<f64> for &Tensor {
+    type Output = Tensor;
+
+    fn div(self, rhs: f64) -> Self::Output {
+        self * (1.0 / rhs)
+    }
+}
+
 impl Mul<f64> for Tensor {
     type Output = Tensor;
 
@@ -647,5 +611,232 @@ impl Mul<f64> for &Tensor {
 
     fn mul(self, rhs: f64) -> Self::Output {
         ops::ScalarMul::new(self.clone(), rhs).unwrap().forward().unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Keep this module focused on DEERS-specific API behavior that Candle cannot validate
+    // meaningfully, such as metadata, graph attachment, and local invariants. Public tensor
+    // math/data semantics live in tests/tensor_conformance.rs so CPU and MPS can both be checked
+    // against the same Candle reference.
+
+    #[test]
+    fn test_op() {
+        // Arrange
+        let a = Tensor::ones((2,), DType::F32, Device::Cpu);
+        let b = Tensor::ones((2,), DType::F32, Device::Cpu);
+
+        // Act
+        let c = &a + &b;
+
+        // Assert
+        assert!(a.op().is_none());
+        assert!(c.op().is_some());
+    }
+
+    #[test]
+    fn test_id() {
+        // Arrange
+        let a = Tensor::ones((1,), DType::F32, Device::Cpu);
+        let b = Tensor::ones((1,), DType::F32, Device::Cpu);
+
+        // Act
+        let (a_id, b_id) = (a.id(), b.id());
+
+        // Assert
+        assert_ne!(a_id, b_id);
+    }
+
+    #[test]
+    fn test_storage() {
+        // Arrange
+        let tensor = Tensor::ones((2,), DType::F32, Device::Cpu);
+
+        // Act
+        let dtype = tensor.storage().dtype();
+
+        // Assert
+        assert_eq!(dtype, DType::F32);
+    }
+
+    #[test]
+    fn test_layout() {
+        // Arrange
+        let tensor = Tensor::ones((2, 3), DType::F32, Device::Cpu);
+
+        // Act
+        let layout = tensor.layout();
+
+        // Assert
+        assert_eq!(layout.shape, (2, 3).into());
+        assert_eq!(layout.strides, (3, 1).into());
+    }
+
+    #[test]
+    fn test_dtype() {
+        // Arrange
+        let tensor = Tensor::ones((2,), DType::I64, Device::Cpu);
+
+        // Act
+        let dtype = tensor.dtype();
+
+        // Assert
+        assert_eq!(dtype, DType::I64);
+    }
+
+    #[test]
+    fn test_device() {
+        // Arrange
+        let tensor = Tensor::ones((2,), DType::F32, Device::Cpu);
+
+        // Act
+        let device = tensor.device();
+
+        // Assert
+        assert_eq!(device, Device::Cpu);
+    }
+
+    #[test]
+    fn test_requires_grad() {
+        // Arrange
+        let tensor = Tensor::ones((2,), DType::F32, Device::Cpu);
+
+        // Act
+        let detached = tensor.requires_grad();
+        let attached = tensor.attach().requires_grad();
+
+        // Assert
+        assert!(!detached);
+        assert!(attached);
+    }
+
+    #[test]
+    fn test_attach() {
+        // Arrange
+        let tensor = Tensor::from_vec(vec![1.0f32, 2.0], (2,), Device::Cpu);
+
+        // Act
+        let attached = tensor.attach();
+
+        // Assert
+        assert!(attached.requires_grad());
+        assert_eq!(attached.to_vec::<f32>().unwrap(), vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_attach_backward() {
+        // Arrange
+        let tensor = Tensor::from_vec(vec![1.0f32, 2.0], (2,), Device::Cpu).attach();
+
+        // Act
+        let grads = tensor.sum(vec![0], false).backward().unwrap();
+
+        // Assert
+        assert_eq!(grads.get(tensor.id()).unwrap().to_vec::<f32>().unwrap(), vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_to_vec() {
+        // Arrange
+        let tensor = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu);
+
+        // Act
+        let values = tensor.to_vec::<f32>().unwrap();
+
+        // Assert
+        assert_eq!(values, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_to_device() {
+        // Arrange
+        let tensor = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu);
+
+        // Act
+        let moved = tensor.to_device(Device::Mps).unwrap();
+
+        // Assert
+        assert_eq!(moved.device(), Device::Mps);
+        assert_eq!(moved.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_to_device_backward() {
+        // Arrange
+        let tensor = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Mps).attach();
+
+        // Act
+        let moved = tensor.to_device(Device::Cpu).unwrap().attach();
+        let grads = moved.sum(vec![0], false).backward().unwrap();
+
+        // Assert
+        assert_eq!(grads.get(tensor.id()), None);
+        assert_eq!(grads.get(moved.id()).unwrap().to_vec::<f32>().unwrap(), vec![1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_ones_like() {
+        // Arrange
+        let tensor = Tensor::zeros((2, 2), DType::F32, Device::Cpu);
+
+        // Act
+        let ones = tensor.ones_like();
+
+        // Assert
+        assert_eq!(ones.to_vec::<f32>().unwrap(), vec![1.0; 4]);
+    }
+
+    #[test]
+    fn test_ones_like_backward() {
+        // Arrange
+        let tensor = Tensor::zeros((2, 2), DType::F32, Device::Cpu).attach();
+
+        // Act
+        let grads = tensor.ones_like().attach().sum(vec![0, 1], false).backward().unwrap();
+
+        // Assert
+        assert_eq!(grads.get(tensor.id()), None);
+    }
+
+    #[test]
+    fn test_zeros_like() {
+        // Arrange
+        let tensor = Tensor::ones((2, 2), DType::F32, Device::Cpu);
+
+        // Act
+        let zeros = tensor.zeros_like();
+
+        // Assert
+        assert_eq!(zeros.to_vec::<f32>().unwrap(), vec![0.0; 4]);
+    }
+
+    #[test]
+    fn test_zeros_like_backward() {
+        // Arrange
+        let tensor = Tensor::ones((2, 2), DType::F32, Device::Cpu).attach();
+
+        // Act
+        let grads = tensor.zeros_like().attach().sum(vec![0, 1], false).backward().unwrap();
+
+        // Assert
+        assert_eq!(grads.get(tensor.id()), None);
+    }
+
+    #[test]
+    fn test_is_compact() {
+        // Arrange
+        let compact = Tensor::ones((2, 2), DType::F32, Device::Cpu);
+        let non_compact = compact.permute(vec![1, 0]);
+
+        // Act
+        let compact_flag = compact.is_compact();
+        let non_compact_flag = non_compact.is_compact();
+
+        // Assert
+        assert!(compact_flag);
+        assert!(!non_compact_flag);
     }
 }
