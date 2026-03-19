@@ -165,13 +165,9 @@ impl BackendStorage for CpuStorage {
     fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self> {
         if l.is_compact() {
             return match self {
-                CpuStorage::F16(data) => {
-                    Ok(CpuStorage::F16(
-                        data.iter()
-                            .map(|v| f16::from_f32(v.to_f32().powf(e as f32)))
-                            .collect(),
-                    ))
-                }
+                CpuStorage::F16(data) => Ok(CpuStorage::F16(
+                    data.iter().map(|v| f16::from_f32(v.to_f32().powf(e as f32))).collect(),
+                )),
                 CpuStorage::F32(data) => {
                     let e = e as f32;
                     Ok(CpuStorage::F32(data.iter().map(|v| v.powf(e)).collect()))
@@ -318,9 +314,15 @@ impl BackendStorage for CpuStorage {
         let offset = src_layout.offset;
 
         match (self, dst) {
-            (CpuStorage::F16(src), CpuStorage::F16(dst)) => copy_strided(src, dst, offset, &shape, &strides),
-            (CpuStorage::F32(src), CpuStorage::F32(dst)) => copy_strided(src, dst, offset, &shape, &strides),
-            (CpuStorage::I64(src), CpuStorage::I64(dst)) => copy_strided(src, dst, offset, &shape, &strides),
+            (CpuStorage::F16(src), CpuStorage::F16(dst)) => {
+                copy_strided(src, dst, offset, &shape, &strides)
+            }
+            (CpuStorage::F32(src), CpuStorage::F32(dst)) => {
+                copy_strided(src, dst, offset, &shape, &strides)
+            }
+            (CpuStorage::I64(src), CpuStorage::I64(dst)) => {
+                copy_strided(src, dst, offset, &shape, &strides)
+            }
             _ => unreachable!(),
         }
 
@@ -406,7 +408,12 @@ impl BackendStorage for CpuStorage {
         }
     }
 
-    fn index_select(&self, layout: &Layout, indices: &Self, indices_layout: &Layout) -> Result<Self> {
+    fn index_select(
+        &self,
+        layout: &Layout,
+        indices: &Self,
+        indices_layout: &Layout,
+    ) -> Result<Self> {
         assert!(layout.is_compact());
         assert_eq!(layout.ndim(), 2, "index_select requires 2D input");
         assert!(indices_layout.is_compact());
@@ -562,7 +569,15 @@ fn strided_unary_op_inner<T: Copy, F: Fn(T) -> T>(
     } else {
         let sa = a_strides[0] as usize;
         for i in 0..shape[0] {
-            strided_unary_op_inner(a, a_off + i * sa, &a_strides[1..], out, out_off, &shape[1..], f);
+            strided_unary_op_inner(
+                a,
+                a_off + i * sa,
+                &a_strides[1..],
+                out,
+                out_off,
+                &shape[1..],
+                f,
+            );
         }
     }
 }
@@ -596,7 +611,14 @@ fn copy_strided_inner<T: Copy>(
         let size = shape[0];
         let stride = strides[0];
         for i in 0..size {
-            copy_strided_inner(src, dst, src_offset + i * stride, &shape[1..], &strides[1..], dst_offset);
+            copy_strided_inner(
+                src,
+                dst,
+                src_offset + i * stride,
+                &shape[1..],
+                &strides[1..],
+                dst_offset,
+            );
         }
     }
 }

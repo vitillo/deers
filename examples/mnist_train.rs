@@ -106,7 +106,7 @@ fn evaluate(model: &impl Module, images: &Tensor, labels: &Tensor, batch_size: u
     for batch_idx in 0..num_batches {
         let start = batch_idx * batch_size;
         let batch_images = images.narrow(0, start, batch_size);
-        let batch_labels: Vec<u32> = labels.narrow(0, start, batch_size).to_vec().unwrap();
+        let batch_labels: Vec<i64> = labels.narrow(0, start, batch_size).to_vec().unwrap();
 
         let logits = model.forward(&batch_images).unwrap();
         let logit_vals: Vec<f32> = logits.to_vec().unwrap();

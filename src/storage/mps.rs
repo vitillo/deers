@@ -379,7 +379,6 @@ mod imp {
                     };
                     slice.fill(1);
                 }
-                MpsInner::Accelerated { dtype, .. } => todo!("MPS ones for {dtype:?}"),
                 MpsInner::Cpu(_) => unreachable!(),
             }
             storage
@@ -423,7 +422,6 @@ mod imp {
                         },
                     }
                 }
-                storage => Self { inner: MpsInner::Cpu(storage) },
             }
         }
 
@@ -441,13 +439,11 @@ mod imp {
                 DType::F16 => std::mem::size_of::<f16>(),
                 DType::F32 => std::mem::size_of::<f32>(),
                 DType::I64 => std::mem::size_of::<i64>(),
-                _ => todo!("MPS cat for {dtype:?}"),
             };
             let out_buffer = match dtype {
                 DType::F16 => ctx.empty_f16_buffer(total_len),
                 DType::F32 => ctx.empty_f32_buffer(total_len),
                 DType::I64 => ctx.empty_i64_buffer(total_len),
-                _ => unreachable!(),
             };
             let mut byte_offset = 0usize;
             for (storage, len) in parts {
@@ -490,7 +486,6 @@ mod imp {
                         unsafe { std::slice::from_raw_parts(buffer.contents().cast::<i64>(), len) };
                     CpuStorage::I64(slice.to_vec())
                 }
-                MpsInner::Accelerated { dtype, .. } => todo!("MPS readback for {dtype:?}"),
                 MpsInner::Cpu(storage) => storage,
             }
         }
@@ -1111,7 +1106,12 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
-        fn index_select(&self, layout: &Layout, indices: &Self, indices_layout: &Layout) -> Result<Self> {
+        fn index_select(
+            &self,
+            layout: &Layout,
+            indices: &Self,
+            indices_layout: &Layout,
+        ) -> Result<Self> {
             if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
                 (self.accelerated(DType::F16), indices.accelerated(DType::I64))
             {
@@ -1195,7 +1195,6 @@ mod imp {
                     let data = read_i64(ctx, buffer, *len, layout);
                     D::to_vec(&CpuStorage::I64(data))
                 }
-                MpsInner::Accelerated { dtype, .. } => todo!("MPS to_vec for {dtype:?}"),
                 MpsInner::Cpu(storage) => storage.to_vec(layout),
             }
         }
