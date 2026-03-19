@@ -946,6 +946,69 @@ impl TensorOp for Reshape {
 }
 
 #[derive(Debug)]
+pub struct Narrow {
+    arg: Tensor,
+    dim: usize,
+    start: usize,
+    len: usize,
+}
+
+impl Narrow {
+    pub fn new(arg: Tensor, dim: usize, start: usize, len: usize) -> Self {
+        assert!(dim < arg.layout().ndim(), "narrow dim out of bounds");
+        assert!(start + len <= arg.layout().shape()[dim], "narrow out of bounds");
+        assert!(arg.is_compact(), "narrow requires compact tensors");
+        Self { arg, dim, start, len }
+    }
+}
+
+impl TensorOp for Narrow {
+    fn forward(self) -> Result<Tensor> {
+        let mut shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
+        shape[self.dim] = self.len;
+        let stride = self.arg.layout().strides()[self.dim] as usize;
+        let offset = self.arg.layout().offset + self.start * stride;
+
+        Ok(Tensor::new(
+            self.arg.storage_clone(),
+            Layout::new(shape, self.arg.layout().strides().clone(), offset),
+            self.arg.device(),
+            self.arg.dtype(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let mut parts = Vec::with_capacity(3);
+        let mut pad_shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
+
+        if self.start > 0 {
+            pad_shape[self.dim] = self.start;
+            parts.push(Tensor::zeros(pad_shape.clone(), self.arg.dtype(), self.arg.device()));
+        }
+
+        parts.push(out_grad.clone());
+
+        let arg_dim = self.arg.layout().shape()[self.dim];
+        let right_len = arg_dim - self.start - self.len;
+        if right_len > 0 {
+            pad_shape[self.dim] = right_len;
+            parts.push(Tensor::zeros(pad_shape, self.arg.dtype(), self.arg.device()));
+        }
+
+        let arg_grad = Tensor::cat(&parts, self.dim);
+        let sum_grad = grads.get_or_insert_zero(&self.arg);
+        *sum_grad = &*sum_grad + arg_grad;
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
+#[derive(Debug)]
 pub struct MatMul {
     arg1: Tensor,
     arg2: Tensor,

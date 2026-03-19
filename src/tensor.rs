@@ -257,7 +257,7 @@ impl Tensor {
     pub fn ones_like(&self) -> Tensor {
         Tensor::new(
             Arc::new(RwLock::new(self.device().ones(self.layout.size(), self.dtype()))),
-            self.layout.clone(),
+            Layout::from(self.layout().shape().clone()),
             self.device(),
             self.dtype(),
             false,
@@ -269,7 +269,7 @@ impl Tensor {
     pub fn zeros_like(&self) -> Tensor {
         Tensor::new(
             Arc::new(RwLock::new(self.device().zeros(self.layout.size(), self.dtype()))),
-            self.layout.clone(),
+            Layout::from(self.layout().shape().clone()),
             self.device(),
             self.dtype(),
             false,
@@ -280,25 +280,8 @@ impl Tensor {
     /// Returns a no-copy view over a contiguous range on the given dimension.
     ///
     /// This is intended for dataset-style batching and other simple slicing.
-    /// The returned tensor does not keep gradient history.
     pub fn narrow(&self, dim: usize, start: usize, len: usize) -> Tensor {
-        assert!(dim < self.layout().ndim(), "narrow dim out of bounds");
-        assert!(start + len <= self.layout().shape()[dim], "narrow out of bounds");
-        assert!(self.is_compact(), "narrow requires compact tensors");
-
-        let mut shape: Vec<usize> = self.layout().shape().iter().copied().collect();
-        shape[dim] = len;
-        let stride = self.layout().strides()[dim] as usize;
-        let offset = self.layout().offset + start * stride;
-
-        Tensor::new(
-            self.storage_clone(),
-            Layout::new(shape, self.layout().strides().clone(), offset),
-            self.device(),
-            self.dtype(),
-            false,
-            None,
-        )
+        ops::Narrow::new(self.clone(), dim, start, len).forward().unwrap()
     }
 
     /// Reorders the dimensions of the tensor. Does not copy data.

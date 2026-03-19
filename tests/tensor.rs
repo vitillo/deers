@@ -315,6 +315,19 @@ fn test_mps_sin_cos() {
 }
 
 #[test]
+fn test_narrow_backward() {
+    let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], vec![1, 1, 1, 4], Device::Cpu).attach();
+
+    let y = x.narrow(3, 1, 2);
+    let grads = y.backward().unwrap();
+
+    Vec::<_>::assert_approx_eq(
+        grads.get(x.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![0.0, 1.0, 1.0, 0.0],
+    );
+}
+
+#[test]
 fn test_scalar_add() {
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu);
 
