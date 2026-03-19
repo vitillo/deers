@@ -1,5 +1,7 @@
 use std::borrow::Borrow;
 
+use half::f16;
+
 use crate::{
     device::Device,
     dtype::{DType, WithDType},
@@ -10,12 +12,12 @@ use crate::{
 
 use super::ReduceOp;
 
-/// CPU-backed tensor storage, holding data as a flat `Vec` of f32 or f64.
+/// CPU-backed tensor storage.
 #[derive(Debug, Clone)]
 pub enum CpuStorage {
+    F16(Vec<f16>),
     F32(Vec<f32>),
-    F64(Vec<f64>),
-    U32(Vec<u32>),
+    I64(Vec<i64>),
 }
 
 impl CpuStorage {
@@ -33,9 +35,9 @@ impl CpuStorage {
 
     pub fn len(&self) -> usize {
         match self {
+            CpuStorage::F16(data) => data.len(),
             CpuStorage::F32(data) => data.len(),
-            CpuStorage::F64(data) => data.len(),
-            CpuStorage::U32(data) => data.len(),
+            CpuStorage::I64(data) => data.len(),
         }
     }
 
@@ -44,6 +46,16 @@ impl CpuStorage {
         assert!(!parts.is_empty());
         let total_len: usize = parts.iter().map(|(_, len)| *len).sum();
         match &parts[0].0 {
+            CpuStorage::F16(_) => {
+                let mut data = Vec::with_capacity(total_len);
+                for (storage, _) in parts {
+                    match storage {
+                        CpuStorage::F16(v) => data.extend_from_slice(v),
+                        _ => panic!("dtype mismatch in cat"),
+                    }
+                }
+                CpuStorage::F16(data)
+            }
             CpuStorage::F32(_) => {
                 let mut data = Vec::with_capacity(total_len);
                 for (storage, _) in parts {
@@ -54,47 +66,37 @@ impl CpuStorage {
                 }
                 CpuStorage::F32(data)
             }
-            CpuStorage::F64(_) => {
+            CpuStorage::I64(_) => {
                 let mut data = Vec::with_capacity(total_len);
                 for (storage, _) in parts {
                     match storage {
-                        CpuStorage::F64(v) => data.extend_from_slice(v),
+                        CpuStorage::I64(v) => data.extend_from_slice(v),
                         _ => panic!("dtype mismatch in cat"),
                     }
                 }
-                CpuStorage::F64(data)
-            }
-            CpuStorage::U32(_) => {
-                let mut data = Vec::with_capacity(total_len);
-                for (storage, _) in parts {
-                    match storage {
-                        CpuStorage::U32(v) => data.extend_from_slice(v),
-                        _ => panic!("dtype mismatch in cat"),
-                    }
-                }
-                CpuStorage::U32(data)
+                CpuStorage::I64(data)
             }
         }
     }
 
-    fn gemm_f32(left: &[f32], right: &[f32], out: &mut [f32], m: usize, n: usize, p: usize) {
+    fn gemm_f16(left: &[f16], right: &[f16], out: &mut [f16], m: usize, n: usize, p: usize) {
         unsafe {
             gemm::gemm(
                 m,
                 p,
                 n,
                 out.as_mut_ptr(),
-                1,          // dst_cs
-                p as isize, // dst_rs
-                false,      // read_dst
+                1,
+                p as isize,
+                false,
                 left.as_ptr(),
-                1,          // lhs_cs
-                n as isize, // lhs_rs
+                1,
+                n as isize,
                 right.as_ptr(),
-                1,          // rhs_cs
-                p as isize, // rhs_rs
-                0.0,        // alpha (dst = alpha*dst + beta*lhs*rhs)
-                1.0,        // beta
+                1,
+                p as isize,
+                f16::from_f32(0.0),
+                f16::from_f32(1.0),
                 false,
                 false,
                 false,
@@ -103,7 +105,7 @@ impl CpuStorage {
         }
     }
 
-    fn gemm_f64(left: &[f64], right: &[f64], out: &mut [f64], m: usize, n: usize, p: usize) {
+    fn gemm_f32(left: &[f32], right: &[f32], out: &mut [f32], m: usize, n: usize, p: usize) {
         unsafe {
             gemm::gemm(
                 m,
@@ -128,6 +130,23 @@ impl CpuStorage {
             );
         }
     }
+
+    fn compact_indices(indices: &CpuStorage, layout: &Layout) -> Vec<usize> {
+        match indices {
+            CpuStorage::I64(_) => indices
+                .to_vec::<i64>(layout)
+                .into_iter()
+                .map(|v| usize::try_from(v).expect("indices must be non-negative"))
+                .collect(),
+            _ => panic!("index tensor must be i64"),
+        }
+    }
+}
+
+impl From<Vec<f16>> for CpuStorage {
+    fn from(v: Vec<f16>) -> Self {
+        Self::F16(v)
+    }
 }
 
 impl From<Vec<f32>> for CpuStorage {
@@ -136,15 +155,9 @@ impl From<Vec<f32>> for CpuStorage {
     }
 }
 
-impl From<Vec<f64>> for CpuStorage {
-    fn from(v: Vec<f64>) -> Self {
-        Self::F64(v)
-    }
-}
-
-impl From<Vec<u32>> for CpuStorage {
-    fn from(v: Vec<u32>) -> Self {
-        Self::U32(v)
+impl From<Vec<i64>> for CpuStorage {
+    fn from(v: Vec<i64>) -> Self {
+        Self::I64(v)
     }
 }
 
@@ -152,60 +165,68 @@ impl BackendStorage for CpuStorage {
     fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self> {
         if l.is_compact() {
             return match self {
+                CpuStorage::F16(data) => {
+                    Ok(CpuStorage::F16(
+                        data.iter()
+                            .map(|v| f16::from_f32(v.to_f32().powf(e as f32)))
+                            .collect(),
+                    ))
+                }
                 CpuStorage::F32(data) => {
                     let e = e as f32;
                     Ok(CpuStorage::F32(data.iter().map(|v| v.powf(e)).collect()))
                 }
-                CpuStorage::F64(data) => {
-                    Ok(CpuStorage::F64(data.iter().map(|v| v.powf(e)).collect()))
-                }
-                CpuStorage::U32(_) => todo!(),
+                CpuStorage::I64(_) => todo!(),
             };
         }
+
         let shape: Vec<usize> = l.shape().iter().copied().collect();
         let strides: Vec<isize> = l.strides().iter().copied().collect();
         match self {
+            CpuStorage::F16(data) => {
+                let mut out = vec![f16::from_f32(0.0); l.size()];
+                strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| {
+                    f16::from_f32(v.to_f32().powf(e as f32))
+                });
+                Ok(CpuStorage::F16(out))
+            }
             CpuStorage::F32(data) => {
                 let e = e as f32;
                 let mut out = vec![0.0f32; l.size()];
                 strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| v.powf(e));
                 Ok(CpuStorage::F32(out))
             }
-            CpuStorage::F64(data) => {
-                let mut out = vec![0.0f64; l.size()];
-                strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| v.powf(e));
-                Ok(CpuStorage::F64(out))
-            }
-            CpuStorage::U32(_) => todo!(),
+            CpuStorage::I64(_) => todo!(),
         }
     }
 
     fn unary_op<O: UnaryOp>(&self, op: O, l: &Layout) -> Result<Self> {
         if l.is_compact() {
             return match self {
+                CpuStorage::F16(data) => {
+                    Ok(CpuStorage::F16(data.iter().map(|v| op.f16(*v)).collect()))
+                }
                 CpuStorage::F32(data) => {
                     Ok(CpuStorage::F32(data.iter().map(|v| op.f32(*v)).collect()))
                 }
-                CpuStorage::F64(data) => {
-                    Ok(CpuStorage::F64(data.iter().map(|v| op.f64(*v)).collect()))
-                }
-                CpuStorage::U32(_) => todo!(),
+                CpuStorage::I64(_) => todo!(),
             };
         }
+
         let shape: Vec<usize> = l.shape().iter().copied().collect();
         let strides: Vec<isize> = l.strides().iter().copied().collect();
         match self {
+            CpuStorage::F16(data) => {
+                let mut out = vec![f16::from_f32(0.0); l.size()];
+                strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| op.f16(v));
+                Ok(CpuStorage::F16(out))
+            }
             CpuStorage::F32(data) => {
                 let mut out = vec![0.0f32; l.size()];
                 strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| op.f32(v));
                 Ok(CpuStorage::F32(out))
             }
-            CpuStorage::F64(data) => {
-                let mut out = vec![0.0f64; l.size()];
-                strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| op.f64(v));
-                Ok(CpuStorage::F64(out))
-            }
-            CpuStorage::U32(_) => todo!(),
+            CpuStorage::I64(_) => todo!(),
         }
     }
 
@@ -217,19 +238,31 @@ impl BackendStorage for CpuStorage {
     ) -> Result<Self> {
         if layout.is_compact() && other_layout.is_compact() {
             return match (self, other) {
+                (CpuStorage::F16(a), CpuStorage::F16(b)) => Ok(CpuStorage::F16(
+                    a.iter().zip(b.iter()).map(|(a, b)| O::f16(*a, *b)).collect(),
+                )),
                 (CpuStorage::F32(a), CpuStorage::F32(b)) => Ok(CpuStorage::F32(
                     a.iter().zip(b.iter()).map(|(a, b)| O::f32(*a, *b)).collect(),
-                )),
-                (CpuStorage::F64(a), CpuStorage::F64(b)) => Ok(CpuStorage::F64(
-                    a.iter().zip(b.iter()).map(|(a, b)| O::f64(*a, *b)).collect(),
                 )),
                 _ => unreachable!(),
             };
         }
+
         let shape: Vec<usize> = layout.shape().iter().copied().collect();
         let a_strides: Vec<isize> = layout.strides().iter().copied().collect();
         let b_strides: Vec<isize> = other_layout.strides().iter().copied().collect();
         match (self, other) {
+            (CpuStorage::F16(a), CpuStorage::F16(b)) => {
+                let mut out = vec![f16::from_f32(0.0); layout.size()];
+                strided_binary_op(
+                    StridedSlice { data: a, offset: layout.offset, strides: &a_strides },
+                    StridedSlice { data: b, offset: other_layout.offset, strides: &b_strides },
+                    &mut out,
+                    &shape,
+                    O::f16,
+                );
+                Ok(CpuStorage::F16(out))
+            }
             (CpuStorage::F32(a), CpuStorage::F32(b)) => {
                 let mut out = vec![0.0f32; layout.size()];
                 strided_binary_op(
@@ -241,21 +274,7 @@ impl BackendStorage for CpuStorage {
                 );
                 Ok(CpuStorage::F32(out))
             }
-            (CpuStorage::F64(a), CpuStorage::F64(b)) => {
-                let mut out = vec![0.0f64; layout.size()];
-                strided_binary_op(
-                    StridedSlice { data: a, offset: layout.offset, strides: &a_strides },
-                    StridedSlice { data: b, offset: other_layout.offset, strides: &b_strides },
-                    &mut out,
-                    &shape,
-                    O::f64,
-                );
-                Ok(CpuStorage::F64(out))
-            }
-            (CpuStorage::F32(_), CpuStorage::F64(_)) => unreachable!(),
-            (CpuStorage::F64(_), CpuStorage::F32(_)) => unreachable!(),
-            (CpuStorage::U32(_), _) => todo!(),
-            (_, CpuStorage::U32(_)) => todo!(),
+            _ => unreachable!(),
         }
     }
 
@@ -264,32 +283,28 @@ impl BackendStorage for CpuStorage {
         assert_eq!(0, layout.size() % dst.len());
 
         let reduce_size = layout.size() / dst.len();
-
         match (self, dst) {
+            (CpuStorage::F16(src), CpuStorage::F16(dst)) => {
+                for (i, chunk) in src.chunks(reduce_size).enumerate() {
+                    dst[i] = chunk.iter().copied().reduce(O::f16).unwrap();
+                }
+            }
             (CpuStorage::F32(src), CpuStorage::F32(dst)) => {
                 for (i, chunk) in src.chunks(reduce_size).enumerate() {
                     dst[i] = chunk.iter().copied().reduce(O::f32).unwrap();
                 }
             }
-            (CpuStorage::F64(src), CpuStorage::F64(dst)) => {
-                for (i, chunk) in src.chunks(reduce_size).enumerate() {
-                    dst[i] = chunk.iter().copied().reduce(O::f64).unwrap();
-                }
-            }
-            (CpuStorage::F32(_), CpuStorage::F64(_)) => unreachable!(),
-            (CpuStorage::F64(_), CpuStorage::F32(_)) => unreachable!(),
-            (CpuStorage::U32(_), _) => todo!(),
-            (_, CpuStorage::U32(_)) => todo!(),
-        };
+            _ => unreachable!(),
+        }
 
         Ok(())
     }
 
     fn dtype(&self) -> DType {
         match self {
+            CpuStorage::F16(_) => DType::F16,
             CpuStorage::F32(_) => DType::F32,
-            CpuStorage::F64(_) => DType::F64,
-            CpuStorage::U32(_) => DType::U32,
+            CpuStorage::I64(_) => DType::I64,
         }
     }
 
@@ -298,23 +313,14 @@ impl BackendStorage for CpuStorage {
     }
 
     fn copy_compact(&self, src_layout: &Layout, dst: &mut CpuStorage) -> Result<()> {
-        // Tensor::compact() already no-ops for contiguous tensors, so this
-        // only runs on non-contiguous layouts (transposes, broadcasts, etc).
-        // Direct index computation avoids the overhead of the strided iterator.
         let strides: Vec<usize> = src_layout.strides.0.iter().map(|&s| s as usize).collect();
         let shape: Vec<usize> = (0..src_layout.ndim()).map(|i| src_layout.shape[i]).collect();
         let offset = src_layout.offset;
 
         match (self, dst) {
-            (CpuStorage::F32(src), CpuStorage::F32(dst)) => {
-                copy_strided(src, dst, offset, &shape, &strides);
-            }
-            (CpuStorage::F64(src), CpuStorage::F64(dst)) => {
-                copy_strided(src, dst, offset, &shape, &strides);
-            }
-            (CpuStorage::U32(src), CpuStorage::U32(dst)) => {
-                copy_strided(src, dst, offset, &shape, &strides);
-            }
+            (CpuStorage::F16(src), CpuStorage::F16(dst)) => copy_strided(src, dst, offset, &shape, &strides),
+            (CpuStorage::F32(src), CpuStorage::F32(dst)) => copy_strided(src, dst, offset, &shape, &strides),
+            (CpuStorage::I64(src), CpuStorage::I64(dst)) => copy_strided(src, dst, offset, &shape, &strides),
             _ => unreachable!(),
         }
 
@@ -330,40 +336,28 @@ impl BackendStorage for CpuStorage {
     ) -> Result<Self> {
         assert!(layout.is_compact());
         assert_eq!(dim, 1, "gather only supports dim=1 for 2D tensors");
+        assert!(indices_layout.is_compact());
+
         let rows = layout.shape[0];
         let cols = layout.shape[1];
-        assert!(indices_layout.is_compact());
         assert_eq!(indices_layout.ndim(), 1, "gather indices must be 1D");
         assert_eq!(indices_layout.shape()[0], rows);
 
-        let indices: Vec<usize> = match indices {
-            CpuStorage::U32(_) => {
-                indices.to_vec::<u32>(indices_layout).into_iter().map(|v| v as usize).collect()
-            }
-            _ => todo!(),
-        };
-        assert_eq!(indices.len(), rows);
-
+        let indices = Self::compact_indices(indices, indices_layout);
         for idx in &indices {
             assert!(*idx < cols, "gather index out of bounds");
         }
 
         match self {
-            CpuStorage::F32(data) => {
-                let out: Vec<f32> =
-                    indices.iter().enumerate().map(|(i, &idx)| data[i * cols + idx]).collect();
-                Ok(CpuStorage::F32(out))
-            }
-            CpuStorage::F64(data) => {
-                let out: Vec<f64> =
-                    indices.iter().enumerate().map(|(i, &idx)| data[i * cols + idx]).collect();
-                Ok(CpuStorage::F64(out))
-            }
-            CpuStorage::U32(data) => {
-                let out: Vec<u32> =
-                    indices.iter().enumerate().map(|(i, &idx)| data[i * cols + idx]).collect();
-                Ok(CpuStorage::U32(out))
-            }
+            CpuStorage::F16(data) => Ok(CpuStorage::F16(
+                indices.iter().enumerate().map(|(i, &idx)| data[i * cols + idx]).collect(),
+            )),
+            CpuStorage::F32(data) => Ok(CpuStorage::F32(
+                indices.iter().enumerate().map(|(i, &idx)| data[i * cols + idx]).collect(),
+            )),
+            CpuStorage::I64(data) => Ok(CpuStorage::I64(
+                indices.iter().enumerate().map(|(i, &idx)| data[i * cols + idx]).collect(),
+            )),
         }
     }
 
@@ -379,20 +373,22 @@ impl BackendStorage for CpuStorage {
         assert_eq!(dim, 1, "scatter_add only supports dim=1 for 2D tensors");
         assert!(indices_layout.is_compact());
         assert_eq!(indices_layout.ndim(), 1, "scatter indices must be 1D");
+
         let rows = full_shape[0];
         let cols = full_shape[1];
-        let indices: Vec<usize> = match indices {
-            CpuStorage::U32(_) => {
-                indices.to_vec::<u32>(indices_layout).into_iter().map(|v| v as usize).collect()
-            }
-            _ => todo!(),
-        };
-
+        let indices = Self::compact_indices(indices, indices_layout);
         for idx in &indices {
             assert!(*idx < cols, "scatter index out of bounds");
         }
 
         match self {
+            CpuStorage::F16(data) => {
+                let mut out = vec![f16::from_f32(0.0); rows * cols];
+                for (i, &idx) in indices.iter().enumerate() {
+                    out[i * cols + idx] += data[i];
+                }
+                Ok(CpuStorage::F16(out))
+            }
             CpuStorage::F32(data) => {
                 let mut out = vec![0.0f32; rows * cols];
                 for (i, &idx) in indices.iter().enumerate() {
@@ -400,39 +396,36 @@ impl BackendStorage for CpuStorage {
                 }
                 Ok(CpuStorage::F32(out))
             }
-            CpuStorage::F64(data) => {
-                let mut out = vec![0.0f64; rows * cols];
+            CpuStorage::I64(data) => {
+                let mut out = vec![0i64; rows * cols];
                 for (i, &idx) in indices.iter().enumerate() {
                     out[i * cols + idx] += data[i];
                 }
-                Ok(CpuStorage::F64(out))
-            }
-            CpuStorage::U32(data) => {
-                let mut out = vec![0u32; rows * cols];
-                for (i, &idx) in indices.iter().enumerate() {
-                    out[i * cols + idx] += data[i];
-                }
-                Ok(CpuStorage::U32(out))
+                Ok(CpuStorage::I64(out))
             }
         }
     }
 
     fn index_select(&self, layout: &Layout, indices: &Self, indices_layout: &Layout) -> Result<Self> {
         assert!(layout.is_compact());
-        assert!(layout.ndim() == 2, "index_select requires 2D input");
+        assert_eq!(layout.ndim(), 2, "index_select requires 2D input");
         assert!(indices_layout.is_compact());
-        let cols = layout.shape[1];
-        let indices: Vec<usize> = match indices {
-            CpuStorage::U32(_) => {
-                indices.to_vec::<u32>(indices_layout).into_iter().map(|v| v as usize).collect()
-            }
-            _ => todo!("index_select only supports U32 indices"),
-        };
+
         let rows = layout.shape[0];
+        let cols = layout.shape[1];
+        let indices = Self::compact_indices(indices, indices_layout);
         for idx in &indices {
             assert!(*idx < rows, "index_select index {} out of bounds ({})", idx, rows);
         }
+
         match self {
+            CpuStorage::F16(data) => {
+                let mut out = Vec::with_capacity(indices.len() * cols);
+                for &idx in &indices {
+                    out.extend_from_slice(&data[idx * cols..(idx + 1) * cols]);
+                }
+                Ok(CpuStorage::F16(out))
+            }
             CpuStorage::F32(data) => {
                 let mut out = Vec::with_capacity(indices.len() * cols);
                 for &idx in &indices {
@@ -440,14 +433,13 @@ impl BackendStorage for CpuStorage {
                 }
                 Ok(CpuStorage::F32(out))
             }
-            CpuStorage::F64(data) => {
+            CpuStorage::I64(data) => {
                 let mut out = Vec::with_capacity(indices.len() * cols);
                 for &idx in &indices {
                     out.extend_from_slice(&data[idx * cols..(idx + 1) * cols]);
                 }
-                Ok(CpuStorage::F64(out))
+                Ok(CpuStorage::I64(out))
             }
-            CpuStorage::U32(_) => todo!("index_select for U32 data"),
         }
     }
 
@@ -463,6 +455,20 @@ impl BackendStorage for CpuStorage {
         let c_skip = m * n;
 
         match (self, other) {
+            (CpuStorage::F16(left), CpuStorage::F16(right)) => {
+                let mut out = vec![f16::from_f32(0.0); batch * m * n];
+                for i in 0..batch {
+                    CpuStorage::gemm_f16(
+                        &left[i * a_skip..],
+                        &right[i * b_skip..],
+                        &mut out[i * c_skip..],
+                        m,
+                        k,
+                        n,
+                    );
+                }
+                Ok(CpuStorage::F16(out))
+            }
             (CpuStorage::F32(left), CpuStorage::F32(right)) => {
                 let mut out = vec![0.0f32; batch * m * n];
                 for i in 0..batch {
@@ -477,24 +483,7 @@ impl BackendStorage for CpuStorage {
                 }
                 Ok(CpuStorage::F32(out))
             }
-            (CpuStorage::F64(left), CpuStorage::F64(right)) => {
-                let mut out = vec![0.0f64; batch * m * n];
-                for i in 0..batch {
-                    CpuStorage::gemm_f64(
-                        &left[i * a_skip..],
-                        &right[i * b_skip..],
-                        &mut out[i * c_skip..],
-                        m,
-                        k,
-                        n,
-                    );
-                }
-                Ok(CpuStorage::F64(out))
-            }
-            (CpuStorage::F32(_), CpuStorage::F64(_)) => unreachable!(),
-            (CpuStorage::F64(_), CpuStorage::F32(_)) => unreachable!(),
-            (CpuStorage::U32(_), _) => todo!(),
-            (_, CpuStorage::U32(_)) => todo!(),
+            _ => todo!("matmul only supports floating tensors"),
         }
     }
 }
@@ -505,7 +494,6 @@ struct StridedSlice<'a, T> {
     strides: &'a [isize],
 }
 
-/// Applies a binary function to two strided arrays, writing to a compact output.
 fn strided_binary_op<T: Copy, F: Fn(T, T) -> T>(
     a: StridedSlice<'_, T>,
     b: StridedSlice<'_, T>,
@@ -545,7 +533,6 @@ fn strided_binary_op_inner<T: Copy, F: Fn(T, T) -> T>(
     }
 }
 
-/// Applies a unary function to a strided array, writing to a compact output.
 fn strided_unary_op<T: Copy, F: Fn(T) -> T>(
     a: &[T],
     a_off: usize,
@@ -575,20 +562,11 @@ fn strided_unary_op_inner<T: Copy, F: Fn(T) -> T>(
     } else {
         let sa = a_strides[0] as usize;
         for i in 0..shape[0] {
-            strided_unary_op_inner(
-                a,
-                a_off + i * sa,
-                &a_strides[1..],
-                out,
-                out_off,
-                &shape[1..],
-                f,
-            );
+            strided_unary_op_inner(a, a_off + i * sa, &a_strides[1..], out, out_off, &shape[1..], f);
         }
     }
 }
 
-/// Copies a strided src into a contiguous dst using direct index computation.
 fn copy_strided<T: Copy>(
     src: &[T],
     dst: &mut [T],
@@ -596,7 +574,6 @@ fn copy_strided<T: Copy>(
     shape: &[usize],
     strides: &[usize],
 ) {
-    // Recurse over dimensions, accumulating the source offset.
     copy_strided_inner(src, dst, offset, shape, strides, &mut 0);
 }
 
@@ -619,14 +596,7 @@ fn copy_strided_inner<T: Copy>(
         let size = shape[0];
         let stride = strides[0];
         for i in 0..size {
-            copy_strided_inner(
-                src,
-                dst,
-                src_offset + i * stride,
-                &shape[1..],
-                &strides[1..],
-                dst_offset,
-            );
+            copy_strided_inner(src, dst, src_offset + i * stride, &shape[1..], &strides[1..], dst_offset);
         }
     }
 }
@@ -660,8 +630,7 @@ impl<'a, D: WithDType> Iter<'a, D> {
     fn get_item(&self) -> &'a D {
         let mut offset = self.layout.offset as isize;
         for (idx, stride) in self.cursor.iter().zip(&self.layout.strides) {
-            let idx = *idx as isize;
-            offset += idx * stride;
+            offset += *idx as isize * stride;
         }
         assert!(offset >= 0);
         &self.array[offset as usize]
@@ -697,7 +666,6 @@ mod tests {
         let layout = Layout::new(shape, strides, 0);
 
         let array: Vec<f32> = storage.iter(&layout).copied().collect();
-
         let expected = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         assert_eq!(expected, array);
     }

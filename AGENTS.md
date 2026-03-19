@@ -69,11 +69,14 @@ Run `cargo fmt-check` and `cargo lint` after code changes before marking work do
 
 ## Design principles
 
-- **Minimal code**: fewer lines > more features. Don't add abstractions until needed.
+- **Minimal code**: fewer lines > more features. No abstractions until needed.
+- **Compose when possible**: implement things like sigmoid, softmax, and mean from existing primitives instead of adding custom kernels. Only add storage-level ops when composition would create real performance problems, such as `cat` on MPS needing memcpy to avoid a GPU→CPU→GPU roundtrip.
+- **Follow PyTorch/candle conventions**: before implementing a new feature (op, loss, module, etc.), always check how PyTorch and candle structure it. Use their design decisions to guide ours — where to put the API, whether to use a custom op or compose from primitives, naming, etc.
+- **Work backwards from nanochat**: only implement what the target model actually uses.
+- **Incremental milestones**: implement one piece at a time, review it, then move on.
 - **Readable**: a newcomer should be able to follow the code. Prefer explicit over clever.
 - **Easy to extend**: adding a new op = implement TensorOp trait with forward/backward.
 - **Correctness first**: every op should have gradient tests.
-- **Follow PyTorch/candle conventions**: before implementing a new feature (op, loss, module, etc.), always check how PyTorch and candle structure it. Use their design decisions to guide ours — where to put the API, whether to use a custom op or compose from primitives, naming, etc.
 
 ## Commit messages
 

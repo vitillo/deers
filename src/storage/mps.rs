@@ -1,5 +1,7 @@
 use std::borrow::Borrow;
 
+use half::f16;
+
 use crate::{
     dtype::{DType, WithDType},
     error::Result,
@@ -84,29 +86,52 @@ mod imp {
     const KERNELS: &str = include_str!("kernels.metal");
 
     const ALL_KERNELS: &[&str] = &[
+        "neg_f16",
         "neg_f32",
+        "exp_f16",
         "exp_f32",
+        "log_f16",
         "log_f32",
+        "tanh_f16",
         "tanh_f32",
+        "relu_f16",
         "relu_f32",
+        "relu_backward_f16",
         "relu_backward_f32",
+        "scalar_add_f16",
         "scalar_add_f32",
+        "scalar_mul_f16",
         "scalar_mul_f32",
+        "scalar_div_f16",
         "scalar_div_f32",
+        "scalar_powf_f16",
         "scalar_powf_f32",
+        "copy_compact_f16",
         "copy_compact_f32",
-        "copy_compact_u32",
+        "copy_compact_i64",
+        "add_f16",
         "add_f32",
+        "sub_f16",
         "sub_f32",
+        "mul_f16",
         "mul_f32",
+        "div_f16",
         "div_f32",
+        "pow_f16",
         "pow_f32",
+        "eq_f16",
         "eq_f32",
+        "reduce_sum_f16",
         "reduce_sum_f32",
+        "reduce_max_f16",
         "reduce_max_f32",
+        "matmul_f16",
         "matmul_f32",
+        "gather_f16",
         "gather_f32",
+        "scatter_f16",
         "scatter_f32",
+        "index_select_f16",
         "index_select_f32",
     ];
 
@@ -168,7 +193,16 @@ mod imp {
             )
         }
 
-        fn buffer_from_u32(&self, data: &[u32]) -> Buffer {
+        fn buffer_from_f16(&self, data: &[f16]) -> Buffer {
+            let byte_len = std::mem::size_of_val(data) as u64;
+            self.device.new_buffer_with_data(
+                data.as_ptr().cast::<c_void>(),
+                byte_len,
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
+
+        fn buffer_from_i64(&self, data: &[i64]) -> Buffer {
             let byte_len = std::mem::size_of_val(data) as u64;
             self.device.new_buffer_with_data(
                 data.as_ptr().cast::<c_void>(),
@@ -184,9 +218,16 @@ mod imp {
             )
         }
 
-        fn empty_u32_buffer(&self, len: usize) -> Buffer {
+        fn empty_f16_buffer(&self, len: usize) -> Buffer {
             self.device.new_buffer(
-                (len * std::mem::size_of::<u32>()) as u64,
+                (len * std::mem::size_of::<f16>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
+
+        fn empty_i64_buffer(&self, len: usize) -> Buffer {
+            self.device.new_buffer(
+                (len * std::mem::size_of::<i64>()) as u64,
                 MTLResourceOptions::StorageModeShared,
             )
         }
@@ -291,10 +332,9 @@ mod imp {
         pub fn empty(len: usize, dtype: DType) -> Self {
             let ctx = MpsContext::shared();
             let buffer = match dtype {
+                DType::F16 => ctx.empty_f16_buffer(len),
                 DType::F32 => ctx.empty_f32_buffer(len),
-                DType::U32 => ctx.empty_u32_buffer(len),
-                DType::F64 => todo!(),
-                DType::F16 => todo!(),
+                DType::I64 => ctx.empty_i64_buffer(len),
             };
             Self { inner: MpsInner::Accelerated { ctx, buffer, len, dtype } }
         }
@@ -304,10 +344,9 @@ mod imp {
             let (buffer, byte_len) = match &storage.inner {
                 MpsInner::Accelerated { buffer, len, dtype, .. } => {
                     let elem_size = match dtype {
+                        DType::F16 => std::mem::size_of::<f16>(),
                         DType::F32 => std::mem::size_of::<f32>(),
-                        DType::U32 => std::mem::size_of::<u32>(),
-                        DType::F64 => todo!(),
-                        DType::F16 => todo!(),
+                        DType::I64 => std::mem::size_of::<i64>(),
                     };
                     (buffer, len * elem_size)
                 }
@@ -322,15 +361,21 @@ mod imp {
         pub fn ones(len: usize, dtype: DType) -> Self {
             let storage = Self::empty(len, dtype);
             match &storage.inner {
+                MpsInner::Accelerated { buffer, len, dtype: DType::F16, .. } => {
+                    let slice = unsafe {
+                        std::slice::from_raw_parts_mut(buffer.contents().cast::<f16>(), *len)
+                    };
+                    slice.fill(f16::from_f32(1.0));
+                }
                 MpsInner::Accelerated { buffer, len, dtype: DType::F32, .. } => {
                     let slice = unsafe {
                         std::slice::from_raw_parts_mut(buffer.contents().cast::<f32>(), *len)
                     };
                     slice.fill(1.0);
                 }
-                MpsInner::Accelerated { buffer, len, dtype: DType::U32, .. } => {
+                MpsInner::Accelerated { buffer, len, dtype: DType::I64, .. } => {
                     let slice = unsafe {
-                        std::slice::from_raw_parts_mut(buffer.contents().cast::<u32>(), *len)
+                        std::slice::from_raw_parts_mut(buffer.contents().cast::<i64>(), *len)
                     };
                     slice.fill(1);
                 }
@@ -342,6 +387,18 @@ mod imp {
 
         pub fn from_cpu_storage(inner: CpuStorage) -> Self {
             match inner {
+                CpuStorage::F16(data) => {
+                    let ctx = MpsContext::shared();
+                    let buffer = ctx.buffer_from_f16(&data);
+                    Self {
+                        inner: MpsInner::Accelerated {
+                            ctx,
+                            buffer,
+                            len: data.len(),
+                            dtype: DType::F16,
+                        },
+                    }
+                }
                 CpuStorage::F32(data) => {
                     let ctx = MpsContext::shared();
                     let buffer = ctx.buffer_from_f32(&data);
@@ -354,15 +411,15 @@ mod imp {
                         },
                     }
                 }
-                CpuStorage::U32(data) => {
+                CpuStorage::I64(data) => {
                     let ctx = MpsContext::shared();
-                    let buffer = ctx.buffer_from_u32(&data);
+                    let buffer = ctx.buffer_from_i64(&data);
                     Self {
                         inner: MpsInner::Accelerated {
                             ctx,
                             buffer,
                             len: data.len(),
-                            dtype: DType::U32,
+                            dtype: DType::I64,
                         },
                     }
                 }
@@ -381,13 +438,15 @@ mod imp {
             let ctx = MpsContext::shared();
             ctx.synchronize();
             let elem_size = match dtype {
+                DType::F16 => std::mem::size_of::<f16>(),
                 DType::F32 => std::mem::size_of::<f32>(),
-                DType::U32 => std::mem::size_of::<u32>(),
+                DType::I64 => std::mem::size_of::<i64>(),
                 _ => todo!("MPS cat for {dtype:?}"),
             };
             let out_buffer = match dtype {
+                DType::F16 => ctx.empty_f16_buffer(total_len),
                 DType::F32 => ctx.empty_f32_buffer(total_len),
-                DType::U32 => ctx.empty_u32_buffer(total_len),
+                DType::I64 => ctx.empty_i64_buffer(total_len),
                 _ => unreachable!(),
             };
             let mut byte_offset = 0usize;
@@ -413,17 +472,23 @@ mod imp {
 
         pub fn into_cpu(self) -> CpuStorage {
             match self.inner {
+                MpsInner::Accelerated { ctx, buffer, len, dtype: DType::F16 } => {
+                    ctx.synchronize();
+                    let slice =
+                        unsafe { std::slice::from_raw_parts(buffer.contents().cast::<f16>(), len) };
+                    CpuStorage::F16(slice.to_vec())
+                }
                 MpsInner::Accelerated { ctx, buffer, len, dtype: DType::F32 } => {
                     ctx.synchronize();
                     let slice =
                         unsafe { std::slice::from_raw_parts(buffer.contents().cast::<f32>(), len) };
                     CpuStorage::F32(slice.to_vec())
                 }
-                MpsInner::Accelerated { ctx, buffer, len, dtype: DType::U32 } => {
+                MpsInner::Accelerated { ctx, buffer, len, dtype: DType::I64 } => {
                     ctx.synchronize();
                     let slice =
-                        unsafe { std::slice::from_raw_parts(buffer.contents().cast::<u32>(), len) };
-                    CpuStorage::U32(slice.to_vec())
+                        unsafe { std::slice::from_raw_parts(buffer.contents().cast::<i64>(), len) };
+                    CpuStorage::I64(slice.to_vec())
                 }
                 MpsInner::Accelerated { dtype, .. } => todo!("MPS readback for {dtype:?}"),
                 MpsInner::Cpu(storage) => storage,
@@ -454,35 +519,50 @@ mod imp {
             }
         }
 
-        fn unary_kernel_name<O: UnaryOp>() -> Option<&'static str> {
-            match O::KERNEL {
-                "Neg" => Some("neg_f32"),
-                "exp" => Some("exp_f32"),
-                "log" => Some("log_f32"),
-                "tanh" => Some("tanh_f32"),
-                "relu" => Some("relu_f32"),
-                "relu_backward" => Some("relu_backward_f32"),
+        fn unary_kernel_name<O: UnaryOp>(dtype: DType) -> Option<&'static str> {
+            match (O::KERNEL, dtype) {
+                ("Neg", DType::F16) => Some("neg_f16"),
+                ("Neg", DType::F32) => Some("neg_f32"),
+                ("exp", DType::F16) => Some("exp_f16"),
+                ("exp", DType::F32) => Some("exp_f32"),
+                ("log", DType::F16) => Some("log_f16"),
+                ("log", DType::F32) => Some("log_f32"),
+                ("tanh", DType::F16) => Some("tanh_f16"),
+                ("tanh", DType::F32) => Some("tanh_f32"),
+                ("relu", DType::F16) => Some("relu_f16"),
+                ("relu", DType::F32) => Some("relu_f32"),
+                ("relu_backward", DType::F16) => Some("relu_backward_f16"),
+                ("relu_backward", DType::F32) => Some("relu_backward_f32"),
                 _ => None,
             }
         }
 
-        fn scalar_kernel_name<O: UnaryOp>() -> Option<&'static str> {
-            match O::KERNEL {
-                "scalar_add" => Some("scalar_add_f32"),
-                "scalar_mul" => Some("scalar_mul_f32"),
-                "scalar_div" => Some("scalar_div_f32"),
+        fn scalar_kernel_name<O: UnaryOp>(dtype: DType) -> Option<&'static str> {
+            match (O::KERNEL, dtype) {
+                ("scalar_add", DType::F16) => Some("scalar_add_f16"),
+                ("scalar_add", DType::F32) => Some("scalar_add_f32"),
+                ("scalar_mul", DType::F16) => Some("scalar_mul_f16"),
+                ("scalar_mul", DType::F32) => Some("scalar_mul_f32"),
+                ("scalar_div", DType::F16) => Some("scalar_div_f16"),
+                ("scalar_div", DType::F32) => Some("scalar_div_f32"),
                 _ => None,
             }
         }
 
-        fn binary_kernel_name<O: BinaryOp>() -> Option<&'static str> {
-            match O::KERNEL {
-                "add" => Some("add_f32"),
-                "sub" => Some("sub_f32"),
-                "mul" => Some("mul_f32"),
-                "div" => Some("div_f32"),
-                "powf" => Some("pow_f32"),
-                "eq" => Some("eq_f32"),
+        fn binary_kernel_name<O: BinaryOp>(dtype: DType) -> Option<&'static str> {
+            match (O::KERNEL, dtype) {
+                ("add", DType::F16) => Some("add_f16"),
+                ("add", DType::F32) => Some("add_f32"),
+                ("sub", DType::F16) => Some("sub_f16"),
+                ("sub", DType::F32) => Some("sub_f32"),
+                ("mul", DType::F16) => Some("mul_f16"),
+                ("mul", DType::F32) => Some("mul_f32"),
+                ("div", DType::F16) => Some("div_f16"),
+                ("div", DType::F32) => Some("div_f32"),
+                ("powf", DType::F16) => Some("pow_f16"),
+                ("powf", DType::F32) => Some("pow_f32"),
+                ("eq", DType::F16) => Some("eq_f16"),
+                ("eq", DType::F32) => Some("eq_f32"),
                 _ => None,
             }
         }
@@ -500,20 +580,50 @@ mod imp {
         }
     }
 
+    impl From<Vec<f16>> for MpsStorage {
+        fn from(value: Vec<f16>) -> Self {
+            Self::from_cpu_storage(CpuStorage::from(value))
+        }
+    }
+
     impl From<Vec<f32>> for MpsStorage {
         fn from(value: Vec<f32>) -> Self {
             Self::from_cpu_storage(CpuStorage::from(value))
         }
     }
 
-    impl From<Vec<f64>> for MpsStorage {
-        fn from(value: Vec<f64>) -> Self {
+    impl From<Vec<i64>> for MpsStorage {
+        fn from(value: Vec<i64>) -> Self {
             Self::from_cpu_storage(CpuStorage::from(value))
         }
     }
 
     impl BackendStorage for MpsStorage {
         fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self> {
+            if let Some((ctx, input, _)) = self.accelerated(DType::F16) {
+                let out = ctx.empty_f16_buffer(l.size());
+                let params = ScalarMeta {
+                    input: Self::strided_meta(l),
+                    scalar: e as f32,
+                    pad0: 0,
+                    pad1: 0,
+                    pad2: 0,
+                };
+                ctx.dispatch_1d("scalar_powf_f16", l.size(), |encoder| {
+                    encoder.set_buffer(0, Some(input), 0);
+                    encoder.set_buffer(1, Some(&out), 0);
+                    MpsContext::set_params(encoder, 2, &params);
+                });
+                return Ok(Self {
+                    inner: MpsInner::Accelerated {
+                        ctx: ctx.clone(),
+                        buffer: out,
+                        len: l.size(),
+                        dtype: DType::F16,
+                    },
+                });
+            }
+
             if let Some((ctx, input, _)) = self.accelerated(DType::F32) {
                 let out = ctx.empty_f32_buffer(l.size());
                 let params = ScalarMeta {
@@ -543,8 +653,58 @@ mod imp {
         }
 
         fn unary_op<O: UnaryOp>(&self, op: O, l: &Layout) -> Result<Self> {
+            if let Some((ctx, input, _)) = self.accelerated(DType::F16) {
+                if let Some(kernel) = Self::unary_kernel_name::<O>(DType::F16) {
+                    let out = ctx.empty_f16_buffer(l.size());
+                    let meta = Self::strided_meta(l);
+                    ctx.dispatch_1d(kernel, l.size(), |encoder| {
+                        encoder.set_buffer(0, Some(input), 0);
+                        encoder.set_buffer(1, Some(&out), 0);
+                        MpsContext::set_params(encoder, 2, &meta);
+                    });
+                    return Ok(Self {
+                        inner: MpsInner::Accelerated {
+                            ctx: ctx.clone(),
+                            buffer: out,
+                            len: l.size(),
+                            dtype: DType::F16,
+                        },
+                    });
+                }
+
+                if let Some(kernel) = Self::scalar_kernel_name::<O>(DType::F16) {
+                    let scalar = match O::KERNEL {
+                        "scalar_add" => op.f16(f16::from_f32(0.0)).to_f32(),
+                        "scalar_mul" => op.f16(f16::from_f32(1.0)).to_f32(),
+                        "scalar_div" => 1.0 / op.f16(f16::from_f32(1.0)).to_f32(),
+                        _ => unreachable!(),
+                    };
+                    let out = ctx.empty_f16_buffer(l.size());
+                    let params = ScalarMeta {
+                        input: Self::strided_meta(l),
+                        scalar,
+                        pad0: 0,
+                        pad1: 0,
+                        pad2: 0,
+                    };
+                    ctx.dispatch_1d(kernel, l.size(), |encoder| {
+                        encoder.set_buffer(0, Some(input), 0);
+                        encoder.set_buffer(1, Some(&out), 0);
+                        MpsContext::set_params(encoder, 2, &params);
+                    });
+                    return Ok(Self {
+                        inner: MpsInner::Accelerated {
+                            ctx: ctx.clone(),
+                            buffer: out,
+                            len: l.size(),
+                            dtype: DType::F16,
+                        },
+                    });
+                }
+            }
+
             if let Some((ctx, input, _)) = self.accelerated(DType::F32) {
-                if let Some(kernel) = Self::unary_kernel_name::<O>() {
+                if let Some(kernel) = Self::unary_kernel_name::<O>(DType::F32) {
                     let out = ctx.empty_f32_buffer(l.size());
                     let meta = Self::strided_meta(l);
                     ctx.dispatch_1d(kernel, l.size(), |encoder| {
@@ -562,7 +722,7 @@ mod imp {
                     });
                 }
 
-                if let Some(kernel) = Self::scalar_kernel_name::<O>() {
+                if let Some(kernel) = Self::scalar_kernel_name::<O>(DType::F32) {
                     let scalar = match O::KERNEL {
                         "scalar_add" => op.f32(0.0),
                         "scalar_mul" => op.f32(1.0),
@@ -604,9 +764,35 @@ mod imp {
             other_layout: &Layout,
         ) -> Result<Self> {
             if let (Some((ctx, lhs, _)), Some((_, rhs, _))) =
+                (self.accelerated(DType::F16), other.accelerated(DType::F16))
+            {
+                if let Some(kernel) = Self::binary_kernel_name::<O>(DType::F16) {
+                    let out = ctx.empty_f16_buffer(layout.size());
+                    let meta = BinaryMeta {
+                        lhs: Self::strided_meta(layout),
+                        rhs: Self::strided_meta(other_layout),
+                    };
+                    ctx.dispatch_1d(kernel, layout.size(), |encoder| {
+                        encoder.set_buffer(0, Some(lhs), 0);
+                        encoder.set_buffer(1, Some(rhs), 0);
+                        encoder.set_buffer(2, Some(&out), 0);
+                        MpsContext::set_params(encoder, 3, &meta);
+                    });
+                    return Ok(Self {
+                        inner: MpsInner::Accelerated {
+                            ctx: ctx.clone(),
+                            buffer: out,
+                            len: layout.size(),
+                            dtype: DType::F16,
+                        },
+                    });
+                }
+            }
+
+            if let (Some((ctx, lhs, _)), Some((_, rhs, _))) =
                 (self.accelerated(DType::F32), other.accelerated(DType::F32))
             {
-                if let Some(kernel) = Self::binary_kernel_name::<O>() {
+                if let Some(kernel) = Self::binary_kernel_name::<O>(DType::F32) {
                     let out = ctx.empty_f32_buffer(layout.size());
                     let meta = BinaryMeta {
                         lhs: Self::strided_meta(layout),
@@ -639,6 +825,26 @@ mod imp {
 
         fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
             if let (Some((ctx, input, _)), Some((_, output, out_len))) =
+                (self.accelerated(DType::F16), dst.accelerated(DType::F16))
+            {
+                assert!(layout.is_compact());
+                let reduce_size = layout.size() / out_len;
+                let meta =
+                    ReduceMeta { outer_size: out_len as u32, reduce_size: reduce_size as u32 };
+                let kernel = match O::KERNEL {
+                    "reduce_sum" => "reduce_sum_f16",
+                    "reduce_max" => "reduce_max_f16",
+                    _ => unreachable!(),
+                };
+                ctx.dispatch_1d(kernel, out_len, |encoder| {
+                    encoder.set_buffer(0, Some(input), 0);
+                    encoder.set_buffer(1, Some(output), 0);
+                    MpsContext::set_params(encoder, 2, &meta);
+                });
+                return Ok(());
+            }
+
+            if let (Some((ctx, input, _)), Some((_, output, out_len))) =
                 (self.accelerated(DType::F32), dst.accelerated(DType::F32))
             {
                 assert!(layout.is_compact());
@@ -664,6 +870,47 @@ mod imp {
         }
 
         fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self> {
+            if let (Some((ctx, lhs, _)), Some((_, rhs, _))) =
+                (self.accelerated(DType::F16), other.accelerated(DType::F16))
+            {
+                assert!(layout.is_compact() && layout_other.is_compact());
+                let ndim = layout.ndim();
+                let m = layout.shape()[ndim - 2];
+                let k = layout.shape()[ndim - 1];
+                let n = layout_other.shape()[ndim - 1];
+                let batch: usize = (0..ndim - 2).map(|i| layout.shape()[i]).product();
+                let total = batch * m * n;
+                let out = ctx.empty_f16_buffer(total);
+                let meta =
+                    MatmulMeta { m: m as u32, k: k as u32, n: n as u32, batch: batch as u32 };
+                let pipeline = ctx.pipeline("matmul_f16");
+                let guard = ctx.command_buffer();
+                let cb = guard.as_ref().unwrap();
+                let encoder = cb.new_compute_command_encoder();
+                encoder.set_compute_pipeline_state(&pipeline);
+                encoder.set_buffer(0, Some(lhs), 0);
+                encoder.set_buffer(1, Some(rhs), 0);
+                encoder.set_buffer(2, Some(&out), 0);
+                MpsContext::set_params(&encoder, 3, &meta);
+                let tile = 16u64;
+                let groups = MTLSize::new(
+                    (n as u64 + tile - 1) / tile,
+                    (m as u64 + tile - 1) / tile,
+                    batch as u64,
+                );
+                let tg_size = MTLSize::new(tile, tile, 1);
+                encoder.dispatch_thread_groups(groups, tg_size);
+                encoder.end_encoding();
+                return Ok(Self {
+                    inner: MpsInner::Accelerated {
+                        ctx: ctx.clone(),
+                        buffer: out,
+                        len: total,
+                        dtype: DType::F16,
+                    },
+                });
+            }
+
             if let (Some((ctx, lhs, _)), Some((_, rhs, _))) =
                 (self.accelerated(DType::F32), other.accelerated(DType::F32))
             {
@@ -720,7 +967,33 @@ mod imp {
             indices_layout: &Layout,
         ) -> Result<Self> {
             if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
-                (self.accelerated(DType::F32), indices.accelerated(DType::U32))
+                (self.accelerated(DType::F16), indices.accelerated(DType::I64))
+            {
+                assert!(layout.is_compact());
+                assert!(indices_layout.is_compact());
+                assert_eq!(dim, 1);
+                let rows = layout.shape()[0];
+                let cols = layout.shape()[1];
+                let out = ctx.empty_f16_buffer(rows);
+                let meta = GatherMeta { rows: rows as u32, cols: cols as u32 };
+                ctx.dispatch_1d("gather_f16", rows, |encoder| {
+                    encoder.set_buffer(0, Some(input), 0);
+                    encoder.set_buffer(1, Some(index_buffer), 0);
+                    encoder.set_buffer(2, Some(&out), 0);
+                    MpsContext::set_params(encoder, 3, &meta);
+                });
+                return Ok(Self {
+                    inner: MpsInner::Accelerated {
+                        ctx: ctx.clone(),
+                        buffer: out,
+                        len: rows,
+                        dtype: DType::F16,
+                    },
+                });
+            }
+
+            if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
+                (self.accelerated(DType::F32), indices.accelerated(DType::I64))
             {
                 assert!(layout.is_compact());
                 assert!(indices_layout.is_compact());
@@ -763,7 +1036,40 @@ mod imp {
             full_shape: &[usize],
         ) -> Result<Self> {
             if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
-                (self.accelerated(DType::F32), indices.accelerated(DType::U32))
+                (self.accelerated(DType::F16), indices.accelerated(DType::I64))
+            {
+                assert!(layout.is_compact());
+                assert!(indices_layout.is_compact());
+                assert_eq!(dim, 1);
+                let rows = full_shape[0];
+                let cols = full_shape[1];
+                let out = ctx.empty_f16_buffer(rows * cols);
+                unsafe {
+                    std::ptr::write_bytes(
+                        out.contents(),
+                        0,
+                        rows * cols * std::mem::size_of::<f16>(),
+                    );
+                }
+                let meta = GatherMeta { rows: rows as u32, cols: cols as u32 };
+                ctx.dispatch_1d("scatter_f16", rows, |encoder| {
+                    encoder.set_buffer(0, Some(input), 0);
+                    encoder.set_buffer(1, Some(index_buffer), 0);
+                    encoder.set_buffer(2, Some(&out), 0);
+                    MpsContext::set_params(encoder, 3, &meta);
+                });
+                return Ok(Self {
+                    inner: MpsInner::Accelerated {
+                        ctx: ctx.clone(),
+                        buffer: out,
+                        len: rows * cols,
+                        dtype: DType::F16,
+                    },
+                });
+            }
+
+            if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
+                (self.accelerated(DType::F32), indices.accelerated(DType::I64))
             {
                 assert!(layout.is_compact());
                 assert!(indices_layout.is_compact());
@@ -807,7 +1113,32 @@ mod imp {
 
         fn index_select(&self, layout: &Layout, indices: &Self, indices_layout: &Layout) -> Result<Self> {
             if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
-                (self.accelerated(DType::F32), indices.accelerated(DType::U32))
+                (self.accelerated(DType::F16), indices.accelerated(DType::I64))
+            {
+                assert!(layout.is_compact());
+                assert!(indices_layout.is_compact());
+                let num_indices = indices_layout.shape()[0];
+                let cols = layout.shape()[1];
+                let out = ctx.empty_f16_buffer(num_indices * cols);
+                let meta = IndexSelectMeta { num_indices: num_indices as u32, cols: cols as u32 };
+                ctx.dispatch_2d("index_select_f16", cols, num_indices, |encoder| {
+                    encoder.set_buffer(0, Some(input), 0);
+                    encoder.set_buffer(1, Some(index_buffer), 0);
+                    encoder.set_buffer(2, Some(&out), 0);
+                    MpsContext::set_params(encoder, 3, &meta);
+                });
+                return Ok(Self {
+                    inner: MpsInner::Accelerated {
+                        ctx: ctx.clone(),
+                        buffer: out,
+                        len: num_indices * cols,
+                        dtype: DType::F16,
+                    },
+                });
+            }
+
+            if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
+                (self.accelerated(DType::F32), indices.accelerated(DType::I64))
             {
                 assert!(layout.is_compact());
                 assert!(indices_layout.is_compact());
@@ -849,15 +1180,20 @@ mod imp {
         fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D> {
             let layout = layout.borrow();
             match &self.inner {
+                MpsInner::Accelerated { ctx, buffer, len, dtype: DType::F16 } => {
+                    ctx.synchronize();
+                    let data = read_f16(ctx, buffer, *len, layout);
+                    D::to_vec(&CpuStorage::F16(data))
+                }
                 MpsInner::Accelerated { ctx, buffer, len, dtype: DType::F32 } => {
                     ctx.synchronize();
                     let data = read_f32(ctx, buffer, *len, layout);
                     D::to_vec(&CpuStorage::F32(data))
                 }
-                MpsInner::Accelerated { ctx, buffer, len, dtype: DType::U32 } => {
+                MpsInner::Accelerated { ctx, buffer, len, dtype: DType::I64 } => {
                     ctx.synchronize();
-                    let data = read_u32(ctx, buffer, *len, layout);
-                    D::to_vec(&CpuStorage::U32(data))
+                    let data = read_i64(ctx, buffer, *len, layout);
+                    D::to_vec(&CpuStorage::I64(data))
                 }
                 MpsInner::Accelerated { dtype, .. } => todo!("MPS to_vec for {dtype:?}"),
                 MpsInner::Cpu(storage) => storage.to_vec(layout),
@@ -865,6 +1201,19 @@ mod imp {
         }
 
         fn copy_compact(&self, src_layout: &Layout, dst: &mut Self) -> Result<()> {
+            if let (Some((ctx, input, _)), Some((_, output, out_len))) =
+                (self.accelerated(DType::F16), dst.accelerated(DType::F16))
+            {
+                assert_eq!(src_layout.size(), out_len);
+                let meta = Self::strided_meta(src_layout);
+                ctx.dispatch_1d("copy_compact_f16", out_len, |encoder| {
+                    encoder.set_buffer(0, Some(input), 0);
+                    encoder.set_buffer(1, Some(output), 0);
+                    MpsContext::set_params(encoder, 2, &meta);
+                });
+                return Ok(());
+            }
+
             if let (Some((ctx, input, _)), Some((_, output, out_len))) =
                 (self.accelerated(DType::F32), dst.accelerated(DType::F32))
             {
@@ -879,11 +1228,11 @@ mod imp {
             }
 
             if let (Some((ctx, input, _)), Some((_, output, out_len))) =
-                (self.accelerated(DType::U32), dst.accelerated(DType::U32))
+                (self.accelerated(DType::I64), dst.accelerated(DType::I64))
             {
                 assert_eq!(src_layout.size(), out_len);
                 let meta = Self::strided_meta(src_layout);
-                ctx.dispatch_1d("copy_compact_u32", out_len, |encoder| {
+                ctx.dispatch_1d("copy_compact_i64", out_len, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(output), 0);
                     MpsContext::set_params(encoder, 2, &meta);
@@ -896,6 +1245,39 @@ mod imp {
             src.copy_compact(src_layout, &mut cpu_dst)?;
             *dst = Self::from_cpu_storage(cpu_dst);
             Ok(())
+        }
+    }
+
+    fn read_f16(ctx: &Arc<MpsContext>, buffer: &Buffer, len: usize, layout: &Layout) -> Vec<f16> {
+        if layout.is_compact() && layout.size() == len {
+            return unsafe { std::slice::from_raw_parts(buffer.contents().cast::<f16>(), len) }
+                .to_vec();
+        }
+
+        let tmp = MpsStorage {
+            inner: MpsInner::Accelerated {
+                ctx: ctx.clone(),
+                buffer: buffer.to_owned(),
+                len,
+                dtype: DType::F16,
+            },
+        };
+        let mut dst = MpsStorage {
+            inner: MpsInner::Accelerated {
+                ctx: ctx.clone(),
+                buffer: ctx.empty_f16_buffer(layout.size()),
+                len: layout.size(),
+                dtype: DType::F16,
+            },
+        };
+        tmp.copy_compact(layout, &mut dst).unwrap();
+        ctx.synchronize();
+
+        match dst.inner {
+            MpsInner::Accelerated { buffer, len, .. } => {
+                unsafe { std::slice::from_raw_parts(buffer.contents().cast::<f16>(), len) }.to_vec()
+            }
+            MpsInner::Cpu(_) => unreachable!(),
         }
     }
 
@@ -932,9 +1314,9 @@ mod imp {
         }
     }
 
-    fn read_u32(ctx: &Arc<MpsContext>, buffer: &Buffer, len: usize, layout: &Layout) -> Vec<u32> {
+    fn read_i64(ctx: &Arc<MpsContext>, buffer: &Buffer, len: usize, layout: &Layout) -> Vec<i64> {
         if layout.is_compact() && layout.size() == len {
-            return unsafe { std::slice::from_raw_parts(buffer.contents().cast::<u32>(), len) }
+            return unsafe { std::slice::from_raw_parts(buffer.contents().cast::<i64>(), len) }
                 .to_vec();
         }
 
@@ -943,15 +1325,15 @@ mod imp {
                 ctx: ctx.clone(),
                 buffer: buffer.to_owned(),
                 len,
-                dtype: DType::U32,
+                dtype: DType::I64,
             },
         };
         let mut dst = MpsStorage {
             inner: MpsInner::Accelerated {
                 ctx: ctx.clone(),
-                buffer: ctx.empty_u32_buffer(layout.size()),
+                buffer: ctx.empty_i64_buffer(layout.size()),
                 len: layout.size(),
-                dtype: DType::U32,
+                dtype: DType::I64,
             },
         };
         tmp.copy_compact(layout, &mut dst).unwrap();
@@ -959,7 +1341,7 @@ mod imp {
 
         match dst.inner {
             MpsInner::Accelerated { buffer, len, .. } => {
-                unsafe { std::slice::from_raw_parts(buffer.contents().cast::<u32>(), len) }.to_vec()
+                unsafe { std::slice::from_raw_parts(buffer.contents().cast::<i64>(), len) }.to_vec()
             }
             MpsInner::Cpu(_) => unreachable!(),
         }
@@ -998,14 +1380,20 @@ mod imp {
         }
     }
 
+    impl From<Vec<f16>> for MpsStorage {
+        fn from(_: Vec<f16>) -> Self {
+            Self::unavailable()
+        }
+    }
+
     impl From<Vec<f32>> for MpsStorage {
         fn from(_: Vec<f32>) -> Self {
             Self::unavailable()
         }
     }
 
-    impl From<Vec<f64>> for MpsStorage {
-        fn from(_: Vec<f64>) -> Self {
+    impl From<Vec<i64>> for MpsStorage {
+        fn from(_: Vec<i64>) -> Self {
             Self::unavailable()
         }
     }

@@ -1,0 +1,21 @@
+   Compiling deers v0.1.0 (/Users/roberto/projects/deers)
+    Finished `release` profile [optimized] target(s) in 1.81s
+     Running `target/release/examples/bench_compare`
+=== deers cpu ===
+  forward:                 514 us
+  forward+backward:       1377 us
+  backward only:           863 us
+=== deers mps ===
+  forward:                  47 us
+  forward+backward:        395 us
+  backward only:           348 us
+
+=== candle cpu ===
+  forward:                 310 us
+  forward+backward:       1023 us
+  backward only:           713 us
+
+=== candle metal ===
+  forward:                  35 us
+  forward+backward:        635 us
+  backward only:           599 us

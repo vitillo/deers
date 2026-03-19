@@ -1,0 +1,15 @@
+commit	fwd_us	fwd_bwd_us	candle_metal_fwd_us	status	description
+c4f75d2	727	2037	130	keep	baseline
+f5d9d35	714	1803	131	keep	batch command buffers
+a8a9301	796	2132	131	discard	set_bytes for params (regression)
+de964bc	71	491	35	keep	tiled 16x16 matmul with shared memory
+0437667	73	483	33	discard	32x32 tiles (no improvement)
+a9e515d	72	475	34	discard	simdgroup 8x8 matmul (no improvement over tiled)
+739fa87	76	488	34	keep	skip empty fence in synchronize
+3087972	74	477	33	discard	thread-coarsened 64x16 matmul (no improvement)
+6df4bd3	71	469	33	keep	pre-cache all pipelines at init, remove pipeline mutex
+149f616	47	395	35	keep	set_bytes for all param metadata (eliminated ~15 allocs/fwd)
+19b3d71	43	370	32	keep	cache max threadgroup sizes + pre-cached pipelines
+9674438	44	364	32	keep	dispatch_thread_groups instead of dispatch_threads
+4de8648	19	378	35	keep	Metal heap for fast buffer allocation (BEAT CANDLE!)
+445f7fd	18	300	36	keep	256MB heap (backward also beats candle now)
