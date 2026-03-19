@@ -1,5 +1,7 @@
 //! Neural network modules: traits, layers, and composition.
 
+pub mod functional;
+
 use crate::error::Result;
 use crate::tensor::Tensor;
 use crate::var::Var;

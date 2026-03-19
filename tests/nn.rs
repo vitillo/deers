@@ -1,6 +1,6 @@
 use deers::nn::{self, Module};
 use deers::optim::SGD;
-use deers::{Device, Tensor};
+use deers::{DType, Device, Tensor};
 
 #[test]
 fn test_linear_forward() {
@@ -156,4 +156,56 @@ fn test_rms_norm_normalizes() {
 fn test_rms_norm_vars() {
     let norm = nn::RMSNorm::new(4, 1e-5);
     assert_eq!(norm.vars().len(), 1);
+}
+
+#[test]
+fn test_causal_mask() {
+    let mask = nn::functional::causal_mask(2, 3, 0, DType::F32, Device::Cpu);
+
+    assert_eq!(mask.layout().shape, vec![2, 1, 3, 3].into());
+    assert_eq!(
+        mask.to_vec::<f32>().unwrap(),
+        vec![
+            0.0,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            0.0,
+            f32::NEG_INFINITY,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            0.0,
+            f32::NEG_INFINITY,
+            0.0,
+            0.0,
+            0.0,
+        ]
+    );
+}
+
+#[test]
+fn test_causal_mask_with_offset() {
+    let mask = nn::functional::causal_mask(1, 2, 3, DType::F32, Device::Cpu);
+
+    assert_eq!(mask.layout().shape, vec![1, 1, 2, 5].into());
+    assert_eq!(
+        mask.to_vec::<f32>().unwrap(),
+        vec![0.0, 0.0, 0.0, 0.0, f32::NEG_INFINITY, 0.0, 0.0, 0.0, 0.0, 0.0,]
+    );
+}
+
+#[test]
+fn test_causal_mask_mps() {
+    let mask = nn::functional::causal_mask(1, 3, 0, DType::F32, Device::Mps);
+
+    assert_eq!(mask.device(), Device::Mps);
+    assert_eq!(
+        mask.to_vec::<f32>().unwrap(),
+        vec![0.0, f32::NEG_INFINITY, f32::NEG_INFINITY, 0.0, 0.0, f32::NEG_INFINITY, 0.0, 0.0, 0.0,]
+    );
 }
