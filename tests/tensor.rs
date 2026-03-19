@@ -891,6 +891,157 @@ fn test_relu_backward_with_mul() {
 }
 
 #[test]
+fn test_square() {
+    let a = Tensor::from_vec(vec![-2.0f32, -1.0, 0.0, 1.0, 2.0, 3.0], (2, 3), Device::Cpu);
+    let b = a.square();
+    assert_eq!(
+        b.to_vec::<f32>().unwrap(),
+        vec![4.0, 1.0, 0.0, 1.0, 4.0, 9.0]
+    );
+}
+
+#[test]
+fn test_square_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu).attach();
+    let b = a.square();
+    let loss = b.sum(vec![0], false);
+    let grads = loss.backward().unwrap();
+    // d(x²)/dx = 2x
+    assert_eq!(
+        grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(),
+        vec![2.0, 4.0, 6.0]
+    );
+}
+
+#[test]
+fn test_sigmoid() {
+    let a = Tensor::from_vec(vec![0.0f32, 1.0, -1.0, 10.0], (4,), Device::Cpu);
+    let b = a.sigmoid();
+    let result: Vec<f32> = b.to_vec().unwrap();
+    // sigmoid(0) = 0.5, sigmoid(1) ≈ 0.7311, sigmoid(-1) ≈ 0.2689, sigmoid(10) ≈ 1.0
+    let expected = vec![0.5, 0.7311, 0.2689, 0.99995];
+    Vec::assert_approx_eq(&result, &expected);
+}
+
+#[test]
+fn test_sigmoid_backward() {
+    let a = Tensor::from_vec(vec![0.0f32, 1.0, -1.0], (3,), Device::Cpu).attach();
+    let b = a.sigmoid();
+    let loss = b.sum(vec![0], false);
+    let grads = loss.backward().unwrap();
+    // d(sigmoid)/dx = sigmoid(x) * (1 - sigmoid(x))
+    let result: Vec<f32> = grads.get(a.id()).unwrap().to_vec().unwrap();
+    let expected = vec![0.25, 0.1966, 0.1966];
+    Vec::assert_approx_eq(&result, &expected);
+}
+
+#[test]
+fn test_tanh() {
+    let a = Tensor::from_vec(vec![0.0f32, 1.0, -1.0], (3,), Device::Cpu);
+    let b = a.tanh();
+    let result: Vec<f32> = b.to_vec().unwrap();
+    // tanh(0) = 0, tanh(1) ≈ 0.7616, tanh(-1) ≈ -0.7616
+    let expected = vec![0.0, 0.7616, -0.7616];
+    Vec::assert_approx_eq(&result, &expected);
+}
+
+#[test]
+fn test_tanh_backward() {
+    let a = Tensor::from_vec(vec![0.0f32, 1.0], (2,), Device::Cpu).attach();
+    let b = a.tanh();
+    let loss = b.sum(vec![0], false);
+    let grads = loss.backward().unwrap();
+    // d(tanh)/dx = 1 - tanh²(x)
+    let result: Vec<f32> = grads.get(a.id()).unwrap().to_vec().unwrap();
+    let expected = vec![1.0, 0.4200];
+    Vec::assert_approx_eq(&result, &expected);
+}
+
+#[test]
+fn test_softmax() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 1.0, 2.0, 3.0], (2, 3), Device::Cpu);
+    let b = a.softmax(1);
+    let result: Vec<f32> = b.to_vec().unwrap();
+    // softmax([1,2,3]) = [0.0900, 0.2447, 0.6652]
+    let expected = vec![0.0900, 0.2447, 0.6652, 0.0900, 0.2447, 0.6652];
+    Vec::assert_approx_eq(&result, &expected);
+}
+
+#[test]
+fn test_softmax_sums_to_one() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+    let b = a.softmax(1);
+    let sums = b.sum(vec![1], false);
+    Vec::assert_approx_eq(sums.to_vec::<f32>().unwrap(), vec![1.0, 1.0]);
+}
+
+#[test]
+fn test_mean() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+    let b = a.mean(vec![1], false);
+    assert_eq!(b.layout().shape, (2,).into());
+    assert_eq!(b.to_vec::<f32>().unwrap(), vec![2.0, 5.0]);
+}
+
+#[test]
+fn test_mean_keepdims() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+    let b = a.mean(vec![1], true);
+    assert_eq!(b.layout().shape, (2, 1).into());
+    assert_eq!(b.to_vec::<f32>().unwrap(), vec![2.0, 5.0]);
+}
+
+#[test]
+fn test_mean_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu).attach();
+    let b = a.mean(vec![1], false);
+    let loss = b.sum(vec![0], false);
+    let grads = loss.backward().unwrap();
+    // d(mean)/dx = 1/n for each element
+    let result: Vec<f32> = grads.get(a.id()).unwrap().to_vec().unwrap();
+    let expected = vec![1.0 / 3.0; 6];
+    Vec::assert_approx_eq(&result, &expected);
+}
+
+#[test]
+fn test_cat_dim0() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (1, 3), Device::Cpu);
+    let b = Tensor::from_vec(vec![4.0f32, 5.0, 6.0], (1, 3), Device::Cpu);
+    let c = Tensor::cat(&[a, b], 0);
+    assert_eq!(c.layout().shape, (2, 3).into());
+    assert_eq!(c.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+}
+
+#[test]
+fn test_cat_dim1() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);
+    let b = Tensor::from_vec(vec![5.0f32, 6.0, 7.0, 8.0], (2, 2), Device::Cpu);
+    let c = Tensor::cat(&[a, b], 1);
+    assert_eq!(c.layout().shape, (2, 4).into());
+    assert_eq!(c.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 5.0, 6.0, 3.0, 4.0, 7.0, 8.0]);
+}
+
+#[test]
+fn test_cat_backward() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (1, 3), Device::Cpu).attach();
+    let b = Tensor::from_vec(vec![4.0f32, 5.0, 6.0], (1, 3), Device::Cpu).attach();
+    let c = Tensor::cat(&[a.clone(), b.clone()], 0);
+    let loss = c.sum(vec![0, 1], false);
+    let grads = loss.backward().unwrap();
+    assert_eq!(grads.get(a.id()).unwrap().to_vec::<f32>().unwrap(), vec![1.0, 1.0, 1.0]);
+    assert_eq!(grads.get(b.id()).unwrap().to_vec::<f32>().unwrap(), vec![1.0, 1.0, 1.0]);
+}
+
+#[test]
+fn test_cat_mps() {
+    let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (1, 3), Device::Mps);
+    let b = Tensor::from_vec(vec![4.0f32, 5.0, 6.0], (1, 3), Device::Mps);
+    let c = Tensor::cat(&[a, b], 0);
+    assert_eq!(c.layout().shape, (2, 3).into());
+    assert_eq!(c.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+}
+
+#[test]
 fn test_log_softmax() {
     let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 1.0, 2.0, 3.0], (2, 3), Device::Cpu);
     let b = a.log_softmax(1);

@@ -475,6 +475,52 @@ impl Tensor {
         self - &lse
     }
 
+    /// Concatenates tensors along the given dimension.
+    pub fn cat(tensors: &[Tensor], dim: usize) -> Tensor {
+        assert!(!tensors.is_empty(), "cat requires at least one tensor");
+        if tensors.len() == 1 {
+            return tensors[0].clone();
+        }
+        // For non-zero dim: transpose to bring cat dim first, cat along 0, transpose back
+        if dim != 0 {
+            let transposed: Vec<_> = tensors.iter().map(|t| t.transpose(Some((0, dim)))).collect();
+            let cat0 = Self::cat(&transposed, 0);
+            return cat0.transpose(Some((0, dim)));
+        }
+        ops::Cat::new(tensors.to_vec()).forward().unwrap()
+    }
+
+    /// Element-wise square: `x²`.
+    pub fn square(&self) -> Tensor {
+        self * self
+    }
+
+    /// Element-wise sigmoid: `1 / (1 + exp(-x))`.
+    pub fn sigmoid(&self) -> Tensor {
+        let denom = (-self).exp() + 1.0;
+        let one = Tensor::ones(vec![1], self.dtype(), self.device())
+            .broadcast(self.layout().shape().clone());
+        &one / &denom
+    }
+
+    /// Element-wise tanh: `(exp(2x) - 1) / (exp(2x) + 1)`.
+    pub fn tanh(&self) -> Tensor {
+        let e2x = (self * 2.0).exp();
+        (&e2x - 1.0) / (&e2x + 1.0)
+    }
+
+    /// Numerically stable softmax along the given axis.
+    pub fn softmax(&self, axis: usize) -> Tensor {
+        self.log_softmax(axis).exp()
+    }
+
+    /// Mean along the given axes. If `keep_dims`, reduced axes become size 1.
+    pub fn mean(&self, axes: Vec<usize>, keep_dims: bool) -> Tensor {
+        let n: usize = axes.iter().map(|&a| self.layout().shape()[a]).product();
+        let s = self.sum(axes, keep_dims);
+        &s * (1.0 / n as f64)
+    }
+
     /// Gathers values along `dim` using integer indices.
     ///
     /// For a 2D tensor of shape `(rows, cols)` with `dim=1` and indices of shape `(rows,)`,

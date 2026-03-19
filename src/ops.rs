@@ -1149,3 +1149,78 @@ impl TensorOp for Gather {
         vec![&self.input, &self.indices]
     }
 }
+
+/// Concatenates tensors along dimension 0.
+/// For other dimensions, the caller transposes before/after.
+#[derive(Debug)]
+pub struct Cat {
+    args: Vec<Tensor>,
+}
+
+impl Cat {
+    pub fn new(args: Vec<Tensor>) -> Self {
+        assert!(!args.is_empty(), "cat requires at least one tensor");
+        let ndim = args[0].layout().ndim();
+        let dtype = args[0].dtype();
+        for arg in &args[1..] {
+            assert_eq!(arg.layout().ndim(), ndim, "cat: all tensors must have same ndim");
+            assert_eq!(arg.dtype(), dtype, "cat: all tensors must have same dtype");
+            for d in 1..ndim {
+                assert_eq!(
+                    arg.layout().shape()[d],
+                    args[0].layout().shape()[d],
+                    "cat: dimension {} mismatch",
+                    d,
+                );
+            }
+        }
+        let args: Vec<Tensor> = args.into_iter().map(|a| a.compact()).collect();
+        Self { args }
+    }
+}
+
+impl TensorOp for Cat {
+    fn forward(self) -> Result<Tensor> {
+        let device = self.args[0].device();
+        let dtype = self.args[0].dtype();
+        let total_dim0: usize = self.args.iter().map(|a| a.layout().shape()[0]).sum();
+
+        let mut out_dims: Vec<usize> = self.args[0].layout().shape().iter().copied().collect();
+        out_dims[0] = total_dim0;
+        let out_shape: Shape = out_dims.into();
+
+        let storage = {
+            let guards: Vec<_> = self.args.iter().map(|a| a.storage()).collect();
+            let parts: Vec<(&Storage, usize)> = guards.iter()
+                .zip(self.args.iter())
+                .map(|(g, a)| (&**g, a.layout().size()))
+                .collect();
+            Storage::cat(&parts)?
+        };
+
+        Ok(Tensor::new(
+            Arc::new(RwLock::new(storage)),
+            out_shape.into(),
+            device,
+            dtype,
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let mut offset = 0;
+        for arg in &self.args {
+            let size = arg.layout().shape()[0];
+            let grad_slice = out_grad.narrow(0, offset, size);
+            let sum_grad = grads.get_or_insert_zero(arg);
+            *sum_grad = &*sum_grad + &grad_slice;
+            offset += size;
+        }
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        self.args.iter().collect()
+    }
+}

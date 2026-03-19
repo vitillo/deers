@@ -365,6 +365,36 @@ impl BackendStorage for Storage {
     }
 }
 
+impl Storage {
+    /// Concatenates compact storages into a single contiguous storage.
+    /// All inputs must be compact and on the same device.
+    pub fn cat(parts: &[(&Storage, usize)]) -> Result<Self> {
+        assert!(!parts.is_empty());
+        match parts[0].0 {
+            Storage::Cpu(_) => {
+                let cpu_parts: Vec<_> = parts
+                    .iter()
+                    .map(|(s, len)| match s {
+                        Storage::Cpu(cpu) => (cpu, *len),
+                        _ => panic!("mixed devices in cat"),
+                    })
+                    .collect();
+                Ok(Storage::Cpu(CpuStorage::cat(&cpu_parts)))
+            }
+            Storage::Mps(_) => {
+                let mps_parts: Vec<_> = parts
+                    .iter()
+                    .map(|(s, len)| match s {
+                        Storage::Mps(mps) => (mps, *len),
+                        _ => panic!("mixed devices in cat"),
+                    })
+                    .collect();
+                Ok(Storage::Mps(MpsStorage::cat(&mps_parts)))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::f32;
