@@ -9,7 +9,8 @@ fn main() {
     let b1_data: Vec<f32> = vec![0.0; 128];
     let w2_data: Vec<f32> = (0..128 * 10).map(|i| (i as f32 * 0.002).sin() * 0.05).collect();
     let b2_data: Vec<f32> = vec![0.0; 10];
-    let targets_u32: Vec<u32> = (0..batch_size).map(|i| (i % 10) as u32).collect();
+    let targets_i64: Vec<i64> = (0..batch_size).map(|i| (i % 10) as i64).collect();
+    let targets_u32: Vec<u32> = targets_i64.iter().map(|&i| i as u32).collect();
 
     bench_deers(
         "deers cpu",
@@ -21,7 +22,7 @@ fn main() {
         &b1_data,
         &w2_data,
         &b2_data,
-        &targets_u32,
+        &targets_i64,
     );
 
     bench_deers(
@@ -34,7 +35,7 @@ fn main() {
         &b1_data,
         &w2_data,
         &b2_data,
-        &targets_u32,
+        &targets_i64,
     );
 
     bench_candle_cpu(
@@ -70,7 +71,7 @@ fn bench_deers(
     b1_data: &[f32],
     w2_data: &[f32],
     b2_data: &[f32],
-    targets_u32: &[u32],
+    targets_i64: &[i64],
 ) {
     use deers::{Tensor, Var};
 
@@ -79,7 +80,7 @@ fn bench_deers(
     let b1 = Var::new(Tensor::from_vec(b1_data.to_vec(), (128,), device));
     let w2 = Var::new(Tensor::from_vec(w2_data.to_vec(), (128, 10), device));
     let b2 = Var::new(Tensor::from_vec(b2_data.to_vec(), (10,), device));
-    let targets = Tensor::from_vec(targets_u32.to_vec(), (batch_size,), device);
+    let targets = Tensor::from_vec(targets_i64.to_vec(), (batch_size,), device);
 
     let h = (x.matmul(&w1) + &*b1).relu();
     let logits = h.matmul(&w2) + &*b2;

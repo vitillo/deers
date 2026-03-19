@@ -253,7 +253,12 @@ pub trait BackendStorage: Sized {
     ) -> Result<Self>;
     /// Selects rows along dimension 0 using integer indices.
     /// Input must be compact 2D. Returns (num_indices, cols) storage.
-    fn index_select(&self, layout: &Layout, indices: &Self, indices_layout: &Layout) -> Result<Self>;
+    fn index_select(
+        &self,
+        layout: &Layout,
+        indices: &Self,
+        indices_layout: &Layout,
+    ) -> Result<Self>;
     fn dtype(&self) -> DType;
     fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D>;
     fn copy_compact(&self, src_layout: &Layout, dst: &mut Self) -> Result<()>;
@@ -399,7 +404,12 @@ impl BackendStorage for Storage {
         }
     }
 
-    fn index_select(&self, layout: &Layout, indices: &Self, indices_layout: &Layout) -> Result<Self> {
+    fn index_select(
+        &self,
+        layout: &Layout,
+        indices: &Self,
+        indices_layout: &Layout,
+    ) -> Result<Self> {
         match (self, indices) {
             (Storage::Cpu(storage), Storage::Cpu(indices)) => {
                 Ok(Self::Cpu(storage.index_select(layout, indices, indices_layout)?))

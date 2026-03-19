@@ -1166,9 +1166,7 @@ impl TensorOp for IndexSelect {
     }
 
     fn backward(&self, _grads: &mut GradientStore, _out_grad: &Tensor) -> Result<()> {
-        Err(crate::error::Error::NotImplemented(
-            "IndexSelect backward not yet implemented",
-        ))
+        Err(crate::error::Error::NotImplemented("IndexSelect backward not yet implemented"))
     }
 
     fn dependencies(&self) -> Vec<&Tensor> {

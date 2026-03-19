@@ -1,4 +1,4 @@
-use core::{f32, f64};
+use core::f32;
 mod utils;
 
 use deers::{DType, Device, Tensor};
@@ -242,7 +242,7 @@ fn test_ewise_exp_backward() {
 
     Vec::<_>::assert_approx_eq(
         grads.get(a.id()).unwrap().to_vec().unwrap(),
-        vec![f64::consts::E, 7.3891, 20.0855],
+        vec![std::f32::consts::E, 7.3891, 20.0855],
     );
 }
 
@@ -939,9 +939,10 @@ fn test_index_select() {
     // 4 rows × 3 cols
     let data = Tensor::from_vec(
         vec![10.0f32, 11.0, 12.0, 20.0, 21.0, 22.0, 30.0, 31.0, 32.0, 40.0, 41.0, 42.0],
-        (4, 3), Device::Cpu,
+        (4, 3),
+        Device::Cpu,
     );
-    let indices = Tensor::from_vec(vec![2u32, 0, 3], (3,), Device::Cpu);
+    let indices = Tensor::from_vec(vec![2i64, 0, 3], (3,), Device::Cpu);
     let out = data.index_select(&indices);
     assert_eq!(out.layout().shape, (3, 3).into());
     assert_eq!(
@@ -954,9 +955,10 @@ fn test_index_select() {
 fn test_index_select_mps() {
     let data = Tensor::from_vec(
         vec![10.0f32, 11.0, 12.0, 20.0, 21.0, 22.0, 30.0, 31.0, 32.0, 40.0, 41.0, 42.0],
-        (4, 3), Device::Mps,
+        (4, 3),
+        Device::Mps,
     );
-    let indices = Tensor::from_vec(vec![2u32, 0, 3], (3,), Device::Mps);
+    let indices = Tensor::from_vec(vec![2i64, 0, 3], (3,), Device::Mps);
     let out = data.index_select(&indices);
     assert_eq!(out.layout().shape, (3, 3).into());
     assert_eq!(
@@ -1031,7 +1033,7 @@ fn test_mps_log_softmax_backward() {
 #[test]
 fn test_gather_forward() {
     let input = Tensor::from_vec(vec![10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0], (2, 3), Device::Cpu);
-    let indices = Tensor::from_vec(vec![1u32, 2], (2,), Device::Cpu);
+    let indices = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
     let out = input.gather(1, &indices);
     let vals: Vec<f32> = out.to_vec().unwrap();
     // out[0] = input[0, 1] = 20.0, out[1] = input[1, 2] = 60.0
@@ -1042,7 +1044,7 @@ fn test_gather_forward() {
 fn test_gather_backward() {
     let input =
         Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu).attach();
-    let indices = Tensor::from_vec(vec![0u32, 2], (2,), Device::Cpu);
+    let indices = Tensor::from_vec(vec![0i64, 2], (2,), Device::Cpu);
     let out = input.gather(1, &indices);
     let loss = out.sum(vec![0, 1], true);
     let grads = loss.backward().unwrap();
@@ -1055,7 +1057,7 @@ fn test_gather_backward() {
 fn test_mps_gather_backward() {
     let input =
         Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Mps).attach();
-    let indices = Tensor::from_vec(vec![0u32, 2], (2,), Device::Cpu);
+    let indices = Tensor::from_vec(vec![0i64, 2], (2,), Device::Cpu);
     let out = input.gather(1, &indices);
     let loss = out.sum(vec![0, 1], true);
     let grads = loss.backward().unwrap();
@@ -1071,7 +1073,7 @@ fn test_nll_loss_forward() {
         (2, 3),
         Device::Cpu,
     );
-    let targets = Tensor::from_vec(vec![0u32, 2], (2,), Device::Cpu);
+    let targets = Tensor::from_vec(vec![0i64, 2], (2,), Device::Cpu);
     let loss = deers::loss::nll_loss(&log_probs, &targets);
 
     // -mean(log_probs[0,0] + log_probs[1,2]) = -mean(-0.9076 + -1.5076) = 1.2076
@@ -1083,7 +1085,7 @@ fn test_nll_loss_forward() {
 fn test_nll_loss_backward() {
     let log_probs =
         Tensor::from_vec(vec![-0.9f32, -1.2, -2.4, -0.4, -1.9, -1.5], (2, 3), Device::Cpu).attach();
-    let targets = Tensor::from_vec(vec![1u32, 0], (2,), Device::Cpu);
+    let targets = Tensor::from_vec(vec![1i64, 0], (2,), Device::Cpu);
     let loss = deers::loss::nll_loss(&log_probs, &targets);
     let grads = loss.backward().unwrap();
     let grad: Vec<f32> = grads.get(log_probs.id()).unwrap().to_vec().unwrap();
@@ -1099,7 +1101,7 @@ fn test_cross_entropy_end_to_end() {
     // Full pipeline: logits -> cross_entropy -> backward
     let logits =
         Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 1.0, -1.0, 0.0], (2, 3), Device::Cpu).attach();
-    let targets = Tensor::from_vec(vec![2u32, 0], (2,), Device::Cpu);
+    let targets = Tensor::from_vec(vec![2i64, 0], (2,), Device::Cpu);
     let loss = deers::loss::cross_entropy(&logits, &targets);
     let grads = loss.backward().unwrap();
 
@@ -1117,7 +1119,7 @@ fn test_cross_entropy_end_to_end() {
 fn test_mps_cross_entropy_end_to_end() {
     let logits =
         Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 1.0, -1.0, 0.0], (2, 3), Device::Mps).attach();
-    let targets = Tensor::from_vec(vec![2u32, 0], (2,), Device::Cpu);
+    let targets = Tensor::from_vec(vec![2i64, 0], (2,), Device::Cpu);
     let loss = deers::loss::cross_entropy(&logits, &targets);
     let grads = loss.backward().unwrap();
 
