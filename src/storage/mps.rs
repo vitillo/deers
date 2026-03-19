@@ -78,12 +78,29 @@ mod imp {
     const KERNELS: &str = include_str!("kernels.metal");
 
     const ALL_KERNELS: &[&str] = &[
-        "neg_f32", "exp_f32", "log_f32", "relu_f32", "relu_backward_f32",
-        "scalar_add_f32", "scalar_mul_f32", "scalar_div_f32", "scalar_powf_f32",
-        "copy_compact_f32", "copy_compact_u32",
-        "add_f32", "sub_f32", "mul_f32", "div_f32", "pow_f32", "eq_f32",
-        "reduce_sum_f32", "reduce_max_f32",
-        "matmul_f32", "gather_f32", "scatter_f32",
+        "neg_f32",
+        "exp_f32",
+        "log_f32",
+        "tanh_f32",
+        "relu_f32",
+        "relu_backward_f32",
+        "scalar_add_f32",
+        "scalar_mul_f32",
+        "scalar_div_f32",
+        "scalar_powf_f32",
+        "copy_compact_f32",
+        "copy_compact_u32",
+        "add_f32",
+        "sub_f32",
+        "mul_f32",
+        "div_f32",
+        "pow_f32",
+        "eq_f32",
+        "reduce_sum_f32",
+        "reduce_max_f32",
+        "matmul_f32",
+        "gather_f32",
+        "scatter_f32",
     ];
 
     #[derive(Debug)]
@@ -479,6 +496,7 @@ mod imp {
                 "Neg" => Some("neg_f32"),
                 "exp" => Some("exp_f32"),
                 "log" => Some("log_f32"),
+                "tanh" => Some("tanh_f32"),
                 "relu" => Some("relu_f32"),
                 "relu_backward" => Some("relu_backward_f32"),
                 _ => None,

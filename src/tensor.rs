@@ -503,10 +503,9 @@ impl Tensor {
         &one / &denom
     }
 
-    /// Element-wise tanh: `(exp(2x) - 1) / (exp(2x) + 1)`.
+    /// Element-wise tanh.
     pub fn tanh(&self) -> Tensor {
-        let e2x = (self * 2.0).exp();
-        (&e2x - 1.0) / (&e2x + 1.0)
+        ops::Tanh::new(self.clone()).unwrap().forward().unwrap()
     }
 
     /// Numerically stable softmax along the given axis.
