@@ -39,9 +39,25 @@ struct MatmulMeta {
     uint batch;
 };
 
-struct GatherMeta {
-    uint rows;
-    uint cols;
+struct GatherScatterMeta {
+    uint left_len;
+    uint src_dim;
+    uint dst_dim;
+    uint right_len;
+};
+
+struct IndexSelectMeta {
+    uint left_len;
+    uint index_len;
+    uint src_dim;
+    uint right_len;
+};
+
+struct IndexAddMeta {
+    uint left_len;
+    uint src_dim;
+    uint dst_dim;
+    uint right_len;
 };
 
 // --- Strided indexing ---
@@ -627,50 +643,83 @@ kernel void gather_f16(
     device const half* input [[buffer(0)]],
     device const long* indices [[buffer(1)]],
     device half* output [[buffer(2)]],
-    constant GatherMeta& meta [[buffer(3)]],
-    uint id [[thread_position_in_grid]]
+    constant GatherScatterMeta& meta [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
 ) {
-    if (id >= meta.rows) return;
-    output[id] = input[id * meta.cols + uint(indices[id])];
+    uint row = gid.y;
+    uint right = gid.x;
+    if (row >= meta.left_len * meta.dst_dim || right >= meta.right_len) return;
+
+    uint left = row / meta.dst_dim;
+    uint dst_i = row % meta.dst_dim;
+    uint ids_offset = (left * meta.dst_dim + dst_i) * meta.right_len + right;
+    uint src_i = uint(indices[ids_offset]);
+    output[ids_offset] = input[(left * meta.src_dim + src_i) * meta.right_len + right];
 }
 
 kernel void gather_f32(
     device const float* input [[buffer(0)]],
     device const long* indices [[buffer(1)]],
     device float* output [[buffer(2)]],
-    constant GatherMeta& meta [[buffer(3)]],
-    uint id [[thread_position_in_grid]]
+    constant GatherScatterMeta& meta [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
 ) {
-    if (id >= meta.rows) return;
-    output[id] = input[id * meta.cols + uint(indices[id])];
+    uint row = gid.y;
+    uint right = gid.x;
+    if (row >= meta.left_len * meta.dst_dim || right >= meta.right_len) return;
+
+    uint left = row / meta.dst_dim;
+    uint dst_i = row % meta.dst_dim;
+    uint ids_offset = (left * meta.dst_dim + dst_i) * meta.right_len + right;
+    uint src_i = uint(indices[ids_offset]);
+    output[ids_offset] = input[(left * meta.src_dim + src_i) * meta.right_len + right];
 }
 
-kernel void scatter_f16(
+kernel void scatter_add_f16(
     device const half* input [[buffer(0)]],
     device const long* indices [[buffer(1)]],
     device half* output [[buffer(2)]],
-    constant GatherMeta& meta [[buffer(3)]],
-    uint id [[thread_position_in_grid]]
+    constant GatherScatterMeta& meta [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
 ) {
-    if (id >= meta.rows) return;
-    output[id * meta.cols + uint(indices[id])] = input[id];
+    uint row = gid.y;
+    uint right = gid.x;
+    if (row >= meta.left_len * meta.dst_dim || right >= meta.right_len) return;
+
+    uint left = row / meta.dst_dim;
+    uint dst_i = row % meta.dst_dim;
+    half acc = half(0.0h);
+    for (uint src_i = 0; src_i < meta.src_dim; src_i++) {
+        uint src_offset = (left * meta.src_dim + src_i) * meta.right_len + right;
+        if (uint(indices[src_offset]) == dst_i) {
+            acc += input[src_offset];
+        }
+    }
+    output[(left * meta.dst_dim + dst_i) * meta.right_len + right] = acc;
 }
 
-kernel void scatter_f32(
+kernel void scatter_add_f32(
     device const float* input [[buffer(0)]],
     device const long* indices [[buffer(1)]],
     device float* output [[buffer(2)]],
-    constant GatherMeta& meta [[buffer(3)]],
-    uint id [[thread_position_in_grid]]
+    constant GatherScatterMeta& meta [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
 ) {
-    if (id >= meta.rows) return;
-    output[id * meta.cols + uint(indices[id])] = input[id];
-}
+    uint row = gid.y;
+    uint right = gid.x;
+    if (row >= meta.left_len * meta.dst_dim || right >= meta.right_len) return;
 
-struct IndexSelectMeta {
-    uint num_indices;
-    uint cols;
-};
+    uint left = row / meta.dst_dim;
+    uint dst_i = row % meta.dst_dim;
+    float acc = 0.0f;
+    for (uint src_i = 0; src_i < meta.src_dim; src_i++) {
+        uint src_offset = (left * meta.src_dim + src_i) * meta.right_len + right;
+        if (uint(indices[src_offset]) == dst_i) {
+            acc += input[src_offset];
+        }
+    }
+    output[(left * meta.dst_dim + dst_i) * meta.right_len + right] = acc;
+}
 
 kernel void index_select_f16(
     device const half* input [[buffer(0)]],
@@ -680,9 +729,13 @@ kernel void index_select_f16(
     uint2 gid [[thread_position_in_grid]]
 ) {
     uint row = gid.y;
-    uint col = gid.x;
-    if (row >= meta.num_indices || col >= meta.cols) return;
-    output[row * meta.cols + col] = input[uint(indices[row]) * meta.cols + col];
+    uint right = gid.x;
+    if (row >= meta.left_len * meta.index_len || right >= meta.right_len) return;
+    uint left = row / meta.index_len;
+    uint index_i = row % meta.index_len;
+    uint src_i = uint(indices[index_i]);
+    output[(left * meta.index_len + index_i) * meta.right_len + right] =
+        input[(left * meta.src_dim + src_i) * meta.right_len + right];
 }
 
 kernel void index_select_f32(
@@ -693,7 +746,55 @@ kernel void index_select_f32(
     uint2 gid [[thread_position_in_grid]]
 ) {
     uint row = gid.y;
-    uint col = gid.x;
-    if (row >= meta.num_indices || col >= meta.cols) return;
-    output[row * meta.cols + col] = input[uint(indices[row]) * meta.cols + col];
+    uint right = gid.x;
+    if (row >= meta.left_len * meta.index_len || right >= meta.right_len) return;
+    uint left = row / meta.index_len;
+    uint index_i = row % meta.index_len;
+    uint src_i = uint(indices[index_i]);
+    output[(left * meta.index_len + index_i) * meta.right_len + right] =
+        input[(left * meta.src_dim + src_i) * meta.right_len + right];
+}
+
+kernel void index_add_f16(
+    device const half* input [[buffer(0)]],
+    device const long* indices [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant IndexAddMeta& meta [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint right = gid.x;
+    if (row >= meta.left_len * meta.dst_dim || right >= meta.right_len) return;
+
+    uint left = row / meta.dst_dim;
+    uint dst_i = row % meta.dst_dim;
+    half acc = half(0.0h);
+    for (uint src_i = 0; src_i < meta.src_dim; src_i++) {
+        if (uint(indices[src_i]) == dst_i) {
+            acc += input[(left * meta.src_dim + src_i) * meta.right_len + right];
+        }
+    }
+    output[(left * meta.dst_dim + dst_i) * meta.right_len + right] = acc;
+}
+
+kernel void index_add_f32(
+    device const float* input [[buffer(0)]],
+    device const long* indices [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant IndexAddMeta& meta [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint row = gid.y;
+    uint right = gid.x;
+    if (row >= meta.left_len * meta.dst_dim || right >= meta.right_len) return;
+
+    uint left = row / meta.dst_dim;
+    uint dst_i = row % meta.dst_dim;
+    float acc = 0.0f;
+    for (uint src_i = 0; src_i < meta.src_dim; src_i++) {
+        if (uint(indices[src_i]) == dst_i) {
+            acc += input[(left * meta.src_dim + src_i) * meta.right_len + right];
+        }
+    }
+    output[(left * meta.dst_dim + dst_i) * meta.right_len + right] = acc;
 }

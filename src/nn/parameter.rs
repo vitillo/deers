@@ -1,8 +1,8 @@
 use std::ops::Deref;
 
+use crate::Device;
 use crate::error::Result;
 use crate::tensor::Tensor;
-use crate::Device;
 
 /// A mutable handle to a tensor whose value the optimizer can update.
 ///

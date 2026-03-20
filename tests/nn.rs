@@ -11,7 +11,7 @@ fn test_linear_forward() {
 }
 
 #[test]
- fn test_linear_parameters() {
+fn test_linear_parameters() {
     let linear = nn::Linear::new(4, 3);
     let parameters = linear.parameters();
     assert_eq!(parameters.len(), 2); // weight + bias

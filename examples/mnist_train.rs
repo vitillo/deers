@@ -4,7 +4,7 @@ use std::{env, process};
 use deers::dataset::MNISTDataset;
 use deers::nn::{self, Module};
 use deers::optim::SGD;
-use deers::{loss, Device, Tensor};
+use deers::{Device, Tensor, loss};
 
 fn main() {
     let device = parse_device_arg();

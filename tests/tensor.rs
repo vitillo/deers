@@ -2239,7 +2239,7 @@ fn gather_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
-            let indices = Tensor::from_vec(indices.clone(), (2,), device);
+            let indices = Tensor::from_vec(indices.clone(), (2, 1), device);
             let output = input.gather(1, &indices);
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
@@ -2269,7 +2269,7 @@ fn gather_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
-            let indices = Tensor::from_vec(indices.clone(), (2,), device);
+            let indices = Tensor::from_vec(indices.clone(), (2, 1), device);
             let loss = input.gather(1, &indices).sum(vec![0, 1], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
@@ -2304,7 +2304,7 @@ fn index_select_forward_conforms() {
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (4, 3), device);
             let indices = Tensor::from_vec(indices.clone(), (3,), device);
-            let output = input.index_select(&indices);
+            let output = input.index_select(0, &indices);
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -2317,29 +2317,67 @@ fn index_select_forward_conforms() {
 }
 
 #[test]
-fn index_select_backward_is_not_implemented() {
+fn index_select_forward_dim_conforms() {
     // Arrange
-    let data = vec![10.0f32, 11.0, 12.0, 20.0, 21.0, 22.0, 30.0, 31.0, 32.0, 40.0, 41.0, 42.0];
-    let indices = vec![2i64, 0, 3];
+    let data = vec![
+        1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, //
+        7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+    ];
+    let indices = vec![2i64, 0];
+    let candle_input = CTensor::from_vec(data.clone(), &[2, 2, 3], &CDevice::Cpu).unwrap();
+    let candle_indices = CTensor::from_vec(indices.clone(), &[2], &CDevice::Cpu).unwrap();
+    let expected = candle_input
+        .index_select(&candle_indices, 2)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
 
     // Act
-    let results: Vec<(Device, String)> = devices()
+    let results: Vec<(Device, Vec<f32>)> = devices()
         .into_iter()
         .map(|device| {
-            let input = Tensor::from_vec(data.clone(), (4, 3), device).attach();
-            let indices = Tensor::from_vec(indices.clone(), (3,), device);
-            let result = input.index_select(&indices).sum(vec![0, 1], false).backward();
-            (device, format!("{:?}", result.unwrap_err()))
+            let input = Tensor::from_vec(data.clone(), (2, 2, 3), device);
+            let indices = Tensor::from_vec(indices.clone(), (2,), device);
+            let output = input.index_select(2, &indices);
+            let values = output.to_vec::<f32>().unwrap();
+            (device, values)
         })
         .collect();
 
     // Assert
-    for (device, error) in results {
-        assert!(
-            error.contains("NotImplemented"),
-            "index_select backward on {:?}: {}",
-            device,
-            error
+    for (device, actual) in results {
+        assert_close(&actual, &expected, &format!("index_select forward on {:?}", device));
+    }
+}
+
+#[test]
+fn index_select_backward_conforms() {
+    // Arrange
+    let data = vec![10.0f32, 11.0, 12.0, 20.0, 21.0, 22.0, 30.0, 31.0, 32.0, 40.0, 41.0, 42.0];
+    let indices = vec![2i64, 0, 2];
+    let expected_grad = vec![1.0f32, 1.0, 1.0, 0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 0.0, 0.0, 0.0];
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (4, 3), device).attach();
+            let indices = Tensor::from_vec(indices.clone(), (3,), device);
+            let loss = input.index_select(0, &indices).sum(vec![0, 1], false);
+            let grads = loss.backward().unwrap();
+            let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
+            (device, grad)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual_grad) in results {
+        assert_close(
+            &actual_grad,
+            &expected_grad,
+            &format!("index_select backward on {:?}", device),
         );
     }
 }

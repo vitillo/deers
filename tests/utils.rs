@@ -7,11 +7,12 @@ pub trait Approx {
 
 impl Approx for Vec<f16> {
     fn assert_approx_eq(arg1: impl AsRef<Self>, arg2: impl AsRef<Self>) {
-        assert!(arg1
-            .as_ref()
-            .iter()
-            .zip(arg2.as_ref().iter())
-            .all(|(a, b)| { (a.to_f32() - b.to_f32()).abs() < 1e-2 }))
+        assert!(
+            arg1.as_ref()
+                .iter()
+                .zip(arg2.as_ref().iter())
+                .all(|(a, b)| { (a.to_f32() - b.to_f32()).abs() < 1e-2 })
+        )
     }
 }
 

@@ -33,6 +33,7 @@ DEERS is a minimal PyTorch clone in Rust for learning. Optimize for readability 
 - Explain the reasoning behind design choices, not just the diff.
 - When multiple valid approaches exist, present the options and tradeoffs.
 - Don’t preserve awkward code just to preserve old tests; update tests when the design improves.
+- Before adding a tensor/autograd fallback, check whether it forces CPU <-> accelerator copies on MPS. If the op already lives at storage level, prefer keeping the fallback there or explicitly call out the backend cost.
 
 ## Testing
 
