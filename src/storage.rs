@@ -460,7 +460,7 @@ impl Storage {
                         _ => panic!("mixed devices in cat"),
                     })
                     .collect();
-                Ok(Storage::Cpu(CpuStorage::cat(&cpu_parts)))
+                Ok(Storage::Cpu(CpuStorage::cat(&cpu_parts)?))
             }
             Storage::Mps(_) => {
                 let mps_parts: Vec<_> = parts

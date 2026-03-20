@@ -5,7 +5,7 @@ use half::f16;
 use crate::{
     device::Device,
     dtype::{DType, WithDType},
-    error::Result,
+    error::{Error, Result},
     layout::Layout,
     storage::{BackendStorage, BinaryOp, MpsStorage, Storage, UnaryOp},
 };
@@ -42,39 +42,48 @@ impl CpuStorage {
     }
 
     /// Concatenates compact storages. Each pair is (storage, num_elements).
-    pub fn cat(parts: &[(&CpuStorage, usize)]) -> CpuStorage {
-        assert!(!parts.is_empty());
+    pub fn cat(parts: &[(&CpuStorage, usize)]) -> Result<CpuStorage> {
+        if parts.is_empty() {
+            return Err(Error::LayoutMismatch("cat: empty parts".into()));
+        }
+        let expected = parts[0].0.dtype();
         let total_len: usize = parts.iter().map(|(_, len)| *len).sum();
-        match &parts[0].0 {
-            CpuStorage::F16(_) => {
-                let mut data = Vec::with_capacity(total_len);
-                for (storage, _) in parts {
-                    match storage {
-                        CpuStorage::F16(v) => data.extend_from_slice(v),
-                        _ => panic!("dtype mismatch in cat"),
-                    }
-                }
-                CpuStorage::F16(data)
+        for (storage, _) in &parts[1..] {
+            if storage.dtype() != expected {
+                return Err(Error::DTypeMismatch(format!(
+                    "cat: expected {:?} but got {:?}",
+                    expected,
+                    storage.dtype()
+                )));
             }
-            CpuStorage::F32(_) => {
+        }
+        match expected {
+            DType::F16 => {
                 let mut data = Vec::with_capacity(total_len);
                 for (storage, _) in parts {
-                    match storage {
-                        CpuStorage::F32(v) => data.extend_from_slice(v),
-                        _ => panic!("dtype mismatch in cat"),
+                    if let CpuStorage::F16(v) = storage {
+                        data.extend_from_slice(v);
                     }
                 }
-                CpuStorage::F32(data)
+                Ok(CpuStorage::F16(data))
             }
-            CpuStorage::I64(_) => {
+            DType::F32 => {
                 let mut data = Vec::with_capacity(total_len);
                 for (storage, _) in parts {
-                    match storage {
-                        CpuStorage::I64(v) => data.extend_from_slice(v),
-                        _ => panic!("dtype mismatch in cat"),
+                    if let CpuStorage::F32(v) = storage {
+                        data.extend_from_slice(v);
                     }
                 }
-                CpuStorage::I64(data)
+                Ok(CpuStorage::F32(data))
+            }
+            DType::I64 => {
+                let mut data = Vec::with_capacity(total_len);
+                for (storage, _) in parts {
+                    if let CpuStorage::I64(v) = storage {
+                        data.extend_from_slice(v);
+                    }
+                }
+                Ok(CpuStorage::I64(data))
             }
         }
     }
@@ -114,14 +123,21 @@ impl CpuStorage {
         }
     }
 
-    fn compact_indices(indices: &CpuStorage, layout: &Layout) -> Vec<usize> {
+    fn compact_indices(indices: &CpuStorage, layout: &Layout) -> Result<Vec<usize>> {
         match indices {
-            CpuStorage::I64(_) => indices
-                .to_vec::<i64>(layout)
-                .into_iter()
-                .map(|v| usize::try_from(v).expect("indices must be non-negative"))
-                .collect(),
-            _ => panic!("index tensor must be i64"),
+            CpuStorage::I64(_) => {
+                let mut out = Vec::with_capacity(layout.size());
+                for v in indices.to_vec::<i64>(layout) {
+                    let idx = usize::try_from(v)
+                        .map_err(|_| Error::IndexOutOfBounds(format!("index {} is negative", v)))?;
+                    out.push(idx);
+                }
+                Ok(out)
+            }
+            _ => Err(Error::DTypeMismatch(format!(
+                "index tensor must be i64, got {:?}",
+                indices.dtype()
+            ))),
         }
     }
 }
@@ -223,7 +239,11 @@ impl BackendStorage for CpuStorage {
                 (CpuStorage::F32(a), CpuStorage::F32(b)) => Ok(CpuStorage::F32(
                     a.iter().zip(b.iter()).map(|(a, b)| O::f32(*a, *b)).collect(),
                 )),
-                _ => unreachable!(),
+                (a, b) => Err(Error::DTypeMismatch(format!(
+                    "binary_op: {:?} vs {:?}",
+                    a.dtype(),
+                    b.dtype()
+                ))),
             };
         }
 
@@ -253,13 +273,25 @@ impl BackendStorage for CpuStorage {
                 );
                 Ok(CpuStorage::F32(out))
             }
-            _ => unreachable!(),
+            (a, b) => Err(Error::LayoutMismatch(format!(
+                "binary_op: dtype mismatch, {:?} vs {:?}",
+                a.dtype(),
+                b.dtype()
+            ))),
         }
     }
 
     fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
-        assert!(layout.is_compact());
-        assert_eq!(0, layout.size() % dst.len());
+        if !layout.is_compact() {
+            return Err(Error::LayoutMismatch("reduce: layout must be compact".into()));
+        }
+        if !layout.size().is_multiple_of(dst.len()) {
+            return Err(Error::LayoutMismatch(format!(
+                "reduce: source size {} not divisible by dst size {}",
+                layout.size(),
+                dst.len()
+            )));
+        }
 
         let reduce_size = layout.size() / dst.len();
         match (self, dst) {
@@ -273,7 +305,13 @@ impl BackendStorage for CpuStorage {
                     dst[i] = chunk.iter().copied().reduce(O::f32).unwrap();
                 }
             }
-            _ => unreachable!(),
+            (src, dst) => {
+                return Err(Error::DTypeMismatch(format!(
+                    "reduce: {:?} vs {:?}",
+                    src.dtype(),
+                    dst.dtype()
+                )));
+            }
         }
 
         Ok(())
@@ -306,7 +344,13 @@ impl BackendStorage for CpuStorage {
             (CpuStorage::I64(src), CpuStorage::I64(dst)) => {
                 copy_strided(src, dst, offset, &shape, &strides)
             }
-            _ => unreachable!(),
+            (src, dst) => {
+                return Err(Error::DTypeMismatch(format!(
+                    "copy_compact: {:?} vs {:?}",
+                    src.dtype(),
+                    dst.dtype()
+                )));
+            }
         }
 
         Ok(())
@@ -319,28 +363,50 @@ impl BackendStorage for CpuStorage {
         indices: &CpuStorage,
         indices_layout: &Layout,
     ) -> Result<Self> {
-        assert!(layout.is_compact());
-        assert!(indices_layout.is_compact());
-        assert_eq!(layout.ndim(), indices_layout.ndim(), "gather requires matching ranks");
-        assert!(dim < layout.ndim(), "gather dim out of bounds");
+        if !layout.is_compact() {
+            return Err(Error::LayoutMismatch("gather: source layout must be compact".into()));
+        }
+        if !indices_layout.is_compact() {
+            return Err(Error::LayoutMismatch("gather: indices layout must be compact".into()));
+        }
+        if layout.ndim() != indices_layout.ndim() {
+            return Err(Error::LayoutMismatch(format!(
+                "gather: rank mismatch, source has {} dims but indices has {}",
+                layout.ndim(),
+                indices_layout.ndim()
+            )));
+        }
+        if dim >= layout.ndim() {
+            return Err(Error::LayoutMismatch(format!(
+                "gather: dim {} out of bounds for {} dims",
+                dim,
+                layout.ndim()
+            )));
+        }
 
         let left_len: usize = indices_layout.shape().iter().take(dim).product();
         let index_len = indices_layout.shape()[dim];
         let right_len: usize = indices_layout.shape().iter().skip(dim + 1).product();
         let src_dim = layout.shape()[dim];
         for axis in 0..layout.ndim() {
-            if axis != dim {
-                assert_eq!(
+            if axis != dim && layout.shape()[axis] != indices_layout.shape()[axis] {
+                return Err(Error::LayoutMismatch(format!(
+                    "gather: shape mismatch at dim {}: {} vs {}",
+                    axis,
                     layout.shape()[axis],
-                    indices_layout.shape()[axis],
-                    "gather requires matching shapes outside the indexed dim"
-                );
+                    indices_layout.shape()[axis]
+                )));
             }
         }
 
-        let indices = Self::compact_indices(indices, indices_layout);
-        for idx in &indices {
-            assert!(*idx < src_dim, "gather index out of bounds");
+        let indices = Self::compact_indices(indices, indices_layout)?;
+        for &idx in &indices {
+            if idx >= src_dim {
+                return Err(Error::IndexOutOfBounds(format!(
+                    "gather: index {} out of bounds for dim size {}",
+                    idx, src_dim
+                )));
+            }
         }
 
         match self {
@@ -364,41 +430,68 @@ impl BackendStorage for CpuStorage {
         indices_layout: &Layout,
         dst_shape: &[usize],
     ) -> Result<Self> {
-        assert!(layout.is_compact());
-        assert!(indices_layout.is_compact());
-        assert_eq!(
-            layout.ndim(),
-            indices_layout.ndim(),
-            "scatter_add requires source and indices to have matching ranks"
-        );
-        assert_eq!(
-            layout.ndim(),
-            dst_shape.len(),
-            "scatter_add requires source and destination to have matching ranks"
-        );
-        assert!(dim < dst_shape.len(), "scatter_add dim out of bounds");
+        if !layout.is_compact() {
+            return Err(Error::LayoutMismatch("scatter_add: source layout must be compact".into()));
+        }
+        if !indices_layout.is_compact() {
+            return Err(Error::LayoutMismatch(
+                "scatter_add: indices layout must be compact".into(),
+            ));
+        }
+        if layout.ndim() != indices_layout.ndim() {
+            return Err(Error::LayoutMismatch(format!(
+                "scatter_add: rank mismatch, source has {} dims but indices has {}",
+                layout.ndim(),
+                indices_layout.ndim()
+            )));
+        }
+        if layout.ndim() != dst_shape.len() {
+            return Err(Error::LayoutMismatch(format!(
+                "scatter_add: rank mismatch, source has {} dims but destination has {}",
+                layout.ndim(),
+                dst_shape.len()
+            )));
+        }
+        if dim >= dst_shape.len() {
+            return Err(Error::LayoutMismatch(format!(
+                "scatter_add: dim {} out of bounds for {} dims",
+                dim,
+                dst_shape.len()
+            )));
+        }
 
         let left_len: usize = layout.shape().iter().take(dim).product();
         let index_len = layout.shape()[dim];
         let right_len: usize = layout.shape().iter().skip(dim + 1).product();
         let dst_dim = dst_shape[dim];
-        let indices = Self::compact_indices(indices, indices_layout);
+        let indices = Self::compact_indices(indices, indices_layout)?;
         for (axis, &dst_axis) in dst_shape.iter().enumerate().take(layout.ndim()) {
             if axis != dim {
-                assert_eq!(
-                    layout.shape()[axis],
-                    dst_axis,
-                    "scatter_add requires matching shapes outside the indexed dim"
-                );
-                assert_eq!(
-                    layout.shape()[axis],
-                    indices_layout.shape()[axis],
-                    "scatter_add requires source and indices to match outside the indexed dim"
-                );
+                if layout.shape()[axis] != dst_axis {
+                    return Err(Error::LayoutMismatch(format!(
+                        "scatter_add: shape mismatch at dim {}: source {} vs destination {}",
+                        axis,
+                        layout.shape()[axis],
+                        dst_axis
+                    )));
+                }
+                if layout.shape()[axis] != indices_layout.shape()[axis] {
+                    return Err(Error::LayoutMismatch(format!(
+                        "scatter_add: shape mismatch at dim {}: source {} vs indices {}",
+                        axis,
+                        layout.shape()[axis],
+                        indices_layout.shape()[axis]
+                    )));
+                }
             }
         }
-        for idx in &indices {
-            assert!(*idx < dst_dim, "scatter_add index out of bounds");
+        for &idx in &indices {
+            if idx >= dst_dim {
+                return Err(Error::IndexOutOfBounds(format!(
+                    "scatter_add: index {} out of bounds for dim size {}",
+                    idx, dst_dim
+                )));
+            }
         }
 
         match self {
@@ -427,17 +520,41 @@ impl BackendStorage for CpuStorage {
         indices: &Self,
         indices_layout: &Layout,
     ) -> Result<Self> {
-        assert!(layout.is_compact());
-        assert!(indices_layout.is_compact());
-        assert_eq!(indices_layout.ndim(), 1, "index_select requires 1D indices");
-        assert!(dim < layout.ndim(), "index_select dim out of bounds");
+        if !layout.is_compact() {
+            return Err(Error::LayoutMismatch(
+                "index_select: source layout must be compact".into(),
+            ));
+        }
+        if !indices_layout.is_compact() {
+            return Err(Error::LayoutMismatch(
+                "index_select: indices layout must be compact".into(),
+            ));
+        }
+        if indices_layout.ndim() != 1 {
+            return Err(Error::LayoutMismatch(format!(
+                "index_select: indices must be 1D, got {} dims",
+                indices_layout.ndim()
+            )));
+        }
+        if dim >= layout.ndim() {
+            return Err(Error::LayoutMismatch(format!(
+                "index_select: dim {} out of bounds for {} dims",
+                dim,
+                layout.ndim()
+            )));
+        }
 
-        let indices = Self::compact_indices(indices, indices_layout);
+        let indices = Self::compact_indices(indices, indices_layout)?;
         let left_len: usize = layout.shape().iter().take(dim).product();
         let src_dim = layout.shape()[dim];
         let right_len: usize = layout.shape().iter().skip(dim + 1).product();
-        for idx in &indices {
-            assert!(*idx < src_dim, "index_select index {} out of bounds ({})", idx, src_dim);
+        for &idx in &indices {
+            if idx >= src_dim {
+                return Err(Error::IndexOutOfBounds(format!(
+                    "index_select: index {} out of bounds for dim size {}",
+                    idx, src_dim
+                )));
+            }
         }
 
         match self {
@@ -461,29 +578,53 @@ impl BackendStorage for CpuStorage {
         indices_layout: &Layout,
         dst_shape: &[usize],
     ) -> Result<Self> {
-        assert!(layout.is_compact());
-        assert!(indices_layout.is_compact());
-        assert_eq!(indices_layout.ndim(), 1, "index_add requires 1D indices");
-        assert!(dim < dst_shape.len(), "index_add dim out of bounds");
+        if !layout.is_compact() {
+            return Err(Error::LayoutMismatch("index_add: source layout must be compact".into()));
+        }
+        if !indices_layout.is_compact() {
+            return Err(Error::LayoutMismatch("index_add: indices layout must be compact".into()));
+        }
+        if indices_layout.ndim() != 1 {
+            return Err(Error::LayoutMismatch(format!(
+                "index_add: indices must be 1D, got {} dims",
+                indices_layout.ndim()
+            )));
+        }
+        if dim >= dst_shape.len() {
+            return Err(Error::LayoutMismatch(format!(
+                "index_add: dim {} out of bounds for {} dims",
+                dim,
+                dst_shape.len()
+            )));
+        }
 
-        let indices = Self::compact_indices(indices, indices_layout);
+        let indices = Self::compact_indices(indices, indices_layout)?;
         let left_len: usize = dst_shape[..dim].iter().product();
         let dst_dim = dst_shape[dim];
         let right_len: usize = dst_shape[(dim + 1)..].iter().product();
         let src_dim = layout.shape()[dim];
 
-        assert_eq!(
-            src_dim,
-            indices.len(),
-            "index_add source length along dim must match indices length"
-        );
-        assert_eq!(
-            layout.size(),
-            left_len * src_dim * right_len,
-            "index_add source shape must match destination outside indexed dim"
-        );
-        for idx in &indices {
-            assert!(*idx < dst_dim, "index_add index {} out of bounds ({})", idx, dst_dim);
+        if src_dim != indices.len() {
+            return Err(Error::LayoutMismatch(format!(
+                "index_add: source length along dim is {} but indices length is {}",
+                src_dim,
+                indices.len()
+            )));
+        }
+        if layout.size() != left_len * src_dim * right_len {
+            return Err(Error::LayoutMismatch(format!(
+                "index_add: source size {} doesn't match destination shape outside indexed dim ({})",
+                layout.size(),
+                left_len * src_dim * right_len
+            )));
+        }
+        for &idx in &indices {
+            if idx >= dst_dim {
+                return Err(Error::IndexOutOfBounds(format!(
+                    "index_add: index {} out of bounds for dim size {}",
+                    idx, dst_dim
+                )));
+            }
         }
 
         match self {
@@ -506,7 +647,12 @@ impl BackendStorage for CpuStorage {
     }
 
     fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self> {
-        assert!(layout.is_compact() && layout_other.is_compact());
+        if !layout.is_compact() {
+            return Err(Error::LayoutMismatch("matmul: left layout must be compact".into()));
+        }
+        if !layout_other.is_compact() {
+            return Err(Error::LayoutMismatch("matmul: right layout must be compact".into()));
+        }
         let ndim = layout.shape.ndim();
         let k = layout.shape[ndim - 1];
         let m = layout.shape[ndim - 2];
@@ -549,7 +695,9 @@ impl BackendStorage for CpuStorage {
                 }
                 Ok(CpuStorage::F32(out))
             }
-            _ => todo!("matmul only supports floating tensors"),
+            (a, b) => {
+                Err(Error::DTypeMismatch(format!("matmul: {:?} vs {:?}", a.dtype(), b.dtype())))
+            }
         }
     }
 }
