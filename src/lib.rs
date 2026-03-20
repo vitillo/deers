@@ -11,6 +11,7 @@ mod dtype;
 mod error;
 mod layout;
 pub mod loss;
+pub mod models;
 pub mod nn;
 mod ops;
 pub mod optim;
