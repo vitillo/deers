@@ -131,10 +131,10 @@ fn test_embedding_mps() {
 #[test]
 fn test_causal_self_attention_shape() {
     // Arrange
-    let attn = nn::CausalSelfAttention::new(4, 2);
+    let attn = deers::models::gpt::CausalSelfAttention::new(4, 2);
     let x = Tensor::from_vec(vec![1.0f32; 24], (2, 3, 4), Device::Cpu);
     let (cos, sin) =
-        nn::functional::precompute_rotary_embeddings(3, 2, 10_000.0, DType::F32, Device::Cpu);
+        deers::models::gpt::precompute_rotary_embeddings(3, 2, 10_000.0, DType::F32, Device::Cpu);
 
     // Act
     let out = attn.forward(&x, &cos, &sin).unwrap();
@@ -146,7 +146,7 @@ fn test_causal_self_attention_shape() {
 #[test]
 fn test_causal_self_attention_parameters() {
     // Arrange
-    let attn = nn::CausalSelfAttention::new(4, 2);
+    let attn = deers::models::gpt::CausalSelfAttention::new(4, 2);
 
     // Act
     let parameters = attn.parameters();
@@ -158,7 +158,7 @@ fn test_causal_self_attention_parameters() {
 #[test]
 fn test_causal_self_attention_to_device() {
     // Arrange
-    let attn = nn::CausalSelfAttention::new(4, 2);
+    let attn = deers::models::gpt::CausalSelfAttention::new(4, 2);
 
     // Act
     attn.to_device(Device::Mps).unwrap();
@@ -170,9 +170,9 @@ fn test_causal_self_attention_to_device() {
 #[test]
 fn test_causal_self_attention_is_causal() {
     // Arrange
-    let attn = nn::CausalSelfAttention::new(4, 2);
+    let attn = deers::models::gpt::CausalSelfAttention::new(4, 2);
     let (cos, sin) =
-        nn::functional::precompute_rotary_embeddings(3, 2, 10_000.0, DType::F32, Device::Cpu);
+        deers::models::gpt::precompute_rotary_embeddings(3, 2, 10_000.0, DType::F32, Device::Cpu);
     let x1 = Tensor::from_vec(
         vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
         (1, 3, 4),
@@ -190,6 +190,43 @@ fn test_causal_self_attention_is_causal() {
 
     // Assert
     assert_eq!(&y1[0..4], &y2[0..4]);
+}
+
+#[test]
+fn test_mlp_shape() {
+    // Arrange
+    let mlp = deers::models::gpt::MLP::new(4, 8);
+    let x = Tensor::from_vec(vec![1.0f32; 24], (2, 3, 4), Device::Cpu);
+
+    // Act
+    let out = mlp.forward(&x).unwrap();
+
+    // Assert
+    assert_eq!(out.layout().shape, (2, 3, 4).into());
+}
+
+#[test]
+fn test_mlp_parameters() {
+    // Arrange
+    let mlp = deers::models::gpt::MLP::new(4, 8);
+
+    // Act
+    let parameters = mlp.parameters();
+
+    // Assert
+    assert_eq!(parameters.len(), 2);
+}
+
+#[test]
+fn test_mlp_to_device() {
+    // Arrange
+    let mlp = deers::models::gpt::MLP::new(4, 8);
+
+    // Act
+    mlp.to_device(Device::Mps).unwrap();
+
+    // Assert
+    assert!(mlp.parameters().iter().all(|parameter| parameter.device() == Device::Mps));
 }
 
 #[test]
@@ -229,7 +266,7 @@ fn test_precompute_rotary_embeddings_shape() {
     let head_dim = 4;
 
     // Act
-    let (cos, sin) = nn::functional::precompute_rotary_embeddings(
+    let (cos, sin) = deers::models::gpt::precompute_rotary_embeddings(
         seq_len,
         head_dim,
         10_000.0,
@@ -249,7 +286,7 @@ fn test_precompute_rotary_embeddings_values() {
     let head_dim = 4;
 
     // Act
-    let (cos, sin) = nn::functional::precompute_rotary_embeddings(
+    let (cos, sin) = deers::models::gpt::precompute_rotary_embeddings(
         seq_len,
         head_dim,
         10_000.0,
@@ -279,7 +316,7 @@ fn test_apply_rotary_emb() {
     let sin = Tensor::from_vec(vec![0.75f32, 1.0], vec![1, 1, 1, 2], Device::Cpu);
 
     // Act
-    let out = nn::functional::apply_rotary_emb(&x, &cos, &sin);
+    let out = deers::models::gpt::apply_rotary_emb(&x, &cos, &sin);
     let values = out.to_vec::<f32>().unwrap();
 
     // Assert
