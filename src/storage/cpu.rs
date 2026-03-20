@@ -79,7 +79,16 @@ impl CpuStorage {
         }
     }
 
-    fn gemm_f16(left: &[f16], right: &[f16], out: &mut [f16], m: usize, n: usize, p: usize) {
+    fn gemm<T: 'static>(
+        left: &[T],
+        right: &[T],
+        out: &mut [T],
+        m: usize,
+        n: usize,
+        p: usize,
+        alpha: T,
+        beta: T,
+    ) {
         unsafe {
             gemm::gemm(
                 m,
@@ -95,34 +104,8 @@ impl CpuStorage {
                 right.as_ptr(),
                 1,
                 p as isize,
-                f16::from_f32(0.0),
-                f16::from_f32(1.0),
-                false,
-                false,
-                false,
-                gemm::Parallelism::Rayon(0),
-            );
-        }
-    }
-
-    fn gemm_f32(left: &[f32], right: &[f32], out: &mut [f32], m: usize, n: usize, p: usize) {
-        unsafe {
-            gemm::gemm(
-                m,
-                p,
-                n,
-                out.as_mut_ptr(),
-                1,
-                p as isize,
-                false,
-                left.as_ptr(),
-                1,
-                n as isize,
-                right.as_ptr(),
-                1,
-                p as isize,
-                0.0,
-                1.0,
+                alpha,
+                beta,
                 false,
                 false,
                 false,
@@ -176,12 +159,12 @@ impl BackendStorage for CpuStorage {
             };
         }
 
-        let shape: Vec<usize> = l.shape().iter().copied().collect();
-        let strides: Vec<isize> = l.strides().iter().copied().collect();
+        let shape = l.shape().as_slice();
+        let strides = &l.strides.0;
         match self {
             CpuStorage::F16(data) => {
                 let mut out = vec![f16::from_f32(0.0); l.size()];
-                strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| {
+                strided_unary_op(data, l.offset, strides, &mut out, shape, |v| {
                     f16::from_f32(v.to_f32().powf(e as f32))
                 });
                 Ok(CpuStorage::F16(out))
@@ -189,7 +172,7 @@ impl BackendStorage for CpuStorage {
             CpuStorage::F32(data) => {
                 let e = e as f32;
                 let mut out = vec![0.0f32; l.size()];
-                strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| v.powf(e));
+                strided_unary_op(data, l.offset, strides, &mut out, shape, |v| v.powf(e));
                 Ok(CpuStorage::F32(out))
             }
             CpuStorage::I64(_) => todo!(),
@@ -209,17 +192,17 @@ impl BackendStorage for CpuStorage {
             };
         }
 
-        let shape: Vec<usize> = l.shape().iter().copied().collect();
-        let strides: Vec<isize> = l.strides().iter().copied().collect();
+        let shape = l.shape().as_slice();
+        let strides = &l.strides.0;
         match self {
             CpuStorage::F16(data) => {
                 let mut out = vec![f16::from_f32(0.0); l.size()];
-                strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| op.f16(v));
+                strided_unary_op(data, l.offset, strides, &mut out, shape, |v| op.f16(v));
                 Ok(CpuStorage::F16(out))
             }
             CpuStorage::F32(data) => {
                 let mut out = vec![0.0f32; l.size()];
-                strided_unary_op(data, l.offset, &strides, &mut out, &shape, |v| op.f32(v));
+                strided_unary_op(data, l.offset, strides, &mut out, shape, |v| op.f32(v));
                 Ok(CpuStorage::F32(out))
             }
             CpuStorage::I64(_) => todo!(),
@@ -244,17 +227,17 @@ impl BackendStorage for CpuStorage {
             };
         }
 
-        let shape: Vec<usize> = layout.shape().iter().copied().collect();
-        let a_strides: Vec<isize> = layout.strides().iter().copied().collect();
-        let b_strides: Vec<isize> = other_layout.strides().iter().copied().collect();
+        let shape = layout.shape().as_slice();
+        let a_strides = &layout.strides.0;
+        let b_strides = &other_layout.strides.0;
         match (self, other) {
             (CpuStorage::F16(a), CpuStorage::F16(b)) => {
                 let mut out = vec![f16::from_f32(0.0); layout.size()];
                 strided_binary_op(
-                    StridedSlice { data: a, offset: layout.offset, strides: &a_strides },
-                    StridedSlice { data: b, offset: other_layout.offset, strides: &b_strides },
+                    StridedSlice { data: a, offset: layout.offset, strides: a_strides },
+                    StridedSlice { data: b, offset: other_layout.offset, strides: b_strides },
                     &mut out,
-                    &shape,
+                    shape,
                     O::f16,
                 );
                 Ok(CpuStorage::F16(out))
@@ -262,10 +245,10 @@ impl BackendStorage for CpuStorage {
             (CpuStorage::F32(a), CpuStorage::F32(b)) => {
                 let mut out = vec![0.0f32; layout.size()];
                 strided_binary_op(
-                    StridedSlice { data: a, offset: layout.offset, strides: &a_strides },
-                    StridedSlice { data: b, offset: other_layout.offset, strides: &b_strides },
+                    StridedSlice { data: a, offset: layout.offset, strides: a_strides },
+                    StridedSlice { data: b, offset: other_layout.offset, strides: b_strides },
                     &mut out,
-                    &shape,
+                    shape,
                     O::f32,
                 );
                 Ok(CpuStorage::F32(out))
@@ -459,16 +442,13 @@ impl BackendStorage for CpuStorage {
 
         match self {
             CpuStorage::F16(data) => {
-                let out = index_select_into(data, left_len, src_dim, right_len, &indices);
-                Ok(CpuStorage::F16(out))
+                Ok(CpuStorage::F16(index_select_into(data, left_len, src_dim, right_len, &indices)))
             }
             CpuStorage::F32(data) => {
-                let out = index_select_into(data, left_len, src_dim, right_len, &indices);
-                Ok(CpuStorage::F32(out))
+                Ok(CpuStorage::F32(index_select_into(data, left_len, src_dim, right_len, &indices)))
             }
             CpuStorage::I64(data) => {
-                let out = index_select_into(data, left_len, src_dim, right_len, &indices);
-                Ok(CpuStorage::I64(out))
+                Ok(CpuStorage::I64(index_select_into(data, left_len, src_dim, right_len, &indices)))
             }
         }
     }
@@ -540,13 +520,15 @@ impl BackendStorage for CpuStorage {
             (CpuStorage::F16(left), CpuStorage::F16(right)) => {
                 let mut out = vec![f16::from_f32(0.0); batch * m * n];
                 for i in 0..batch {
-                    CpuStorage::gemm_f16(
+                    CpuStorage::gemm(
                         &left[i * a_skip..],
                         &right[i * b_skip..],
                         &mut out[i * c_skip..],
                         m,
                         k,
                         n,
+                        f16::from_f32(0.0),
+                        f16::from_f32(1.0),
                     );
                 }
                 Ok(CpuStorage::F16(out))
@@ -554,13 +536,15 @@ impl BackendStorage for CpuStorage {
             (CpuStorage::F32(left), CpuStorage::F32(right)) => {
                 let mut out = vec![0.0f32; batch * m * n];
                 for i in 0..batch {
-                    CpuStorage::gemm_f32(
+                    CpuStorage::gemm(
                         &left[i * a_skip..],
                         &right[i * b_skip..],
                         &mut out[i * c_skip..],
                         m,
                         k,
                         n,
+                        0.0f32,
+                        1.0f32,
                     );
                 }
                 Ok(CpuStorage::F32(out))
@@ -803,7 +787,6 @@ impl<'a, D: WithDType> Iter<'a, D> {
                 self.cursor[i] = 0;
             } else {
                 self.cursor[i] += 1;
-                assert!(self.cursor[i] < self.layout.shape[i]);
                 break;
             }
         }
