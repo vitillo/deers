@@ -37,6 +37,10 @@ impl Shape {
         self.shape.len()
     }
 
+    pub fn as_slice(&self) -> &[usize] {
+        &self.shape
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &usize> {
         self.shape.iter()
     }
