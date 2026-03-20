@@ -73,13 +73,14 @@ fn bench_deers(
     b2_data: &[f32],
     targets_i64: &[i64],
 ) {
-    use deers::{Tensor, Var};
+    use deers::nn::Parameter;
+    use deers::Tensor;
 
     let x = Tensor::from_vec(x_data.to_vec(), (batch_size, 784), device);
-    let w1 = Var::new(Tensor::from_vec(w1_data.to_vec(), (784, 128), device));
-    let b1 = Var::new(Tensor::from_vec(b1_data.to_vec(), (128,), device));
-    let w2 = Var::new(Tensor::from_vec(w2_data.to_vec(), (128, 10), device));
-    let b2 = Var::new(Tensor::from_vec(b2_data.to_vec(), (10,), device));
+    let w1 = Parameter::new(Tensor::from_vec(w1_data.to_vec(), (784, 128), device));
+    let b1 = Parameter::new(Tensor::from_vec(b1_data.to_vec(), (128,), device));
+    let w2 = Parameter::new(Tensor::from_vec(w2_data.to_vec(), (128, 10), device));
+    let b2 = Parameter::new(Tensor::from_vec(b2_data.to_vec(), (10,), device));
     let targets = Tensor::from_vec(targets_i64.to_vec(), (batch_size,), device);
 
     let h = (x.matmul(&w1) + &*b1).relu();

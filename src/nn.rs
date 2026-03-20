@@ -1,24 +1,25 @@
 //! Neural network modules: traits, layers, and composition.
 
 pub mod functional;
+pub mod parameter;
 
 use crate::error::Result;
 use crate::tensor::Tensor;
-use crate::var::Var;
 use crate::{DType, Device};
+pub use parameter::Parameter;
 
 /// A neural network layer or model.
 pub trait Module {
     fn forward(&self, x: &Tensor) -> Result<Tensor>;
 
-    /// Returns all trainable variables in this module.
-    fn vars(&self) -> Vec<Var> {
+    /// Returns all trainable parameters in this module.
+    fn parameters(&self) -> Vec<Parameter> {
         vec![]
     }
 
     fn to_device(&self, device: Device) -> Result<()> {
-        for var in self.vars() {
-            var.to_device(device)?;
+        for parameter in self.parameters() {
+            parameter.to_device(device)?;
         }
         Ok(())
     }
@@ -26,8 +27,8 @@ pub trait Module {
 
 /// Fully connected layer: `y = x @ weight` (+ optional bias).
 pub struct Linear {
-    weight: Var,
-    bias: Option<Var>,
+    weight: Parameter,
+    bias: Option<Parameter>,
 }
 
 impl Linear {
@@ -43,11 +44,13 @@ impl Linear {
 
     fn new_inner(in_features: usize, out_features: usize, bias: bool) -> Self {
         let k = 1.0 / (in_features as f64).sqrt();
-        let weight = Var::new(
+        let weight = Parameter::new(
             Tensor::rand((in_features, out_features), DType::F32, Device::Cpu) * 2.0 * k - k,
         );
         let bias = if bias {
-            Some(Var::new(Tensor::rand((out_features,), DType::F32, Device::Cpu) * 2.0 * k - k))
+            Some(Parameter::new(
+                Tensor::rand((out_features,), DType::F32, Device::Cpu) * 2.0 * k - k,
+            ))
         } else {
             None
         };
@@ -64,23 +67,24 @@ impl Module for Linear {
         }
     }
 
-    fn vars(&self) -> Vec<Var> {
-        let mut vars = vec![self.weight.clone()];
+    fn parameters(&self) -> Vec<Parameter> {
+        let mut parameters = vec![self.weight.clone()];
         if let Some(bias) = &self.bias {
-            vars.push(bias.clone());
+            parameters.push(bias.clone());
         }
-        vars
+        parameters
     }
 }
 
 /// Embedding lookup table: maps integer indices to dense vectors.
 pub struct Embedding {
-    weight: Var,
+    weight: Parameter,
 }
 
 impl Embedding {
     pub fn new(vocab_size: usize, hidden_size: usize) -> Self {
-        let weight = Var::new(Tensor::randn((vocab_size, hidden_size), DType::F32, Device::Cpu));
+        let weight =
+            Parameter::new(Tensor::randn((vocab_size, hidden_size), DType::F32, Device::Cpu));
         Self { weight }
     }
 }
@@ -95,20 +99,20 @@ impl Module for Embedding {
         Ok(selected.reshape(final_dims))
     }
 
-    fn vars(&self) -> Vec<Var> {
+    fn parameters(&self) -> Vec<Parameter> {
         vec![self.weight.clone()]
     }
 }
 
 /// RMSNorm: `x / sqrt(mean(x²) + eps) * weight`.
 pub struct RMSNorm {
-    weight: Var,
+    weight: Parameter,
     eps: f64,
 }
 
 impl RMSNorm {
     pub fn new(size: usize, eps: f64) -> Self {
-        let weight = Var::new(Tensor::ones(vec![size], DType::F32, Device::Cpu));
+        let weight = Parameter::new(Tensor::ones(vec![size], DType::F32, Device::Cpu));
         Self { weight, eps }
     }
 }
@@ -122,7 +126,7 @@ impl Module for RMSNorm {
         Ok(&normalized * &*self.weight)
     }
 
-    fn vars(&self) -> Vec<Var> {
+    fn parameters(&self) -> Vec<Parameter> {
         vec![self.weight.clone()]
     }
 }
@@ -158,8 +162,8 @@ impl Module for Sequential {
         Ok(out)
     }
 
-    fn vars(&self) -> Vec<Var> {
-        self.layers.iter().flat_map(|l| l.vars()).collect()
+    fn parameters(&self) -> Vec<Parameter> {
+        self.layers.iter().flat_map(|layer| layer.parameters()).collect()
     }
 }
 

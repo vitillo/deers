@@ -16,8 +16,6 @@ mod ops;
 pub mod optim;
 mod storage;
 mod tensor;
-mod var;
 pub use device::Device;
 pub use dtype::DType;
 pub use tensor::Tensor;
-pub use var::Var;

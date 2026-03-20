@@ -1,31 +1,31 @@
-//! Optimizers for updating trainable variables.
+//! Optimizers for updating trainable parameters.
 
 use crate::error::Result;
+use crate::nn::Parameter;
 use crate::tensor::Tensor;
-use crate::var::Var;
 
 /// Stochastic gradient descent optimizer.
 pub struct SGD {
-    vars: Vec<Var>,
+    parameters: Vec<Parameter>,
     lr: f64,
 }
 
 impl SGD {
-    pub fn new(vars: Vec<Var>, lr: f64) -> Self {
-        Self { vars, lr }
+    pub fn new(parameters: Vec<Parameter>, lr: f64) -> Self {
+        Self { parameters, lr }
     }
 
     pub fn set_lr(&mut self, lr: f64) {
         self.lr = lr;
     }
 
-    /// Runs backward on `loss`, then updates each variable: w = w - lr * grad.
+    /// Runs backward on `loss`, then updates each parameter: w = w - lr * grad.
     pub fn backward_step(&mut self, loss: &Tensor) -> Result<()> {
         let grads = loss.backward()?;
-        for var in &self.vars {
-            if let Some(grad) = grads.get(var.id()) {
-                let updated = (&**var - &(grad * self.lr)).attach();
-                var.set(&updated)?;
+        for parameter in &self.parameters {
+            if let Some(grad) = grads.get(parameter.id()) {
+                let updated = (&**parameter - &(grad * self.lr)).attach();
+                parameter.set(&updated)?;
             }
         }
         Ok(())
@@ -35,12 +35,13 @@ impl SGD {
 #[cfg(test)]
 mod tests {
     use super::SGD;
-    use crate::{Device, Tensor, Var};
+    use crate::nn::Parameter;
+    use crate::{Device, Tensor};
 
     #[test]
     fn test_sgd_step() {
         // Arrange
-        let x = Var::new(Tensor::from_vec(vec![0.0f32], (1,), Device::Cpu));
+        let x = Parameter::new(Tensor::from_vec(vec![0.0f32], (1,), Device::Cpu));
         let target = Tensor::from_vec(vec![3.0f32], (1,), Device::Cpu);
         let mut sgd = SGD::new(vec![x.clone()], 0.1);
 
@@ -57,7 +58,7 @@ mod tests {
     #[test]
     fn test_sgd_loss_decreases() {
         // Arrange
-        let x = Var::new(Tensor::from_vec(vec![0.0f32], (1,), Device::Cpu));
+        let x = Parameter::new(Tensor::from_vec(vec![0.0f32], (1,), Device::Cpu));
         let target = Tensor::from_vec(vec![3.0f32], (1,), Device::Cpu);
         let mut sgd = SGD::new(vec![x.clone()], 0.1);
         let mut losses = Vec::new();
@@ -78,7 +79,7 @@ mod tests {
     #[test]
     fn test_sgd_preserves_grad_tracking() {
         // Arrange
-        let x = Var::new(Tensor::from_vec(vec![1.0f32], (1,), Device::Cpu));
+        let x = Parameter::new(Tensor::from_vec(vec![1.0f32], (1,), Device::Cpu));
         let mut sgd = SGD::new(vec![x.clone()], 0.01);
 
         // Act

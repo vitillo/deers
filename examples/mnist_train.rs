@@ -26,10 +26,10 @@ fn main() {
 
     println!("Device: {device:?}");
     println!("Model: 784 -> 128 (relu) -> 10");
-    println!("Parameters: {} vars", model.vars().len());
+    println!("Parameters: {}", model.parameters().len());
 
     let lr = 0.1;
-    let mut sgd = SGD::new(model.vars(), lr);
+    let mut sgd = SGD::new(model.parameters(), lr);
     let batch_size = 256;
     let num_batches = 60000 / batch_size;
     let epochs = 3;
