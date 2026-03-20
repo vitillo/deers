@@ -14,6 +14,9 @@ pub enum Error {
     #[error("{0}")]
     NotImplemented(&'static str),
 
+    #[error("{0}")]
+    ShapeMismatch(String),
+
     #[error(transparent)]
     DatasetParseError(#[from] io::Error),
 }

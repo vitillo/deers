@@ -4,10 +4,39 @@ use std::sync::{Arc, RwLock};
 use std::{fmt, iter};
 
 use crate::backprop::GradientStore;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::layout::{Layout, Shape};
 use crate::storage::{self, BackendStorage, MpsStorage, ReduceMax, ReduceSum, Storage};
 use crate::tensor::Tensor;
+
+/// Computes the output shape for a reduction along the given axes.
+fn reduce_shape(shape: &Shape, axes: &[usize], keep_dims: bool) -> Shape {
+    if keep_dims {
+        shape
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| if axes.contains(&i) { 1 } else { v })
+            .collect::<Vec<usize>>()
+            .into()
+    } else {
+        shape
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| !axes.contains(&i))
+            .map(|(_, &dim)| dim)
+            .collect::<Vec<usize>>()
+            .into()
+    }
+}
+
+/// Prepares a tensor for reduction: permutes non-reduced axes first, then compacts.
+fn reduce_view(arg: &Tensor, axes: &[usize]) -> Tensor {
+    let permuted_dims: Vec<usize> = (0..arg.layout().ndim())
+        .filter(|i| !axes.contains(i))
+        .chain(axes.iter().copied())
+        .collect();
+    arg.permute(permuted_dims).compact()
+}
 
 /// An operator in the computation graph with forward and backward passes.
 ///
@@ -20,8 +49,8 @@ pub trait TensorOp: fmt::Debug + Send + Sync {
     fn forward(self) -> Result<Tensor>;
 
     /// Computes partial gradients for each input given the output gradient `out_grad`,
-    /// accumulating them in `store`.
-    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()>;
+    /// accumulating them in `grads`.
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()>;
 
     /// Returns references to the input tensors this op depends on.
     fn dependencies(&self) -> Vec<&Tensor>;
@@ -46,8 +75,8 @@ impl TensorOp for Neg {
         Ok(Tensor::new(storage, layout, false, Some(Box::new(self))))
     }
 
-    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let grad_sum = store.get_or_insert_zero(&self.arg);
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
         *grad_sum = &*grad_sum - out_grad;
         Ok(())
     }
@@ -85,11 +114,11 @@ impl TensorOp for EWiseAdd {
         ))
     }
 
-    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let grad_sum = store.get_or_insert_zero(&self.arg1);
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let grad_sum = grads.get_or_insert_zero(&self.arg1);
         *grad_sum = &*grad_sum + out_grad;
 
-        let grad_sum = store.get_or_insert_zero(&self.arg2);
+        let grad_sum = grads.get_or_insert_zero(&self.arg2);
         *grad_sum = &*grad_sum + out_grad;
 
         Ok(())
@@ -128,11 +157,11 @@ impl TensorOp for EWiseSub {
         ))
     }
 
-    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let grad_sum = store.get_or_insert_zero(&self.arg1);
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let grad_sum = grads.get_or_insert_zero(&self.arg1);
         *grad_sum = &*grad_sum + out_grad;
 
-        let grad_sum = store.get_or_insert_zero(&self.arg2);
+        let grad_sum = grads.get_or_insert_zero(&self.arg2);
         *grad_sum = &*grad_sum - out_grad;
 
         Ok(())
@@ -171,12 +200,12 @@ impl TensorOp for EWiseMul {
         ))
     }
 
-    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let arg1_grad_sum = store.get_or_insert_zero(&self.arg1);
-        *arg1_grad_sum = &*arg1_grad_sum + &self.arg2 * out_grad;
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let grad_sum = grads.get_or_insert_zero(&self.arg1);
+        *grad_sum = &*grad_sum + &self.arg2 * out_grad;
 
-        let arg2_grad_sum = store.get_or_insert_zero(&self.arg2);
-        *arg2_grad_sum = &*arg2_grad_sum + &self.arg1 * out_grad;
+        let grad_sum = grads.get_or_insert_zero(&self.arg2);
+        *grad_sum = &*grad_sum + &self.arg1 * out_grad;
 
         Ok(())
     }
@@ -214,12 +243,12 @@ impl TensorOp for EWiseDiv {
         ))
     }
 
-    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let arg1_grad_sum = store.get_or_insert_zero(&self.arg1);
-        *arg1_grad_sum = &*arg1_grad_sum + out_grad / &self.arg2;
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let grad_sum = grads.get_or_insert_zero(&self.arg1);
+        *grad_sum = &*grad_sum + out_grad / &self.arg2;
 
-        let arg2_grad_sum = store.get_or_insert_zero(&self.arg2);
-        *arg2_grad_sum = &*arg2_grad_sum + -out_grad * &self.arg1 / (&self.arg2.scalar_powf(2.0));
+        let grad_sum = grads.get_or_insert_zero(&self.arg2);
+        *grad_sum = &*grad_sum + -out_grad * &self.arg1 / (&self.arg2.scalar_powf(2.0));
         Ok(())
     }
 
@@ -256,14 +285,14 @@ impl TensorOp for EWisePowf {
         ))
     }
 
-    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let arg_grad = out_grad * &self.e * self.arg.powf(&self.e - 1.0);
-        let arg_grad_sum = store.get_or_insert_zero(&self.arg);
-        *arg_grad_sum = &*arg_grad_sum + arg_grad;
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + arg_grad;
 
         let e_grad = out_grad * self.arg.powf(&self.e) * self.arg.log();
-        let e_grad_sum = store.get_or_insert_zero(&self.e);
-        *e_grad_sum = &*e_grad_sum + e_grad;
+        let grad_sum = grads.get_or_insert_zero(&self.e);
+        *grad_sum = &*grad_sum + e_grad;
 
         Ok(())
     }
@@ -297,8 +326,8 @@ impl TensorOp for EWiseLog {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let arg1_grad_sum = grads.get_or_insert_zero(&self.arg);
-        *arg1_grad_sum = &*arg1_grad_sum + out_grad / &self.arg;
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + out_grad / &self.arg;
         Ok(())
     }
 
@@ -331,8 +360,8 @@ impl TensorOp for EWiseExp {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let arg1_grad_sum = grads.get_or_insert_zero(&self.arg);
-        *arg1_grad_sum = &*arg1_grad_sum + out_grad * &self.arg.exp();
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + out_grad * &self.arg.exp();
         Ok(())
     }
 
@@ -365,8 +394,8 @@ impl TensorOp for EWiseSin {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let arg_grad_sum = grads.get_or_insert_zero(&self.arg);
-        *arg_grad_sum = &*arg_grad_sum + out_grad * &self.arg.cos();
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + out_grad * &self.arg.cos();
         Ok(())
     }
 
@@ -399,8 +428,8 @@ impl TensorOp for EWiseCos {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let arg_grad_sum = grads.get_or_insert_zero(&self.arg);
-        *arg_grad_sum = &*arg_grad_sum + out_grad * &self.arg.sin() * -1.0;
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + out_grad * &self.arg.sin() * -1.0;
         Ok(())
     }
 
@@ -435,8 +464,8 @@ impl TensorOp for Tanh {
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let out = self.arg.tanh();
         let arg_grad = out_grad * (&(&out * &out) * -1.0 + 1.0);
-        let arg_grad_sum = grads.get_or_insert_zero(&self.arg);
-        *arg_grad_sum = &*arg_grad_sum + arg_grad;
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + arg_grad;
         Ok(())
     }
 
@@ -510,8 +539,8 @@ impl TensorOp for ScalarAdd {
         ))
     }
 
-    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let grad_sum = store.get_or_insert_zero(&self.arg);
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
         *grad_sum = &*grad_sum + out_grad;
 
         Ok(())
@@ -547,9 +576,9 @@ impl TensorOp for ScalarMul {
         ))
     }
 
-    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let arg_grad = out_grad * self.scalar;
-        let grad_sum = store.get_or_insert_zero(&self.arg);
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
         *grad_sum = &*grad_sum + arg_grad;
 
         Ok(())
@@ -584,10 +613,10 @@ impl TensorOp for ScalarPowf {
         ))
     }
 
-    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let arg_grad = out_grad * self.e * self.arg.scalar_powf(self.e - 1.0);
-        let sum_grad = store.get_or_insert_zero(&self.arg);
-        *sum_grad = &*sum_grad + arg_grad;
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + arg_grad;
         Ok(())
     }
 
@@ -597,36 +626,45 @@ impl TensorOp for ScalarPowf {
 }
 
 #[derive(Debug)]
-pub struct Permute(Tensor, Shape);
+pub struct Permute {
+    arg: Tensor,
+    axes: Shape,
+}
 
 impl Permute {
-    pub fn new(arg: Tensor, shape: Shape) -> Self {
-        assert!(arg.layout().ndim() == shape.ndim());
-        Self(arg, shape)
+    pub fn new(arg: Tensor, axes: Shape) -> Result<Self> {
+        if arg.layout().ndim() != axes.ndim() {
+            return Err(Error::ShapeMismatch(format!(
+                "permute: tensor has {} dims but got {} axes",
+                arg.layout().ndim(),
+                axes.ndim()
+            )));
+        }
+        Ok(Self { arg, axes })
     }
 }
 
 impl TensorOp for Permute {
     fn forward(self) -> Result<Tensor> {
-        let storage = self.0.storage_clone();
-        let layout = self.0.layout().permute(&self.1);
+        let storage = self.arg.storage_clone();
+        let layout = self.arg.layout().permute(&self.axes);
         Ok(Tensor::new(storage, layout, false, Some(Box::new(self))))
     }
 
-    fn backward(&self, store: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let mut inverse = vec![0; self.1.ndim()];
-        for (new_axis, &old_axis) in self.1.iter().enumerate() {
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let mut inverse = vec![0; self.axes.ndim()];
+        for (new_axis, &old_axis) in self.axes.iter().enumerate() {
             inverse[old_axis] = new_axis;
         }
 
         let arg_grad = out_grad.permute(inverse);
-        let sum_grad = store.get_or_insert_zero(&self.0);
-        *sum_grad = &*sum_grad + arg_grad;
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + arg_grad;
         Ok(())
     }
 
     fn dependencies(&self) -> Vec<&Tensor> {
-        vec![&self.0]
+        vec![&self.arg]
     }
 }
 
@@ -637,9 +675,15 @@ pub struct Broadcast {
 }
 
 impl Broadcast {
-    pub fn new(arg: Tensor, new_shape: Shape) -> Self {
-        assert!(new_shape.ndim() >= arg.layout().ndim());
-        Self { arg, new_shape }
+    pub fn new(arg: Tensor, new_shape: Shape) -> Result<Self> {
+        if new_shape.ndim() < arg.layout().ndim() {
+            return Err(Error::ShapeMismatch(format!(
+                "broadcast: target ndim {} < source ndim {}",
+                new_shape.ndim(),
+                arg.layout().ndim()
+            )));
+        }
+        Ok(Self { arg, new_shape })
     }
 }
 
@@ -659,7 +703,10 @@ impl TensorOp for Broadcast {
             if *old_dim == 1 {
                 new_strides[i] = 0;
             } else if old_dim != new_dim {
-                panic!("Invalid shape");
+                return Err(Error::ShapeMismatch(format!(
+                    "broadcast: dimension {} is {} but target is {}",
+                    i, old_dim, new_dim
+                )));
             }
         }
 
@@ -688,8 +735,8 @@ impl TensorOp for Broadcast {
         // Sum out broadcasted axes
         let out_grad = out_grad.sum(axes, false).reshape(self.arg.layout().shape().clone());
 
-        let sum_grad = grads.get_or_insert_zero(&self.arg);
-        *sum_grad = &*sum_grad + out_grad;
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + out_grad;
         Ok(())
     }
 
@@ -706,41 +753,22 @@ pub struct Sum {
 }
 
 impl Sum {
-    pub fn new(arg: Tensor, axis: Vec<usize>, keep_dims: bool) -> Self {
-        assert!(axis.iter().all(|&i| i < arg.layout().ndim()));
-        Self { arg, axis, keep_dims }
+    pub fn new(arg: Tensor, axis: Vec<usize>, keep_dims: bool) -> Result<Self> {
+        if let Some(&bad) = axis.iter().find(|&&i| i >= arg.layout().ndim()) {
+            return Err(Error::ShapeMismatch(format!(
+                "sum: axis {} out of bounds for {} dims",
+                bad,
+                arg.layout().ndim()
+            )));
+        }
+        Ok(Self { arg, axis, keep_dims })
     }
 }
 
 impl TensorOp for Sum {
     fn forward(self) -> Result<Tensor> {
-        let new_shape: Shape = if self.keep_dims {
-            self.arg
-                .layout()
-                .shape()
-                .iter()
-                .enumerate()
-                .map(|(ref i, &v)| if self.axis.contains(i) { 1 } else { v })
-                .collect::<Vec<usize>>()
-                .into()
-        } else {
-            self.arg
-                .layout()
-                .shape()
-                .iter()
-                .enumerate()
-                .filter(|&(i, _)| !self.axis.contains(&i))
-                .map(|(_, &dim)| dim)
-                .collect::<Vec<usize>>()
-                .into()
-        };
-
-        let permuted_dims: Vec<usize> = (0..self.arg.layout().ndim())
-            .filter(|i| !self.axis.contains(i))
-            .chain(self.axis.iter().copied())
-            .collect();
-
-        let view = self.arg.permute(permuted_dims).compact();
+        let new_shape = reduce_shape(self.arg.layout().shape(), &self.axis, self.keep_dims);
+        let view = reduce_view(&self.arg, &self.axis);
         let mut out_storage = self.arg.device().zeros(new_shape.size(), self.arg.dtype());
         view.storage().reduce::<ReduceSum>(view.layout(), &mut out_storage)?;
         let storage = Arc::new(RwLock::new(out_storage));
@@ -748,19 +776,11 @@ impl TensorOp for Sum {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let shape: Shape = self
-            .arg
-            .layout()
-            .shape()
-            .iter()
-            .enumerate()
-            .map(|(ref i, &v)| if self.axis.contains(i) { 1 } else { v })
-            .collect::<Vec<usize>>()
-            .into();
+        let shape = reduce_shape(self.arg.layout().shape(), &self.axis, true);
 
         let out_grad = out_grad.reshape(shape).broadcast(self.arg.layout().shape().clone());
-        let sum_grad = grads.get_or_insert_zero(&self.arg);
-        *sum_grad = &*sum_grad + out_grad;
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + out_grad;
         Ok(())
     }
 
@@ -777,42 +797,22 @@ pub struct Max {
 }
 
 impl Max {
-    pub fn new(arg: Tensor, axis: Vec<usize>, keep_dims: bool) -> Self {
-        // TODO: refactor with Sum forward implementation
-        assert!(axis.iter().all(|&i| i < arg.layout().ndim()));
-        Self { arg, axis, keep_dims }
+    pub fn new(arg: Tensor, axis: Vec<usize>, keep_dims: bool) -> Result<Self> {
+        if let Some(&bad) = axis.iter().find(|&&i| i >= arg.layout().ndim()) {
+            return Err(Error::ShapeMismatch(format!(
+                "max: axis {} out of bounds for {} dims",
+                bad,
+                arg.layout().ndim()
+            )));
+        }
+        Ok(Self { arg, axis, keep_dims })
     }
 }
 
 impl TensorOp for Max {
     fn forward(self) -> Result<Tensor> {
-        let new_shape: Shape = if self.keep_dims {
-            self.arg
-                .layout()
-                .shape()
-                .iter()
-                .enumerate()
-                .map(|(ref i, &v)| if self.axis.contains(i) { 1 } else { v })
-                .collect::<Vec<usize>>()
-                .into()
-        } else {
-            self.arg
-                .layout()
-                .shape()
-                .iter()
-                .enumerate()
-                .filter(|&(i, _)| !self.axis.contains(&i))
-                .map(|(_, &dim)| dim)
-                .collect::<Vec<usize>>()
-                .into()
-        };
-
-        let permuted_dims: Vec<usize> = (0..self.arg.layout().ndim())
-            .filter(|i| !self.axis.contains(i))
-            .chain(self.axis.iter().copied())
-            .collect();
-
-        let view = self.arg.permute(permuted_dims).compact();
+        let new_shape = reduce_shape(self.arg.layout().shape(), &self.axis, self.keep_dims);
+        let view = reduce_view(&self.arg, &self.axis);
         let mut out_storage = self.arg.device().zeros(new_shape.size(), self.arg.dtype());
         view.storage().reduce::<ReduceMax>(view.layout(), &mut out_storage)?;
         let storage = Arc::new(RwLock::new(out_storage));
@@ -827,8 +827,8 @@ impl TensorOp for Max {
             .broadcast(self.arg.layout().shape().clone());
         let arg_grad = self.arg.eq(&max_broadcast) * grad;
 
-        let sum_grad = grads.get_or_insert_zero(&self.arg);
-        *sum_grad = &*sum_grad + arg_grad;
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + arg_grad;
         Ok(())
     }
 
@@ -844,9 +844,15 @@ pub struct Reshape {
 }
 
 impl Reshape {
-    pub fn new(arg: Tensor, new_shape: Shape) -> Self {
-        assert!(arg.layout().size() == new_shape.size());
-        Self { arg: arg.compact(), new_shape }
+    pub fn new(arg: Tensor, new_shape: Shape) -> Result<Self> {
+        if arg.layout().size() != new_shape.size() {
+            return Err(Error::ShapeMismatch(format!(
+                "reshape: size {} cannot be reshaped to size {}",
+                arg.layout().size(),
+                new_shape.size()
+            )));
+        }
+        Ok(Self { arg: arg.compact(), new_shape })
     }
 }
 
@@ -859,8 +865,8 @@ impl TensorOp for Reshape {
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let out_grad = out_grad.reshape(self.arg.layout().shape().clone());
-        let sum_grad = grads.get_or_insert_zero(&self.arg);
-        *sum_grad = &*sum_grad + out_grad;
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + out_grad;
         Ok(())
     }
 
@@ -878,11 +884,26 @@ pub struct Narrow {
 }
 
 impl Narrow {
-    pub fn new(arg: Tensor, dim: usize, start: usize, len: usize) -> Self {
-        assert!(dim < arg.layout().ndim(), "narrow dim out of bounds");
-        assert!(start + len <= arg.layout().shape()[dim], "narrow out of bounds");
-        assert!(arg.is_compact(), "narrow requires compact tensors");
-        Self { arg, dim, start, len }
+    pub fn new(arg: Tensor, dim: usize, start: usize, len: usize) -> Result<Self> {
+        if dim >= arg.layout().ndim() {
+            return Err(Error::ShapeMismatch(format!(
+                "narrow: dim {} out of bounds for {} dims",
+                dim,
+                arg.layout().ndim()
+            )));
+        }
+        if start + len > arg.layout().shape()[dim] {
+            return Err(Error::ShapeMismatch(format!(
+                "narrow: start {} + len {} exceeds dim size {}",
+                start,
+                len,
+                arg.layout().shape()[dim]
+            )));
+        }
+        if !arg.is_compact() {
+            return Err(Error::ShapeMismatch("narrow requires compact tensors".into()));
+        }
+        Ok(Self { arg, dim, start, len })
     }
 }
 
@@ -920,8 +941,8 @@ impl TensorOp for Narrow {
         }
 
         let arg_grad = Tensor::cat(&parts, self.dim);
-        let sum_grad = grads.get_or_insert_zero(&self.arg);
-        *sum_grad = &*sum_grad + arg_grad;
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + arg_grad;
         Ok(())
     }
 
@@ -990,12 +1011,12 @@ impl TensorOp for MatMul {
         // db = a^T @ out_grad   -> [..., k, n]
 
         let arg1_grad = out_grad.matmul(&self.arg2.transpose(None));
-        let sum_grad = grads.get_or_insert_zero(&self.arg1);
-        *sum_grad = &*sum_grad + arg1_grad;
+        let grad_sum = grads.get_or_insert_zero(&self.arg1);
+        *grad_sum = &*grad_sum + arg1_grad;
 
         let arg2_grad = self.arg1.transpose(None).matmul(out_grad);
-        let sum_grad = grads.get_or_insert_zero(&self.arg2);
-        *sum_grad = &*sum_grad + arg2_grad;
+        let grad_sum = grads.get_or_insert_zero(&self.arg2);
+        *grad_sum = &*grad_sum + arg2_grad;
 
         Ok(())
     }
@@ -1012,8 +1033,8 @@ pub struct LogSumExp {
 }
 
 impl LogSumExp {
-    pub fn new(arg: Tensor, axes: Vec<usize>) -> Self {
-        Self { arg, axes }
+    pub fn new(arg: Tensor, axes: Vec<usize>) -> Result<Self> {
+        Ok(Self { arg, axes })
     }
 }
 
@@ -1039,19 +1060,13 @@ impl TensorOp for LogSumExp {
         let exp_z = (&self.arg - broadcast_max_z).exp();
         let sum_z = exp_z.sum(self.axes.clone(), false);
 
-        let expand_shape = {
-            let mut shape = self.arg.layout().shape().clone();
-            for axis in &self.axes {
-                shape[*axis] = 1;
-            }
-            shape
-        };
+        let expand_shape = reduce_shape(self.arg.layout().shape(), &self.axes, true);
         let grad_sum_z =
             (out_grad / sum_z).reshape(expand_shape).broadcast(self.arg.layout().shape().clone());
         let arg_grad = grad_sum_z * exp_z;
 
-        let sum_grad = grads.get_or_insert_zero(&self.arg);
-        *sum_grad = &*sum_grad + arg_grad;
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + arg_grad;
         Ok(())
     }
 
@@ -1066,8 +1081,8 @@ pub struct Compact {
 }
 
 impl Compact {
-    pub fn new(arg: Tensor) -> Self {
-        Self { arg }
+    pub fn new(arg: Tensor) -> Result<Self> {
+        Ok(Self { arg })
     }
 }
 
@@ -1086,8 +1101,8 @@ impl TensorOp for Compact {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let sum_grad = grads.get_or_insert_zero(&self.arg);
-        *sum_grad = &*sum_grad + out_grad;
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + out_grad;
         Ok(())
     }
 
@@ -1102,38 +1117,49 @@ impl TensorOp for Compact {
 /// every non-indexed dimension. The output shape matches the index tensor.
 #[derive(Debug)]
 pub struct Gather {
-    input: Tensor,
+    arg: Tensor,
     dim: usize,
     indices: Tensor,
 }
 
 impl Gather {
-    pub fn new(input: Tensor, dim: usize, indices: Tensor) -> Self {
-        assert_eq!(
-            input.layout().ndim(),
-            indices.layout().ndim(),
-            "gather requires matching ranks"
-        );
-        assert!(dim < input.layout().ndim(), "gather dim out of bounds");
-        for axis in 0..input.layout().ndim() {
-            if axis != dim {
-                assert_eq!(
-                    input.layout().shape()[axis],
-                    indices.layout().shape()[axis],
-                    "gather requires matching shapes outside the indexed dim"
-                );
+    pub fn new(arg: Tensor, dim: usize, indices: Tensor) -> Result<Self> {
+        if arg.layout().ndim() != indices.layout().ndim() {
+            return Err(Error::ShapeMismatch(format!(
+                "gather: arg has {} dims but indices has {}",
+                arg.layout().ndim(),
+                indices.layout().ndim()
+            )));
+        }
+        if dim >= arg.layout().ndim() {
+            return Err(Error::ShapeMismatch(format!(
+                "gather: dim {} out of bounds for {} dims",
+                dim,
+                arg.layout().ndim()
+            )));
+        }
+        for axis in 0..arg.layout().ndim() {
+            if axis != dim && arg.layout().shape()[axis] != indices.layout().shape()[axis] {
+                return Err(Error::ShapeMismatch(format!(
+                    "gather: shape mismatch at dim {}: {} vs {}",
+                    axis,
+                    arg.layout().shape()[axis],
+                    indices.layout().shape()[axis]
+                )));
             }
         }
-        assert_eq!(indices.dtype(), crate::DType::I64, "gather indices must be i64");
-        let indices = indices.to_device(input.device()).unwrap();
-        Self { input: input.compact(), dim, indices: indices.compact() }
+        if indices.dtype() != crate::DType::I64 {
+            return Err(Error::ShapeMismatch("gather indices must be i64".into()));
+        }
+        let indices = indices.to_device(arg.device())?;
+        Ok(Self { arg: arg.compact(), dim, indices: indices.compact() })
     }
 }
 
 impl TensorOp for Gather {
     fn forward(self) -> Result<Tensor> {
-        let storage = Arc::new(RwLock::new(self.input.storage().gather(
-            self.input.layout(),
+        let storage = Arc::new(RwLock::new(self.arg.storage().gather(
+            self.arg.layout(),
             self.dim,
             &self.indices.storage(),
             self.indices.layout(),
@@ -1147,83 +1173,93 @@ impl TensorOp for Gather {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let input_shape: Vec<usize> = self.input.layout().shape().iter().copied().collect();
+        let arg_shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
         let grad_storage = out_grad.compact().storage().scatter_add(
             out_grad.layout(),
             self.dim,
             &self.indices.storage(),
             self.indices.layout(),
-            &input_shape,
+            &arg_shape,
         )?;
         let grad_tensor = Tensor::new(
             Arc::new(RwLock::new(grad_storage)),
-            Shape::from(input_shape).into(),
+            Shape::from(arg_shape).into(),
             false,
             None,
         );
-        let sum_grad = grads.get_or_insert_zero(&self.input);
-        *sum_grad = &*sum_grad + &grad_tensor;
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + &grad_tensor;
         Ok(())
     }
 
     fn dependencies(&self) -> Vec<&Tensor> {
-        vec![&self.input, &self.indices]
+        vec![&self.arg, &self.indices]
     }
 }
 
 /// Selects slices along `dim` using a 1-D integer index tensor.
 #[derive(Debug)]
 pub struct IndexSelect {
-    input: Tensor,
+    arg: Tensor,
     dim: usize,
     indices: Tensor,
 }
 
 impl IndexSelect {
-    pub fn new(input: Tensor, dim: usize, indices: Tensor) -> Self {
-        assert!(dim < input.layout().ndim(), "index_select dim out of bounds");
-        assert_eq!(indices.layout().ndim(), 1, "index_select requires 1D indices");
-        assert_eq!(indices.dtype(), crate::DType::I64, "index_select indices must be i64");
-        let indices = indices.to_device(input.device()).unwrap();
-        Self { input: input.compact(), dim, indices: indices.compact() }
+    pub fn new(arg: Tensor, dim: usize, indices: Tensor) -> Result<Self> {
+        if dim >= arg.layout().ndim() {
+            return Err(Error::ShapeMismatch(format!(
+                "index_select: dim {} out of bounds for {} dims",
+                dim,
+                arg.layout().ndim()
+            )));
+        }
+        if indices.layout().ndim() != 1 {
+            return Err(Error::ShapeMismatch("index_select requires 1D indices".into()));
+        }
+        if indices.dtype() != crate::DType::I64 {
+            return Err(Error::ShapeMismatch("index_select indices must be i64".into()));
+        }
+        let indices = indices.to_device(arg.device())?;
+        Ok(Self { arg: arg.compact(), dim, indices: indices.compact() })
     }
 }
 
 impl TensorOp for IndexSelect {
     fn forward(self) -> Result<Tensor> {
-        let storage = Arc::new(RwLock::new(self.input.storage().index_select(
-            self.input.layout(),
+        let storage = Arc::new(RwLock::new(self.arg.storage().index_select(
+            self.arg.layout(),
             self.dim,
             &self.indices.storage(),
             self.indices.layout(),
         )?));
-        let mut shape: Vec<usize> = self.input.layout().shape().iter().copied().collect();
+        let mut shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
         shape[self.dim] = self.indices.layout().shape()[0];
         Ok(Tensor::new(storage, Shape::from(shape).into(), false, Some(Box::new(self))))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let input_shape: Vec<usize> = self.input.layout().shape().iter().copied().collect();
+        let arg_shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
         let grad_storage = out_grad.compact().storage().index_add(
             out_grad.layout(),
             self.dim,
             &self.indices.storage(),
             self.indices.layout(),
-            &input_shape,
+            &arg_shape,
         )?;
         let grad_tensor = Tensor::new(
             Arc::new(RwLock::new(grad_storage)),
-            Shape::from(input_shape).into(),
+            Shape::from(arg_shape).into(),
             false,
             None,
         );
-        let sum_grad = grads.get_or_insert_zero(&self.input);
-        *sum_grad = &*sum_grad + &grad_tensor;
+        let grad_sum = grads.get_or_insert_zero(&self.arg);
+        *grad_sum = &*grad_sum + &grad_tensor;
         Ok(())
     }
 
     fn dependencies(&self) -> Vec<&Tensor> {
-        vec![&self.input, &self.indices]
+        vec![&self.arg, &self.indices]
     }
 }
 
@@ -1235,24 +1271,40 @@ pub struct Cat {
 }
 
 impl Cat {
-    pub fn new(args: Vec<Tensor>) -> Self {
-        assert!(!args.is_empty(), "cat requires at least one tensor");
+    pub fn new(args: Vec<Tensor>) -> Result<Self> {
+        if args.is_empty() {
+            return Err(Error::ShapeMismatch("cat requires at least one tensor".into()));
+        }
         let ndim = args[0].layout().ndim();
         let dtype = args[0].dtype();
         for arg in &args[1..] {
-            assert_eq!(arg.layout().ndim(), ndim, "cat: all tensors must have same ndim");
-            assert_eq!(arg.dtype(), dtype, "cat: all tensors must have same dtype");
+            if arg.layout().ndim() != ndim {
+                return Err(Error::ShapeMismatch(format!(
+                    "cat: ndim mismatch, expected {} but got {}",
+                    ndim,
+                    arg.layout().ndim()
+                )));
+            }
+            if arg.dtype() != dtype {
+                return Err(Error::ShapeMismatch(format!(
+                    "cat: dtype mismatch, expected {:?} but got {:?}",
+                    dtype,
+                    arg.dtype()
+                )));
+            }
             for d in 1..ndim {
-                assert_eq!(
-                    arg.layout().shape()[d],
-                    args[0].layout().shape()[d],
-                    "cat: dimension {} mismatch",
-                    d,
-                );
+                if arg.layout().shape()[d] != args[0].layout().shape()[d] {
+                    return Err(Error::ShapeMismatch(format!(
+                        "cat: dimension {} mismatch, expected {} but got {}",
+                        d,
+                        args[0].layout().shape()[d],
+                        arg.layout().shape()[d]
+                    )));
+                }
             }
         }
         let args: Vec<Tensor> = args.into_iter().map(|a| a.compact()).collect();
-        Self { args }
+        Ok(Self { args })
     }
 }
 
@@ -1287,8 +1339,8 @@ impl TensorOp for Cat {
         for arg in &self.args {
             let size = arg.layout().shape()[0];
             let grad_slice = out_grad.narrow(0, offset, size);
-            let sum_grad = grads.get_or_insert_zero(arg);
-            *sum_grad = &*sum_grad + &grad_slice;
+            let grad_sum = grads.get_or_insert_zero(arg);
+            *grad_sum = &*grad_sum + &grad_slice;
             offset += size;
         }
         Ok(())
