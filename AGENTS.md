@@ -40,6 +40,7 @@ DEERS is a minimal PyTorch clone in Rust for learning. Optimize for readability 
 - Structure tests in three explicit phases: `Arrange`, `Act`, and `Assert`.
 - Keep test setup small and local so each phase is easy to scan.
 - Prefer one clear behavior per test over broad scenario tests.
+- Run `cargo clippy --all-targets --all-features -- -D warnings` before wrapping up a change.
 
 ## Commits
 

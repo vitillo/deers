@@ -104,16 +104,14 @@ impl Module for Embedding {
     }
 }
 
-/// RMSNorm: `x / sqrt(mean(x²) + eps) * weight`.
+/// RMSNorm: `x / sqrt(mean(x²) + eps)`.
 pub struct RMSNorm {
-    weight: Parameter,
     eps: f64,
 }
 
 impl RMSNorm {
-    pub fn new(size: usize, eps: f64) -> Self {
-        let weight = Parameter::new(Tensor::ones(vec![size], DType::F32, Device::Cpu));
-        Self { weight, eps }
+    pub fn new(eps: f64) -> Self {
+        Self { eps }
     }
 }
 
@@ -122,12 +120,7 @@ impl Module for RMSNorm {
         let last_axis = x.layout().ndim() - 1;
         let mean_sq = (x * x).mean(vec![last_axis], true);
         let inv_norm = (mean_sq + self.eps).scalar_powf(-0.5);
-        let normalized = x * &inv_norm;
-        Ok(&normalized * &*self.weight)
-    }
-
-    fn parameters(&self) -> Vec<Parameter> {
-        vec![self.weight.clone()]
+        Ok(x * &inv_norm)
     }
 }
 

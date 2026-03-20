@@ -786,54 +786,52 @@ mod imp {
         ) -> Result<Self> {
             if let (Some((ctx, lhs, _)), Some((_, rhs, _))) =
                 (self.accelerated(DType::F16), other.accelerated(DType::F16))
+                && let Some(kernel) = Self::binary_kernel_name::<O>(DType::F16)
             {
-                if let Some(kernel) = Self::binary_kernel_name::<O>(DType::F16) {
-                    let out = ctx.empty_f16_buffer(layout.size());
-                    let meta = BinaryMeta {
-                        lhs: Self::strided_meta(layout),
-                        rhs: Self::strided_meta(other_layout),
-                    };
-                    ctx.dispatch_1d(kernel, layout.size(), |encoder| {
-                        encoder.set_buffer(0, Some(lhs), 0);
-                        encoder.set_buffer(1, Some(rhs), 0);
-                        encoder.set_buffer(2, Some(&out), 0);
-                        MpsContext::set_params(encoder, 3, &meta);
-                    });
-                    return Ok(Self {
-                        inner: MpsInner::Accelerated {
-                            ctx: ctx.clone(),
-                            buffer: out,
-                            len: layout.size(),
-                            dtype: DType::F16,
-                        },
-                    });
-                }
+                let out = ctx.empty_f16_buffer(layout.size());
+                let meta = BinaryMeta {
+                    lhs: Self::strided_meta(layout),
+                    rhs: Self::strided_meta(other_layout),
+                };
+                ctx.dispatch_1d(kernel, layout.size(), |encoder| {
+                    encoder.set_buffer(0, Some(lhs), 0);
+                    encoder.set_buffer(1, Some(rhs), 0);
+                    encoder.set_buffer(2, Some(&out), 0);
+                    MpsContext::set_params(encoder, 3, &meta);
+                });
+                return Ok(Self {
+                    inner: MpsInner::Accelerated {
+                        ctx: ctx.clone(),
+                        buffer: out,
+                        len: layout.size(),
+                        dtype: DType::F16,
+                    },
+                });
             }
 
             if let (Some((ctx, lhs, _)), Some((_, rhs, _))) =
                 (self.accelerated(DType::F32), other.accelerated(DType::F32))
+                && let Some(kernel) = Self::binary_kernel_name::<O>(DType::F32)
             {
-                if let Some(kernel) = Self::binary_kernel_name::<O>(DType::F32) {
-                    let out = ctx.empty_f32_buffer(layout.size());
-                    let meta = BinaryMeta {
-                        lhs: Self::strided_meta(layout),
-                        rhs: Self::strided_meta(other_layout),
-                    };
-                    ctx.dispatch_1d(kernel, layout.size(), |encoder| {
-                        encoder.set_buffer(0, Some(lhs), 0);
-                        encoder.set_buffer(1, Some(rhs), 0);
-                        encoder.set_buffer(2, Some(&out), 0);
-                        MpsContext::set_params(encoder, 3, &meta);
-                    });
-                    return Ok(Self {
-                        inner: MpsInner::Accelerated {
-                            ctx: ctx.clone(),
-                            buffer: out,
-                            len: layout.size(),
-                            dtype: DType::F32,
-                        },
-                    });
-                }
+                let out = ctx.empty_f32_buffer(layout.size());
+                let meta = BinaryMeta {
+                    lhs: Self::strided_meta(layout),
+                    rhs: Self::strided_meta(other_layout),
+                };
+                ctx.dispatch_1d(kernel, layout.size(), |encoder| {
+                    encoder.set_buffer(0, Some(lhs), 0);
+                    encoder.set_buffer(1, Some(rhs), 0);
+                    encoder.set_buffer(2, Some(&out), 0);
+                    MpsContext::set_params(encoder, 3, &meta);
+                });
+                return Ok(Self {
+                    inner: MpsInner::Accelerated {
+                        ctx: ctx.clone(),
+                        buffer: out,
+                        len: layout.size(),
+                        dtype: DType::F32,
+                    },
+                });
             }
 
             let inner = self.as_cpu_storage().binary_op::<O>(

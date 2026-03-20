@@ -130,7 +130,7 @@ fn test_embedding_mps() {
 
 #[test]
 fn test_rms_norm_shape() {
-    let norm = nn::RMSNorm::new(4, 1e-5);
+    let norm = nn::RMSNorm::new(1e-5);
     let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], (2, 4), Device::Cpu);
     let out = norm.forward(&x).unwrap();
     assert_eq!(out.layout().shape, (2, 4).into());
@@ -138,7 +138,7 @@ fn test_rms_norm_shape() {
 
 #[test]
 fn test_rms_norm_normalizes() {
-    let norm = nn::RMSNorm::new(3, 1e-5);
+    let norm = nn::RMSNorm::new(1e-5);
     let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (1, 3), Device::Cpu);
     let out = norm.forward(&x).unwrap();
     // RMSNorm: x / sqrt(mean(x²) + eps)
@@ -154,8 +154,8 @@ fn test_rms_norm_normalizes() {
 
 #[test]
 fn test_rms_norm_parameters() {
-    let norm = nn::RMSNorm::new(4, 1e-5);
-    assert_eq!(norm.parameters().len(), 1);
+    let norm = nn::RMSNorm::new(1e-5);
+    assert!(norm.parameters().is_empty());
 }
 
 #[test]

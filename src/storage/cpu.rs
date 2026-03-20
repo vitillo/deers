@@ -400,11 +400,11 @@ impl BackendStorage for CpuStorage {
         let right_len: usize = layout.shape().iter().skip(dim + 1).product();
         let dst_dim = dst_shape[dim];
         let indices = Self::compact_indices(indices, indices_layout);
-        for axis in 0..layout.ndim() {
+        for (axis, &dst_axis) in dst_shape.iter().enumerate().take(layout.ndim()) {
             if axis != dim {
                 assert_eq!(
                     layout.shape()[axis],
-                    dst_shape[axis],
+                    dst_axis,
                     "scatter_add requires matching shapes outside the indexed dim"
                 );
                 assert_eq!(
