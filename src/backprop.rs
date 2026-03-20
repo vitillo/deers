@@ -111,41 +111,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sorting() {
+    fn sorted_nodes_linear_chain() {
+        // Arrange
         let a = &Tensor::zeros((2, 3), DType::F32, Device::Cpu).attach();
         let b = &-a;
         let c = &-b;
         let d = &-c;
 
-        let sorted_nodes = d.sorted_nodes();
+        // Act
+        let sorted = d.sorted_nodes();
 
-        assert_eq!(sorted_nodes, [d, c, b, a]);
+        // Assert
+        assert_eq!(sorted, [d, c, b, a]);
     }
 
     #[test]
-    fn test_sorting_with_no_grad() {
-        let a = Tensor::ones((2, 3), DType::F32, Device::Cpu).attach();
-        let b = Tensor::ones((2, 3), DType::F32, Device::Cpu);
+    fn sorted_nodes_diamond() {
+        // Arrange — a is used by both b and c
+        let a = &Tensor::ones((2,), DType::F32, Device::Cpu).attach();
+        let b = &-a;
+        let c = &-a;
+        let d = &(b + c);
+
+        // Act
+        let sorted = d.sorted_nodes();
+
+        // Assert — no duplicates, shared input last
+        assert_eq!(sorted.len(), 4);
+        assert_eq!(sorted[0], d);
+        assert_eq!(*sorted.last().unwrap(), a);
+    }
+
+    #[test]
+    fn sorted_nodes_skips_no_grad() {
+        // Arrange
+        let a = Tensor::ones((2,), DType::F32, Device::Cpu).attach();
+        let b = Tensor::ones((2,), DType::F32, Device::Cpu); // no grad
         let c = &a + b;
 
-        let sorted_nodes = c.sorted_nodes();
+        // Act
+        let sorted = c.sorted_nodes();
 
-        assert_eq!(sorted_nodes, [&c, &a]);
+        // Assert
+        assert_eq!(sorted, [&c, &a]);
     }
 
     #[test]
-    fn test_backward_with_no_grad() {
-        let a = Tensor::ones((2, 3), DType::F32, Device::Cpu).attach();
-        let b = Tensor::ones((2, 3), DType::F32, Device::Cpu);
-        let c = Tensor::ones((2, 3), DType::F32, Device::Cpu);
-        let d = b + c;
-        let e = &a + &d;
+    fn backward_accumulates_diamond_grads() {
+        // Arrange — a feeds two paths that recombine
+        let a = Tensor::ones((2,), DType::F32, Device::Cpu).attach();
+        let b = &a + &a;
+        let loss = b.sum(vec![0], true);
 
-        let grads = e.backward().unwrap();
+        // Act
+        let grads = loss.backward().unwrap();
+        let grad_a = grads.get(a.id()).unwrap().to_vec::<f32>().unwrap();
 
-        assert_eq!(3, grads.len());
-        assert!(grads.store.contains_key(&a.id()));
-        assert!(grads.store.contains_key(&d.id()));
-        assert!(grads.store.contains_key(&e.id()));
+        // Assert — grad(a) = 2 because a is used twice
+        assert_eq!(grad_a, vec![2.0, 2.0]);
     }
 }
