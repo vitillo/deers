@@ -230,6 +230,70 @@ fn test_mlp_to_device() {
 }
 
 #[test]
+fn test_block_shape() {
+    // Arrange
+    let block = deers::models::gpt::Block::new(4, 2, 8, 1e-5);
+    let x = Tensor::from_vec(vec![1.0f32; 24], (2, 3, 4), Device::Cpu);
+    let (cos, sin) =
+        deers::models::gpt::precompute_rotary_embeddings(3, 2, 10_000.0, DType::F32, Device::Cpu);
+
+    // Act
+    let out = block.forward(&x, &cos, &sin).unwrap();
+
+    // Assert
+    assert_eq!(out.layout().shape, (2, 3, 4).into());
+}
+
+#[test]
+fn test_block_parameters() {
+    // Arrange
+    let block = deers::models::gpt::Block::new(4, 2, 8, 1e-5);
+
+    // Act
+    let parameters = block.parameters();
+
+    // Assert
+    assert_eq!(parameters.len(), 6);
+}
+
+#[test]
+fn test_block_to_device() {
+    // Arrange
+    let block = deers::models::gpt::Block::new(4, 2, 8, 1e-5);
+
+    // Act
+    block.to_device(Device::Mps).unwrap();
+
+    // Assert
+    assert!(block.parameters().iter().all(|parameter| parameter.device() == Device::Mps));
+}
+
+#[test]
+fn test_block_is_causal() {
+    // Arrange
+    let block = deers::models::gpt::Block::new(4, 2, 8, 1e-5);
+    let (cos, sin) =
+        deers::models::gpt::precompute_rotary_embeddings(3, 2, 10_000.0, DType::F32, Device::Cpu);
+    let x1 = Tensor::from_vec(
+        vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+        (1, 3, 4),
+        Device::Cpu,
+    );
+    let x2 = Tensor::from_vec(
+        vec![1.0f32, 2.0, 3.0, 4.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 120.0],
+        (1, 3, 4),
+        Device::Cpu,
+    );
+
+    // Act
+    let y1 = block.forward(&x1, &cos, &sin).unwrap().to_vec::<f32>().unwrap();
+    let y2 = block.forward(&x2, &cos, &sin).unwrap().to_vec::<f32>().unwrap();
+
+    // Assert
+    assert_eq!(&y1[0..4], &y2[0..4]);
+}
+
+#[test]
 fn test_rms_norm_shape() {
     let norm = nn::RMSNorm::new(1e-5);
     let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], (2, 4), Device::Cpu);
