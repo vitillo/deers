@@ -1,7 +1,7 @@
 use half::f16;
 
 use crate::error::Result;
-use crate::nn::{Linear, Module, Parameter, RMSNorm, functional};
+use crate::nn::{Embedding, Linear, Module, Parameter, RMSNorm, functional};
 use crate::tensor::Tensor;
 use crate::{DType, Device};
 
@@ -230,6 +230,107 @@ impl Block {
         for parameter in self.parameters() {
             parameter.to_device(device)?;
         }
+        Ok(())
+    }
+}
+
+/// Minimal GPT configuration for the nanochat-style decoder stack.
+pub struct GPTConfig {
+    pub vocab_size: usize,
+    pub sequence_len: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_embd: usize,
+    pub mlp_hidden_dim: usize,
+    pub rms_norm_eps: f64,
+    pub rope_base: f32,
+}
+
+impl GPTConfig {
+    pub fn head_dim(&self) -> usize {
+        self.n_embd / self.n_head
+    }
+}
+
+/// Minimal GPT model: token embedding, decoder blocks, final norm, and LM head.
+pub struct GPT {
+    vocab_size: usize,
+    wte: Embedding,
+    blocks: Vec<Block>,
+    norm: RMSNorm,
+    lm_head: Linear,
+    cos: Tensor,
+    sin: Tensor,
+}
+
+impl GPT {
+    pub fn new(config: GPTConfig) -> Self {
+        assert!(config.n_embd.is_multiple_of(config.n_head), "n_embd must be divisible by n_head");
+
+        let wte = Embedding::new(config.vocab_size, config.n_embd);
+        let blocks = (0..config.n_layer)
+            .map(|_| {
+                Block::new(config.n_embd, config.n_head, config.mlp_hidden_dim, config.rms_norm_eps)
+            })
+            .collect();
+        let norm = RMSNorm::new(config.rms_norm_eps);
+        let lm_head = Linear::no_bias(config.n_embd, config.vocab_size);
+        let (cos, sin) = precompute_rotary_embeddings(
+            config.sequence_len,
+            config.head_dim(),
+            config.rope_base,
+            DType::F32,
+            Device::Cpu,
+        );
+
+        Self { vocab_size: config.vocab_size, wte, blocks, norm, lm_head, cos, sin }
+    }
+
+    pub fn forward(&self, idx: &Tensor) -> Result<Tensor> {
+        let shape = idx.layout().shape();
+        assert_eq!(shape.ndim(), 2, "GPT expects token ids with shape [B, T]");
+
+        let batch_size = shape[0];
+        let seq_len = shape[1];
+        assert!(seq_len <= self.cos.layout().shape()[1], "sequence length exceeds rotary cache");
+        assert_eq!(
+            idx.device(),
+            self.cos.device(),
+            "token ids and rotary cache must be on the same device"
+        );
+
+        let cos = self.cos.narrow(1, 0, seq_len); // [1, T, 1, D/2]
+        let sin = self.sin.narrow(1, 0, seq_len); // [1, T, 1, D/2]
+
+        let mut x = self.wte.forward(idx)?; // [B, T, C]
+        for block in &self.blocks {
+            x = block.forward(&x, &cos, &sin)?; // [B, T, C]
+        }
+        x = self.norm.forward(&x)?; // [B, T, C]
+
+        let channels = x.layout().shape()[2];
+        let x_flat = x.reshape(vec![batch_size * seq_len, channels]); // [B*T, C]
+        let logits = self.lm_head.forward(&x_flat)?; // [B*T, V]
+        Ok(logits.reshape(vec![batch_size, seq_len, self.vocab_size])) // [B, T, V]
+    }
+
+    pub fn parameters(&self) -> Vec<Parameter> {
+        let mut parameters = self.wte.parameters();
+        for block in &self.blocks {
+            parameters.extend(block.parameters());
+        }
+        parameters.extend(self.lm_head.parameters());
+        parameters
+    }
+
+    pub fn to_device(&mut self, device: Device) -> Result<()> {
+        self.wte.to_device(device)?;
+        for block in &self.blocks {
+            block.to_device(device)?;
+        }
+        self.lm_head.to_device(device)?;
+        self.cos = self.cos.to_device(device)?;
+        self.sin = self.sin.to_device(device)?;
         Ok(())
     }
 }
