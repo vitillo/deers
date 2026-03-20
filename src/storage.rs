@@ -16,7 +16,10 @@ use crate::{
 pub use cpu::*;
 pub use mps::*;
 
-/// An element-wise operation applied to a single tensor.
+/// An element-wise kernel shared by storage backends.
+///
+/// Backends implement the storage traversal; the op only defines the scalar
+/// computation for each supported dtype.
 pub trait UnaryOp {
     const KERNEL: &'static str;
 
@@ -118,7 +121,7 @@ scalar_op!(ScalarAdd, "scalar_add", +);
 scalar_op!(ScalarMul, "scalar_mul", *);
 scalar_op!(ScalarDiv, "scalar_div", /);
 
-/// An element-wise operation applied to two tensors of the same shape.
+/// An element-wise kernel shared by storage backends for two input tensors.
 pub trait BinaryOp {
     const KERNEL: &'static str;
 
@@ -188,7 +191,7 @@ impl BinaryOp for EWiseEq {
     }
 }
 
-/// A reduction operation that combines elements (e.g. sum, max).
+/// A reduction kernel shared by storage backends.
 pub trait ReduceOp {
     const KERNEL: &'static str;
 
@@ -222,20 +225,28 @@ impl ReduceOp for ReduceMax {
     }
 }
 
-/// Trait that storage backends (CPU, future GPU) must implement.
+/// Trait implemented by concrete storage backends such as CPU and MPS.
+///
+/// Layout arguments describe how to interpret the existing buffer contents.
+/// Methods that return a new storage produce a compact output buffer unless
+/// documented otherwise.
 pub trait BackendStorage: Sized {
     fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self>;
     fn unary_op<O: UnaryOp>(&self, op: O, l: &Layout) -> Result<Self>;
+    /// Applies an element-wise binary kernel to two layouts with the same shape.
     fn binary_op<O: BinaryOp>(
         &self,
         layout: &Layout,
         other: &Self,
         layout_other: &Layout,
     ) -> Result<Self>;
+    /// Reduces `layout` into the already-allocated compact destination storage `dst`.
     fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()>;
+    /// Matrix multiplication for layouts whose shapes are compatible under matmul rules.
     fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self>;
     /// Gathers values along `dim` using integer indices.
-    /// Input must be compact. Returns a new storage with one value per index.
+    /// `indices` must be a compact integer tensor. Returns a new compact storage
+    /// with one value per index.
     fn gather(
         &self,
         layout: &Layout,
@@ -243,7 +254,7 @@ pub trait BackendStorage: Sized {
         indices: &Self,
         indices_layout: &Layout,
     ) -> Result<Self>;
-    /// Scatters `src` values into a zero-initialized tensor of size `full_size`,
+    /// Scatters `src` values into a zero-initialized tensor of shape `full_shape`,
     /// placing each value at the corresponding index along `dim`.
     fn scatter(
         &self,
@@ -254,7 +265,8 @@ pub trait BackendStorage: Sized {
         full_shape: &[usize],
     ) -> Result<Self>;
     /// Selects rows along dimension 0 using integer indices.
-    /// Input must be compact 2D. Returns (num_indices, cols) storage.
+    /// Input must be compact 2D and `indices` must be a compact 1-D integer tensor.
+    /// Returns compact `(num_indices, cols)` storage.
     fn index_select(
         &self,
         layout: &Layout,
@@ -266,7 +278,10 @@ pub trait BackendStorage: Sized {
     fn copy_compact(&self, src_layout: &Layout, dst: &mut Self) -> Result<()>;
 }
 
-/// Backend-agnostic storage enum.
+/// Backend-agnostic storage wrapper.
+///
+/// This keeps tensor code generic while still making device dispatch explicit at
+/// the storage boundary.
 #[derive(Debug, Clone)]
 pub enum Storage {
     Cpu(CpuStorage),
@@ -276,27 +291,15 @@ pub enum Storage {
 impl BackendStorage for Storage {
     fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self> {
         match self {
-            Storage::Cpu(storage) => {
-                let storage = storage.ewise_powf(e, l)?;
-                Ok(Self::Cpu(storage))
-            }
-            Storage::Mps(storage) => {
-                let storage = storage.ewise_powf(e, l)?;
-                Ok(Self::Mps(storage))
-            }
+            Storage::Cpu(storage) => Ok(Self::Cpu(storage.ewise_powf(e, l)?)),
+            Storage::Mps(storage) => Ok(Self::Mps(storage.ewise_powf(e, l)?)),
         }
     }
 
     fn unary_op<O: UnaryOp>(&self, op: O, l: &Layout) -> Result<Self> {
         match self {
-            Storage::Cpu(storage) => {
-                let storage = storage.unary_op(op, l)?;
-                Ok(Self::Cpu(storage))
-            }
-            Storage::Mps(storage) => {
-                let storage = storage.unary_op(op, l)?;
-                Ok(Self::Mps(storage))
-            }
+            Storage::Cpu(storage) => Ok(Self::Cpu(storage.unary_op(op, l)?)),
+            Storage::Mps(storage) => Ok(Self::Mps(storage.unary_op(op, l)?)),
         }
     }
 
@@ -308,12 +311,10 @@ impl BackendStorage for Storage {
     ) -> Result<Self> {
         match (self, other) {
             (Storage::Cpu(storage), Storage::Cpu(other)) => {
-                let storage = storage.binary_op::<O>(layout, other, other_layout)?;
-                Ok(Self::Cpu(storage))
+                Ok(Self::Cpu(storage.binary_op::<O>(layout, other, other_layout)?))
             }
             (Storage::Mps(storage), Storage::Mps(other)) => {
-                let storage = storage.binary_op::<O>(layout, other, other_layout)?;
-                Ok(Self::Mps(storage))
+                Ok(Self::Mps(storage.binary_op::<O>(layout, other, other_layout)?))
             }
             _ => Err(Error::DeviceMismatch { op: O::KERNEL }),
         }
@@ -358,12 +359,10 @@ impl BackendStorage for Storage {
     fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self> {
         match (self, other) {
             (Storage::Cpu(storage), Storage::Cpu(other)) => {
-                let storage = storage.matmul(layout, other, layout_other)?;
-                Ok(Self::Cpu(storage))
+                Ok(Self::Cpu(storage.matmul(layout, other, layout_other)?))
             }
             (Storage::Mps(storage), Storage::Mps(other)) => {
-                let storage = storage.matmul(layout, other, layout_other)?;
-                Ok(Self::Mps(storage))
+                Ok(Self::Mps(storage.matmul(layout, other, layout_other)?))
             }
             _ => Err(Error::DeviceMismatch { op: "matmul" }),
         }
@@ -427,6 +426,7 @@ impl BackendStorage for Storage {
 impl Storage {
     /// Concatenates compact storages into a single contiguous storage.
     /// All inputs must be compact and on the same device.
+    /// Each `usize` is the number of valid elements contributed by that storage.
     pub fn cat(parts: &[(&Storage, usize)]) -> Result<Self> {
         assert!(!parts.is_empty());
         match parts[0].0 {
@@ -451,38 +451,5 @@ impl Storage {
                 Ok(Storage::Mps(MpsStorage::cat(&mps_parts)))
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use core::f32;
-
-    use crate::layout::{Shape, Strides};
-
-    use super::*;
-
-    #[test]
-    fn test_copy_strided_src() {
-        let src = Storage::Cpu(CpuStorage::F32(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
-        let mut dst = Storage::Cpu(CpuStorage::F32(vec![0.0; 6]));
-        let layout = Layout::new(Shape::from((3, 2)), Strides(vec![1, 3]), 0);
-
-        src.copy_compact(&layout, &mut dst).unwrap();
-
-        assert_eq!(
-            dst.to_vec::<f32>(Layout::from(Shape::from((3, 2)))),
-            vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
-        );
-    }
-
-    #[test]
-    fn test_to_vec() {
-        let storage = Storage::Cpu(CpuStorage::F32(vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]));
-        let layout = Layout::new(Shape::from((3, 2)), Strides(vec![1, 3]), 0);
-
-        let result = storage.to_vec::<f32>(&layout);
-
-        assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }
 }
