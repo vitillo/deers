@@ -15,7 +15,13 @@ pub enum Error {
     NotImplemented(&'static str),
 
     #[error("{0}")]
-    ShapeMismatch(String),
+    LayoutMismatch(String),
+
+    #[error("{0}")]
+    DTypeMismatch(String),
+
+    #[error("{0}")]
+    IndexOutOfBounds(String),
 
     #[error(transparent)]
     DatasetParseError(#[from] io::Error),
