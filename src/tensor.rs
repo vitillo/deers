@@ -237,22 +237,22 @@ impl Tensor {
     ///
     /// This is intended for dataset-style batching and other simple slicing.
     pub fn narrow(&self, dim: usize, start: usize, len: usize) -> Tensor {
-        ops::Narrow::new(self.clone(), dim, start, len).forward().unwrap()
+        ops::Narrow::new(self.clone(), dim, start, len).unwrap().forward().unwrap()
     }
 
     /// Reorders the dimensions of the tensor. Does not copy data.
     pub fn permute(&self, axis: impl Into<Shape>) -> Tensor {
-        ops::Permute::new(self.clone(), axis.into()).forward().unwrap()
+        ops::Permute::new(self.clone(), axis.into()).unwrap().forward().unwrap()
     }
 
     /// Expands dimensions of size 1 to match `new_shape`. Does not copy data.
     pub fn broadcast(&self, new_shape: impl Into<Shape>) -> Tensor {
-        ops::Broadcast::new(self.clone(), new_shape.into()).forward().unwrap()
+        ops::Broadcast::new(self.clone(), new_shape.into()).unwrap().forward().unwrap()
     }
 
     /// Returns a view with a different shape but the same total number of elements.
     pub fn reshape(&self, new_shape: impl Into<Shape>) -> Tensor {
-        ops::Reshape::new(self.clone(), new_shape.into()).forward().unwrap()
+        ops::Reshape::new(self.clone(), new_shape.into()).unwrap().forward().unwrap()
     }
 
     /// Swaps two dimensions. Defaults to the last two if `axes` is `None`.
@@ -271,12 +271,12 @@ impl Tensor {
 
     /// Sums elements along the given axes. If `keep_dims`, reduced axes become size 1.
     pub fn sum(&self, axis: Vec<usize>, keep_dims: bool) -> Tensor {
-        ops::Sum::new(self.clone(), axis, keep_dims).forward().unwrap()
+        ops::Sum::new(self.clone(), axis, keep_dims).unwrap().forward().unwrap()
     }
 
     /// Returns the maximum along the given axes.
     pub fn max(&self, axis: Vec<usize>, keep_dims: bool) -> Tensor {
-        ops::Max::new(self.clone(), axis, keep_dims).forward().unwrap()
+        ops::Max::new(self.clone(), axis, keep_dims).unwrap().forward().unwrap()
     }
 
     /// Returns true if the tensor's memory layout is contiguous (row-major).
@@ -289,7 +289,7 @@ impl Tensor {
         if self.is_compact() {
             return self.clone();
         }
-        ops::Compact::new(self.clone()).forward().unwrap()
+        ops::Compact::new(self.clone()).unwrap().forward().unwrap()
     }
 
     /// Element-wise power: `self^e`.
@@ -349,7 +349,7 @@ impl Tensor {
 
     /// Numerically stable `log(sum(exp(x)))` along the given axes.
     pub fn log_sum_exp(&self, axes: Vec<usize>) -> Tensor {
-        ops::LogSumExp::new(self.clone(), axes).forward().unwrap()
+        ops::LogSumExp::new(self.clone(), axes).unwrap().forward().unwrap()
     }
 
     /// Numerically stable log-softmax along the given axis.
@@ -378,7 +378,7 @@ impl Tensor {
             let cat0 = Self::cat(&transposed, 0);
             return cat0.transpose(Some((0, dim)));
         }
-        ops::Cat::new(tensors.to_vec()).forward().unwrap()
+        ops::Cat::new(tensors.to_vec()).unwrap().forward().unwrap()
     }
 
     /// Element-wise sigmoid: `1 / (1 + exp(-x))`.
@@ -412,7 +412,7 @@ impl Tensor {
     /// every non-indexed dimension. The output shape matches `indices`, so each
     /// index element picks one value from `self` along `dim`.
     pub fn gather(&self, dim: usize, indices: &Tensor) -> Tensor {
-        ops::Gather::new(self.clone(), dim, indices.clone()).forward().unwrap()
+        ops::Gather::new(self.clone(), dim, indices.clone()).unwrap().forward().unwrap()
     }
 
     /// Selects slices along `dim` using a 1-D integer index tensor.
@@ -420,7 +420,7 @@ impl Tensor {
     /// The output shape matches `self` except the size at `dim` becomes
     /// `indices.len()`.
     pub fn index_select(&self, dim: usize, indices: &Tensor) -> Tensor {
-        ops::IndexSelect::new(self.clone(), dim, indices.clone()).forward().unwrap()
+        ops::IndexSelect::new(self.clone(), dim, indices.clone()).unwrap().forward().unwrap()
     }
 }
 
