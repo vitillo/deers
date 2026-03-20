@@ -159,6 +159,78 @@ fn test_rms_norm_parameters() {
 }
 
 #[test]
+fn test_precompute_rotary_embeddings_shape() {
+    // Arrange
+    let seq_len = 3;
+    let head_dim = 4;
+
+    // Act
+    let (cos, sin) = nn::functional::precompute_rotary_embeddings(
+        seq_len,
+        head_dim,
+        10_000.0,
+        DType::F32,
+        Device::Cpu,
+    );
+
+    // Assert
+    assert_eq!(cos.layout().shape, vec![1, 3, 1, 2].into());
+    assert_eq!(sin.layout().shape, vec![1, 3, 1, 2].into());
+}
+
+#[test]
+fn test_precompute_rotary_embeddings_values() {
+    // Arrange
+    let seq_len = 3;
+    let head_dim = 4;
+
+    // Act
+    let (cos, sin) = nn::functional::precompute_rotary_embeddings(
+        seq_len,
+        head_dim,
+        10_000.0,
+        DType::F32,
+        Device::Cpu,
+    );
+    let cos_values = cos.to_vec::<f32>().unwrap();
+    let sin_values = sin.to_vec::<f32>().unwrap();
+
+    // Assert
+    let freqs = [0.0f32, 0.0, 1.0, 0.01, 2.0, 0.02];
+    let expected_cos: Vec<f32> = freqs.iter().map(|&x| x.cos()).collect();
+    let expected_sin: Vec<f32> = freqs.iter().map(|&x| x.sin()).collect();
+    for (actual, expected) in cos_values.iter().zip(expected_cos.iter()) {
+        assert!((actual - expected).abs() < 1e-5, "expected {expected}, got {actual}");
+    }
+    for (actual, expected) in sin_values.iter().zip(expected_sin.iter()) {
+        assert!((actual - expected).abs() < 1e-5, "expected {expected}, got {actual}");
+    }
+}
+
+#[test]
+fn test_apply_rotary_emb() {
+    // Arrange
+    let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], vec![1, 1, 1, 4], Device::Cpu);
+    let cos = Tensor::from_vec(vec![0.5f32, 0.25], vec![1, 1, 1, 2], Device::Cpu);
+    let sin = Tensor::from_vec(vec![0.75f32, 1.0], vec![1, 1, 1, 2], Device::Cpu);
+
+    // Act
+    let out = nn::functional::apply_rotary_emb(&x, &cos, &sin);
+    let values = out.to_vec::<f32>().unwrap();
+
+    // Assert
+    let expected = [
+        1.0 * 0.5 + 3.0 * 0.75,
+        2.0 * 0.25 + 4.0 * 1.0,
+        1.0 * -0.75 + 3.0 * 0.5,
+        -2.0 + 4.0 * 0.25,
+    ];
+    for (actual, expected) in values.iter().zip(expected.iter()) {
+        assert!((actual - expected).abs() < 1e-5, "expected {expected}, got {actual}");
+    }
+}
+
+#[test]
 fn test_causal_mask() {
     let mask = nn::functional::causal_mask(2, 3, 0, DType::F32, Device::Cpu);
 
