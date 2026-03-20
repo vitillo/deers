@@ -11,17 +11,17 @@ fn test_linear_forward() {
 }
 
 #[test]
-fn test_linear_vars() {
+ fn test_linear_parameters() {
     let linear = nn::Linear::new(4, 3);
-    let vars = linear.vars();
-    assert_eq!(vars.len(), 2); // weight + bias
+    let parameters = linear.parameters();
+    assert_eq!(parameters.len(), 2); // weight + bias
 }
 
 #[test]
 fn test_linear_no_bias() {
     let linear = nn::Linear::no_bias(4, 3);
-    let vars = linear.vars();
-    assert_eq!(vars.len(), 1); // weight only
+    let parameters = linear.parameters();
+    assert_eq!(parameters.len(), 1); // weight only
     let x = Tensor::from_vec(vec![1.0f32; 8], (2, 4), Device::Cpu);
     let out = linear.forward(&x).unwrap();
     assert_eq!(out.layout().shape, (2, 3).into());
@@ -32,8 +32,8 @@ fn test_linear_to_device() {
     let linear = nn::Linear::new(4, 3);
     linear.to_device(Device::Mps).unwrap();
 
-    for var in linear.vars() {
-        assert_eq!(var.device(), Device::Mps);
+    for parameter in linear.parameters() {
+        assert_eq!(parameter.device(), Device::Mps);
     }
 }
 
@@ -42,8 +42,8 @@ fn test_linear_to_same_device_noop() {
     let linear = nn::Linear::new(4, 3);
     linear.to_device(Device::Cpu).unwrap();
 
-    for var in linear.vars() {
-        assert_eq!(var.device(), Device::Cpu);
+    for parameter in linear.parameters() {
+        assert_eq!(parameter.device(), Device::Cpu);
     }
 }
 
@@ -56,10 +56,10 @@ fn test_sequential_forward() {
 }
 
 #[test]
-fn test_sequential_vars() {
+fn test_sequential_parameters() {
     let model = nn::seq().add(nn::Linear::new(4, 3)).add(nn::ReLU).add(nn::Linear::new(3, 2));
-    // 2 Linear layers × 2 vars each (weight + bias)
-    assert_eq!(model.vars().len(), 4);
+    // 2 Linear layers × 2 parameters each (weight + bias)
+    assert_eq!(model.parameters().len(), 4);
 }
 
 #[test]
@@ -67,13 +67,13 @@ fn test_sequential_to_device() {
     let model = nn::seq().add(nn::Linear::new(4, 3)).add(nn::ReLU).add(nn::Linear::new(3, 2));
     model.to_device(Device::Mps).unwrap();
 
-    assert!(model.vars().iter().all(|var| var.device() == Device::Mps));
+    assert!(model.parameters().iter().all(|parameter| parameter.device() == Device::Mps));
 }
 
 #[test]
 fn test_sequential_trains() {
     let model = nn::seq().add(nn::Linear::new(2, 4)).add(nn::ReLU).add(nn::Linear::new(4, 1));
-    let mut sgd = SGD::new(model.vars(), 0.01);
+    let mut sgd = SGD::new(model.parameters(), 0.01);
 
     let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);
 
@@ -111,7 +111,7 @@ fn test_embedding_selects_correct_rows() {
     // Look up indices 2 then 0
     let indices = Tensor::from_vec(vec![2i64, 0], (2,), Device::Cpu);
     let out = emb.forward(&indices).unwrap();
-    let weight_data: Vec<f32> = emb.vars()[0].to_vec().unwrap();
+    let weight_data: Vec<f32> = emb.parameters()[0].to_vec().unwrap();
     let out_data: Vec<f32> = out.to_vec().unwrap();
     // Row 2 of weight should be first row of output
     assert_eq!(&out_data[0..3], &weight_data[6..9]);
@@ -153,9 +153,9 @@ fn test_rms_norm_normalizes() {
 }
 
 #[test]
-fn test_rms_norm_vars() {
+fn test_rms_norm_parameters() {
     let norm = nn::RMSNorm::new(4, 1e-5);
-    assert_eq!(norm.vars().len(), 1);
+    assert_eq!(norm.parameters().len(), 1);
 }
 
 #[test]
