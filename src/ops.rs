@@ -1096,12 +1096,10 @@ impl TensorOp for Compact {
     }
 }
 
-/// Gathers values along an axis using integer indices.
+/// Gathers values along `dim` using integer indices.
 ///
-/// For a 2D input of shape `(rows, cols)` with `dim=1` and indices of shape `(rows,)`,
-/// produces output of shape `(rows, 1)` where `out[i, 0] = input[i, indices[i]]`.
-///
-/// Currently only supports 2D input with 1D indices along dim 1.
+/// The index tensor must have the same rank as the input and the same shape on
+/// every non-indexed dimension. The output shape matches the index tensor.
 #[derive(Debug)]
 pub struct Gather {
     input: Tensor,
@@ -1111,10 +1109,21 @@ pub struct Gather {
 
 impl Gather {
     pub fn new(input: Tensor, dim: usize, indices: Tensor) -> Self {
-        assert_eq!(input.layout().ndim(), 2, "gather only supports 2D input");
-        assert_eq!(dim, 1, "gather only supports dim=1");
-        assert_eq!(indices.layout().ndim(), 1, "gather indices must be 1D");
-        assert_eq!(indices.layout().shape()[0], input.layout().shape()[0]);
+        assert_eq!(
+            input.layout().ndim(),
+            indices.layout().ndim(),
+            "gather requires matching ranks"
+        );
+        assert!(dim < input.layout().ndim(), "gather dim out of bounds");
+        for axis in 0..input.layout().ndim() {
+            if axis != dim {
+                assert_eq!(
+                    input.layout().shape()[axis],
+                    indices.layout().shape()[axis],
+                    "gather requires matching shapes outside the indexed dim"
+                );
+            }
+        }
         assert_eq!(indices.dtype(), crate::DType::I64, "gather indices must be i64");
         let indices = indices.to_device(input.device()).unwrap();
         Self { input: input.compact(), dim, indices: indices.compact() }
@@ -1123,29 +1132,32 @@ impl Gather {
 
 impl TensorOp for Gather {
     fn forward(self) -> Result<Tensor> {
-        let rows = self.input.layout().shape()[0];
         let storage = Arc::new(RwLock::new(self.input.storage().gather(
             self.input.layout(),
             self.dim,
             &self.indices.storage(),
             self.indices.layout(),
         )?));
-        let shape: Shape = (rows, 1).into();
-        Ok(Tensor::new(storage, shape.into(), false, Some(Box::new(self))))
+        Ok(Tensor::new(
+            storage,
+            self.indices.layout().shape().clone().into(),
+            false,
+            Some(Box::new(self)),
+        ))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let full_shape = self.input.layout().shape();
-        let grad_storage = out_grad.compact().storage().scatter(
+        let input_shape: Vec<usize> = self.input.layout().shape().iter().copied().collect();
+        let grad_storage = out_grad.compact().storage().scatter_add(
             out_grad.layout(),
             self.dim,
             &self.indices.storage(),
             self.indices.layout(),
-            &full_shape.iter().copied().collect::<Vec<_>>(),
+            &input_shape,
         )?;
         let grad_tensor = Tensor::new(
             Arc::new(RwLock::new(grad_storage)),
-            full_shape.clone().into(),
+            Shape::from(input_shape).into(),
             false,
             None,
         );
@@ -1159,39 +1171,55 @@ impl TensorOp for Gather {
     }
 }
 
-/// Selects rows from a 2D tensor by index.
-/// Input shape: (rows, cols), indices: 1D i64 -> output: (num_indices, cols).
+/// Selects slices along `dim` using a 1-D integer index tensor.
 #[derive(Debug)]
 pub struct IndexSelect {
     input: Tensor,
+    dim: usize,
     indices: Tensor,
 }
 
 impl IndexSelect {
-    pub fn new(input: Tensor, indices: Tensor) -> Self {
-        assert_eq!(input.layout().ndim(), 2, "index_select requires 2D input");
+    pub fn new(input: Tensor, dim: usize, indices: Tensor) -> Self {
+        assert!(dim < input.layout().ndim(), "index_select dim out of bounds");
         assert_eq!(indices.layout().ndim(), 1, "index_select requires 1D indices");
         assert_eq!(indices.dtype(), crate::DType::I64, "index_select indices must be i64");
         let indices = indices.to_device(input.device()).unwrap();
-        Self { input: input.compact(), indices: indices.compact() }
+        Self { input: input.compact(), dim, indices: indices.compact() }
     }
 }
 
 impl TensorOp for IndexSelect {
     fn forward(self) -> Result<Tensor> {
-        let num_indices = self.indices.layout().shape()[0];
-        let cols = self.input.layout().shape()[1];
         let storage = Arc::new(RwLock::new(self.input.storage().index_select(
             self.input.layout(),
+            self.dim,
             &self.indices.storage(),
             self.indices.layout(),
         )?));
-        let shape: Shape = (num_indices, cols).into();
-        Ok(Tensor::new(storage, shape.into(), false, Some(Box::new(self))))
+        let mut shape: Vec<usize> = self.input.layout().shape().iter().copied().collect();
+        shape[self.dim] = self.indices.layout().shape()[0];
+        Ok(Tensor::new(storage, Shape::from(shape).into(), false, Some(Box::new(self))))
     }
 
-    fn backward(&self, _grads: &mut GradientStore, _out_grad: &Tensor) -> Result<()> {
-        Err(crate::error::Error::NotImplemented("IndexSelect backward not yet implemented"))
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let input_shape: Vec<usize> = self.input.layout().shape().iter().copied().collect();
+        let grad_storage = out_grad.compact().storage().index_add(
+            out_grad.layout(),
+            self.dim,
+            &self.indices.storage(),
+            self.indices.layout(),
+            &input_shape,
+        )?;
+        let grad_tensor = Tensor::new(
+            Arc::new(RwLock::new(grad_storage)),
+            Shape::from(input_shape).into(),
+            false,
+            None,
+        );
+        let sum_grad = grads.get_or_insert_zero(&self.input);
+        *sum_grad = &*sum_grad + &grad_tensor;
+        Ok(())
     }
 
     fn dependencies(&self) -> Vec<&Tensor> {

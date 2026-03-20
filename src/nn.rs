@@ -95,7 +95,7 @@ impl Module for Embedding {
         let mut final_dims: Vec<usize> = indices.layout().shape().iter().copied().collect();
         final_dims.push(hidden_size);
         let flat = indices.reshape(vec![indices.layout().size()]);
-        let selected = self.weight.index_select(&flat);
+        let selected = self.weight.index_select(0, &flat);
         Ok(selected.reshape(final_dims))
     }
 

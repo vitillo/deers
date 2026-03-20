@@ -60,15 +60,29 @@ struct MatmulMeta {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct GatherMeta {
-    rows: u32,
-    cols: u32,
+struct GatherScatterMeta {
+    left_len: u32,
+    src_dim: u32,
+    dst_dim: u32,
+    right_len: u32,
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct IndexSelectMeta {
-    num_indices: u32,
-    cols: u32,
+    left_len: u32,
+    index_len: u32,
+    src_dim: u32,
+    right_len: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IndexAddMeta {
+    left_len: u32,
+    src_dim: u32,
+    dst_dim: u32,
+    right_len: u32,
 }
 
 #[cfg(target_os = "macos")]
@@ -133,10 +147,12 @@ mod imp {
         "matmul_f32",
         "gather_f16",
         "gather_f32",
-        "scatter_f16",
-        "scatter_f32",
+        "scatter_add_f16",
+        "scatter_add_f32",
         "index_select_f16",
         "index_select_f32",
+        "index_add_f16",
+        "index_add_f32",
     ];
 
     #[derive(Debug)]
@@ -238,15 +254,17 @@ mod imp {
 
         fn synchronize(&self) {
             let mut guard = self.active_command_buffer.lock().unwrap();
-            if let Some(cb) = guard.take() {
-                cb.commit();
-                cb.wait_until_completed();
-            } else {
-                // Nothing pending — still need a fence for shared-memory buffers
-                let cb = self.queue.new_command_buffer();
-                cb.commit();
-                cb.wait_until_completed();
+            if let Some(command_buffer) = guard.take() {
+                drop(guard);
+                command_buffer.commit();
+                command_buffer.wait_until_completed();
+                return;
             }
+
+            drop(guard);
+            let command_buffer = self.queue.new_command_buffer();
+            command_buffer.commit();
+            command_buffer.wait_until_completed();
         }
 
         fn set_params<T>(encoder: &metal::ComputeCommandEncoderRef, index: u64, value: &T) {
@@ -969,17 +987,27 @@ mod imp {
             indices: &Self,
             indices_layout: &Layout,
         ) -> Result<Self> {
+            assert!(layout.is_compact());
+            assert!(indices_layout.is_compact());
+            assert_eq!(layout.ndim(), indices_layout.ndim(), "gather requires matching ranks");
+            assert!(dim < layout.ndim(), "gather dim out of bounds");
+
+            let left_len: usize = indices_layout.shape().iter().take(dim).product();
+            let dst_dim = indices_layout.shape()[dim];
+            let right_len: usize = indices_layout.shape().iter().skip(dim + 1).product();
+            let src_dim = layout.shape()[dim];
+
             if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
                 (self.accelerated(DType::F16), indices.accelerated(DType::I64))
             {
-                assert!(layout.is_compact());
-                assert!(indices_layout.is_compact());
-                assert_eq!(dim, 1);
-                let rows = layout.shape()[0];
-                let cols = layout.shape()[1];
-                let out = ctx.empty_f16_buffer(rows);
-                let meta = GatherMeta { rows: rows as u32, cols: cols as u32 };
-                ctx.dispatch_1d("gather_f16", rows, |encoder| {
+                let out = ctx.empty_f16_buffer(left_len * dst_dim * right_len);
+                let meta = GatherScatterMeta {
+                    left_len: left_len as u32,
+                    src_dim: src_dim as u32,
+                    dst_dim: dst_dim as u32,
+                    right_len: right_len as u32,
+                };
+                ctx.dispatch_2d("gather_f16", right_len, left_len * dst_dim, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(index_buffer), 0);
                     encoder.set_buffer(2, Some(&out), 0);
@@ -989,7 +1017,7 @@ mod imp {
                     inner: MpsInner::Accelerated {
                         ctx: ctx.clone(),
                         buffer: out,
-                        len: rows,
+                        len: left_len * dst_dim * right_len,
                         dtype: DType::F16,
                     },
                 });
@@ -998,14 +1026,14 @@ mod imp {
             if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
                 (self.accelerated(DType::F32), indices.accelerated(DType::I64))
             {
-                assert!(layout.is_compact());
-                assert!(indices_layout.is_compact());
-                assert_eq!(dim, 1);
-                let rows = layout.shape()[0];
-                let cols = layout.shape()[1];
-                let out = ctx.empty_f32_buffer(rows);
-                let meta = GatherMeta { rows: rows as u32, cols: cols as u32 };
-                ctx.dispatch_1d("gather_f32", rows, |encoder| {
+                let out = ctx.empty_f32_buffer(left_len * dst_dim * right_len);
+                let meta = GatherScatterMeta {
+                    left_len: left_len as u32,
+                    src_dim: src_dim as u32,
+                    dst_dim: dst_dim as u32,
+                    right_len: right_len as u32,
+                };
+                ctx.dispatch_2d("gather_f32", right_len, left_len * dst_dim, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(index_buffer), 0);
                     encoder.set_buffer(2, Some(&out), 0);
@@ -1015,7 +1043,7 @@ mod imp {
                     inner: MpsInner::Accelerated {
                         ctx: ctx.clone(),
                         buffer: out,
-                        len: rows,
+                        len: left_len * dst_dim * right_len,
                         dtype: DType::F32,
                     },
                 });
@@ -1030,42 +1058,63 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
-        fn scatter(
+        fn scatter_add(
             &self,
             layout: &Layout,
             dim: usize,
             indices: &Self,
             indices_layout: &Layout,
-            full_shape: &[usize],
+            dst_shape: &[usize],
         ) -> Result<Self> {
+            assert!(layout.is_compact());
+            assert!(indices_layout.is_compact());
+            assert_eq!(
+                layout.ndim(),
+                indices_layout.ndim(),
+                "scatter_add requires source and indices to have matching ranks"
+            );
+            assert_eq!(
+                layout.ndim(),
+                dst_shape.len(),
+                "scatter_add requires source and destination to have matching ranks"
+            );
+            assert!(dim < dst_shape.len(), "scatter_add dim out of bounds");
+
+            let left_len: usize = layout.shape().iter().take(dim).product();
+            let src_dim = layout.shape()[dim];
+            let dst_dim = dst_shape[dim];
+            let right_len: usize = layout.shape().iter().skip(dim + 1).product();
+            let total_len: usize = dst_shape.iter().product();
+
             if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
                 (self.accelerated(DType::F16), indices.accelerated(DType::I64))
             {
-                assert!(layout.is_compact());
-                assert!(indices_layout.is_compact());
-                assert_eq!(dim, 1);
-                let rows = full_shape[0];
-                let cols = full_shape[1];
-                let out = ctx.empty_f16_buffer(rows * cols);
+                let out = ctx.empty_f16_buffer(total_len);
                 unsafe {
                     std::ptr::write_bytes(
                         out.contents(),
                         0,
-                        rows * cols * std::mem::size_of::<f16>(),
+                        total_len * std::mem::size_of::<f16>(),
                     );
                 }
-                let meta = GatherMeta { rows: rows as u32, cols: cols as u32 };
-                ctx.dispatch_1d("scatter_f16", rows, |encoder| {
+                let meta = GatherScatterMeta {
+                    left_len: left_len as u32,
+                    src_dim: src_dim as u32,
+                    dst_dim: dst_dim as u32,
+                    right_len: right_len as u32,
+                };
+                ctx.dispatch_2d("scatter_add_f16", right_len, left_len * dst_dim, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(index_buffer), 0);
                     encoder.set_buffer(2, Some(&out), 0);
                     MpsContext::set_params(encoder, 3, &meta);
                 });
+
                 return Ok(Self {
                     inner: MpsInner::Accelerated {
                         ctx: ctx.clone(),
                         buffer: out,
-                        len: rows * cols,
+                        len: total_len,
                         dtype: DType::F16,
                     },
                 });
@@ -1074,42 +1123,43 @@ mod imp {
             if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
                 (self.accelerated(DType::F32), indices.accelerated(DType::I64))
             {
-                assert!(layout.is_compact());
-                assert!(indices_layout.is_compact());
-                assert_eq!(dim, 1);
-                let rows = full_shape[0];
-                let cols = full_shape[1];
-                let out = ctx.empty_f32_buffer(rows * cols);
+                let out = ctx.empty_f32_buffer(total_len);
                 unsafe {
                     std::ptr::write_bytes(
                         out.contents(),
                         0,
-                        rows * cols * std::mem::size_of::<f32>(),
+                        total_len * std::mem::size_of::<f32>(),
                     );
                 }
-                let meta = GatherMeta { rows: rows as u32, cols: cols as u32 };
-                ctx.dispatch_1d("scatter_f32", rows, |encoder| {
+                let meta = GatherScatterMeta {
+                    left_len: left_len as u32,
+                    src_dim: src_dim as u32,
+                    dst_dim: dst_dim as u32,
+                    right_len: right_len as u32,
+                };
+                ctx.dispatch_2d("scatter_add_f32", right_len, left_len * dst_dim, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(index_buffer), 0);
                     encoder.set_buffer(2, Some(&out), 0);
                     MpsContext::set_params(encoder, 3, &meta);
                 });
+
                 return Ok(Self {
                     inner: MpsInner::Accelerated {
                         ctx: ctx.clone(),
                         buffer: out,
-                        len: rows * cols,
+                        len: total_len,
                         dtype: DType::F32,
                     },
                 });
             }
 
-            let inner = self.as_cpu_storage().scatter(
+            let inner = self.as_cpu_storage().scatter_add(
                 layout,
                 dim,
                 &indices.as_cpu_storage(),
                 indices_layout,
-                full_shape,
+                dst_shape,
             )?;
             Ok(Self::from_cpu_storage(inner))
         }
@@ -1117,19 +1167,31 @@ mod imp {
         fn index_select(
             &self,
             layout: &Layout,
+            dim: usize,
             indices: &Self,
             indices_layout: &Layout,
         ) -> Result<Self> {
+            assert!(layout.is_compact());
+            assert!(indices_layout.is_compact());
+            assert_eq!(indices_layout.ndim(), 1, "index_select requires 1D indices");
+            assert!(dim < layout.ndim(), "index_select dim out of bounds");
+
+            let index_len = indices_layout.shape()[0];
+            let left_len: usize = layout.shape().iter().take(dim).product();
+            let src_dim = layout.shape()[dim];
+            let right_len: usize = layout.shape().iter().skip(dim + 1).product();
+
             if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
                 (self.accelerated(DType::F16), indices.accelerated(DType::I64))
             {
-                assert!(layout.is_compact());
-                assert!(indices_layout.is_compact());
-                let num_indices = indices_layout.shape()[0];
-                let cols = layout.shape()[1];
-                let out = ctx.empty_f16_buffer(num_indices * cols);
-                let meta = IndexSelectMeta { num_indices: num_indices as u32, cols: cols as u32 };
-                ctx.dispatch_2d("index_select_f16", cols, num_indices, |encoder| {
+                let out = ctx.empty_f16_buffer(left_len * index_len * right_len);
+                let meta = IndexSelectMeta {
+                    left_len: left_len as u32,
+                    index_len: index_len as u32,
+                    src_dim: src_dim as u32,
+                    right_len: right_len as u32,
+                };
+                ctx.dispatch_2d("index_select_f16", right_len, left_len * index_len, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(index_buffer), 0);
                     encoder.set_buffer(2, Some(&out), 0);
@@ -1139,7 +1201,7 @@ mod imp {
                     inner: MpsInner::Accelerated {
                         ctx: ctx.clone(),
                         buffer: out,
-                        len: num_indices * cols,
+                        len: left_len * index_len * right_len,
                         dtype: DType::F16,
                     },
                 });
@@ -1148,13 +1210,14 @@ mod imp {
             if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
                 (self.accelerated(DType::F32), indices.accelerated(DType::I64))
             {
-                assert!(layout.is_compact());
-                assert!(indices_layout.is_compact());
-                let num_indices = indices_layout.shape()[0];
-                let cols = layout.shape()[1];
-                let out = ctx.empty_f32_buffer(num_indices * cols);
-                let meta = IndexSelectMeta { num_indices: num_indices as u32, cols: cols as u32 };
-                ctx.dispatch_2d("index_select_f32", cols, num_indices, |encoder| {
+                let out = ctx.empty_f32_buffer(left_len * index_len * right_len);
+                let meta = IndexSelectMeta {
+                    left_len: left_len as u32,
+                    index_len: index_len as u32,
+                    src_dim: src_dim as u32,
+                    right_len: right_len as u32,
+                };
+                ctx.dispatch_2d("index_select_f32", right_len, left_len * index_len, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(index_buffer), 0);
                     encoder.set_buffer(2, Some(&out), 0);
@@ -1164,7 +1227,7 @@ mod imp {
                     inner: MpsInner::Accelerated {
                         ctx: ctx.clone(),
                         buffer: out,
-                        len: num_indices * cols,
+                        len: left_len * index_len * right_len,
                         dtype: DType::F32,
                     },
                 });
@@ -1172,8 +1235,104 @@ mod imp {
 
             let inner = self.as_cpu_storage().index_select(
                 layout,
+                dim,
                 &indices.as_cpu_storage(),
                 indices_layout,
+            )?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
+        fn index_add(
+            &self,
+            layout: &Layout,
+            dim: usize,
+            indices: &Self,
+            indices_layout: &Layout,
+            dst_shape: &[usize],
+        ) -> Result<Self> {
+            assert!(layout.is_compact());
+            assert!(indices_layout.is_compact());
+            assert_eq!(indices_layout.ndim(), 1, "index_add requires 1D indices");
+            assert!(dim < dst_shape.len(), "index_add dim out of bounds");
+
+            let src_dim = layout.shape()[dim];
+            let dst_dim = dst_shape[dim];
+            let left_len: usize = dst_shape.iter().take(dim).product();
+            let right_len: usize = dst_shape.iter().skip(dim + 1).product();
+            let total_len: usize = dst_shape.iter().product();
+
+            if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
+                (self.accelerated(DType::F16), indices.accelerated(DType::I64))
+            {
+                let out = ctx.empty_f16_buffer(total_len);
+                unsafe {
+                    std::ptr::write_bytes(
+                        out.contents(),
+                        0,
+                        total_len * std::mem::size_of::<f16>(),
+                    );
+                }
+                let meta = IndexAddMeta {
+                    left_len: left_len as u32,
+                    src_dim: src_dim as u32,
+                    dst_dim: dst_dim as u32,
+                    right_len: right_len as u32,
+                };
+                ctx.dispatch_2d("index_add_f16", right_len, left_len * dst_dim, |encoder| {
+                    encoder.set_buffer(0, Some(input), 0);
+                    encoder.set_buffer(1, Some(index_buffer), 0);
+                    encoder.set_buffer(2, Some(&out), 0);
+                    MpsContext::set_params(encoder, 3, &meta);
+                });
+                return Ok(Self {
+                    inner: MpsInner::Accelerated {
+                        ctx: ctx.clone(),
+                        buffer: out,
+                        len: total_len,
+                        dtype: DType::F16,
+                    },
+                });
+            }
+
+            if let (Some((ctx, input, _)), Some((_, index_buffer, _))) =
+                (self.accelerated(DType::F32), indices.accelerated(DType::I64))
+            {
+                let out = ctx.empty_f32_buffer(total_len);
+                unsafe {
+                    std::ptr::write_bytes(
+                        out.contents(),
+                        0,
+                        total_len * std::mem::size_of::<f32>(),
+                    );
+                }
+                let meta = IndexAddMeta {
+                    left_len: left_len as u32,
+                    src_dim: src_dim as u32,
+                    dst_dim: dst_dim as u32,
+                    right_len: right_len as u32,
+                };
+                ctx.dispatch_2d("index_add_f32", right_len, left_len * dst_dim, |encoder| {
+                    encoder.set_buffer(0, Some(input), 0);
+                    encoder.set_buffer(1, Some(index_buffer), 0);
+                    encoder.set_buffer(2, Some(&out), 0);
+                    MpsContext::set_params(encoder, 3, &meta);
+                });
+                return Ok(Self {
+                    inner: MpsInner::Accelerated {
+                        ctx: ctx.clone(),
+                        buffer: out,
+                        len: total_len,
+                        dtype: DType::F32,
+                    },
+                });
+            }
+
+            let inner = self.as_cpu_storage().index_add(
+                layout,
+                dim,
+                &indices.as_cpu_storage(),
+                indices_layout,
+                dst_shape,
             )?;
             Ok(Self::from_cpu_storage(inner))
         }
@@ -1424,10 +1583,27 @@ mod imp {
         fn gather(&self, _: &Layout, _: usize, _: &Self, _: &Layout) -> Result<Self> {
             Self::unavailable()
         }
-        fn scatter(&self, _: &Layout, _: usize, _: &Self, _: &Layout, _: &[usize]) -> Result<Self> {
+        fn scatter_add(
+            &self,
+            _: &Layout,
+            _: usize,
+            _: &Self,
+            _: &Layout,
+            _: &[usize],
+        ) -> Result<Self> {
             Self::unavailable()
         }
-        fn index_select(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
+        fn index_select(&self, _: &Layout, _: usize, _: &Self, _: &Layout) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn index_add(
+            &self,
+            _: &Layout,
+            _: usize,
+            _: &Self,
+            _: &Layout,
+            _: &[usize],
+        ) -> Result<Self> {
             Self::unavailable()
         }
         fn dtype(&self) -> DType {

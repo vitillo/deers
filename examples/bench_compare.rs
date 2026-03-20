@@ -73,8 +73,8 @@ fn bench_deers(
     b2_data: &[f32],
     targets_i64: &[i64],
 ) {
-    use deers::nn::Parameter;
     use deers::Tensor;
+    use deers::nn::Parameter;
 
     let x = Tensor::from_vec(x_data.to_vec(), (batch_size, 784), device);
     let w1 = Parameter::new(Tensor::from_vec(w1_data.to_vec(), (784, 128), device));

@@ -337,72 +337,101 @@ impl BackendStorage for CpuStorage {
         indices_layout: &Layout,
     ) -> Result<Self> {
         assert!(layout.is_compact());
-        assert_eq!(dim, 1, "gather only supports dim=1 for 2D tensors");
         assert!(indices_layout.is_compact());
+        assert_eq!(layout.ndim(), indices_layout.ndim(), "gather requires matching ranks");
+        assert!(dim < layout.ndim(), "gather dim out of bounds");
 
-        let rows = layout.shape[0];
-        let cols = layout.shape[1];
-        assert_eq!(indices_layout.ndim(), 1, "gather indices must be 1D");
-        assert_eq!(indices_layout.shape()[0], rows);
+        let left_len: usize = indices_layout.shape().iter().take(dim).product();
+        let index_len = indices_layout.shape()[dim];
+        let right_len: usize = indices_layout.shape().iter().skip(dim + 1).product();
+        let src_dim = layout.shape()[dim];
+        for axis in 0..layout.ndim() {
+            if axis != dim {
+                assert_eq!(
+                    layout.shape()[axis],
+                    indices_layout.shape()[axis],
+                    "gather requires matching shapes outside the indexed dim"
+                );
+            }
+        }
 
         let indices = Self::compact_indices(indices, indices_layout);
         for idx in &indices {
-            assert!(*idx < cols, "gather index out of bounds");
+            assert!(*idx < src_dim, "gather index out of bounds");
         }
 
         match self {
-            CpuStorage::F16(data) => Ok(CpuStorage::F16(
-                indices.iter().enumerate().map(|(i, &idx)| data[i * cols + idx]).collect(),
-            )),
-            CpuStorage::F32(data) => Ok(CpuStorage::F32(
-                indices.iter().enumerate().map(|(i, &idx)| data[i * cols + idx]).collect(),
-            )),
-            CpuStorage::I64(data) => Ok(CpuStorage::I64(
-                indices.iter().enumerate().map(|(i, &idx)| data[i * cols + idx]).collect(),
-            )),
+            CpuStorage::F16(data) => Ok(CpuStorage::F16(gather_into(
+                data, left_len, src_dim, index_len, right_len, &indices,
+            ))),
+            CpuStorage::F32(data) => Ok(CpuStorage::F32(gather_into(
+                data, left_len, src_dim, index_len, right_len, &indices,
+            ))),
+            CpuStorage::I64(data) => Ok(CpuStorage::I64(gather_into(
+                data, left_len, src_dim, index_len, right_len, &indices,
+            ))),
         }
     }
 
-    fn scatter(
+    fn scatter_add(
         &self,
         layout: &Layout,
         dim: usize,
         indices: &CpuStorage,
         indices_layout: &Layout,
-        full_shape: &[usize],
+        dst_shape: &[usize],
     ) -> Result<Self> {
         assert!(layout.is_compact());
-        assert_eq!(dim, 1, "scatter_add only supports dim=1 for 2D tensors");
         assert!(indices_layout.is_compact());
-        assert_eq!(indices_layout.ndim(), 1, "scatter indices must be 1D");
+        assert_eq!(
+            layout.ndim(),
+            indices_layout.ndim(),
+            "scatter_add requires source and indices to have matching ranks"
+        );
+        assert_eq!(
+            layout.ndim(),
+            dst_shape.len(),
+            "scatter_add requires source and destination to have matching ranks"
+        );
+        assert!(dim < dst_shape.len(), "scatter_add dim out of bounds");
 
-        let rows = full_shape[0];
-        let cols = full_shape[1];
+        let left_len: usize = layout.shape().iter().take(dim).product();
+        let index_len = layout.shape()[dim];
+        let right_len: usize = layout.shape().iter().skip(dim + 1).product();
+        let dst_dim = dst_shape[dim];
         let indices = Self::compact_indices(indices, indices_layout);
+        for axis in 0..layout.ndim() {
+            if axis != dim {
+                assert_eq!(
+                    layout.shape()[axis],
+                    dst_shape[axis],
+                    "scatter_add requires matching shapes outside the indexed dim"
+                );
+                assert_eq!(
+                    layout.shape()[axis],
+                    indices_layout.shape()[axis],
+                    "scatter_add requires source and indices to match outside the indexed dim"
+                );
+            }
+        }
         for idx in &indices {
-            assert!(*idx < cols, "scatter index out of bounds");
+            assert!(*idx < dst_dim, "scatter_add index out of bounds");
         }
 
         match self {
             CpuStorage::F16(data) => {
-                let mut out = vec![f16::from_f32(0.0); rows * cols];
-                for (i, &idx) in indices.iter().enumerate() {
-                    out[i * cols + idx] += data[i];
-                }
+                let mut out = vec![f16::from_f32(0.0); dst_shape.iter().product()];
+                scatter_add_into(&mut out, data, left_len, dst_dim, index_len, right_len, &indices);
                 Ok(CpuStorage::F16(out))
             }
             CpuStorage::F32(data) => {
-                let mut out = vec![0.0f32; rows * cols];
-                for (i, &idx) in indices.iter().enumerate() {
-                    out[i * cols + idx] += data[i];
-                }
+                let mut out = vec![0.0f32; dst_shape.iter().product()];
+                scatter_add_into(&mut out, data, left_len, dst_dim, index_len, right_len, &indices);
                 Ok(CpuStorage::F32(out))
             }
             CpuStorage::I64(data) => {
-                let mut out = vec![0i64; rows * cols];
-                for (i, &idx) in indices.iter().enumerate() {
-                    out[i * cols + idx] += data[i];
-                }
+                let mut out = vec![0i64; dst_shape.iter().product()];
+                scatter_add_into(&mut out, data, left_len, dst_dim, index_len, right_len, &indices);
                 Ok(CpuStorage::I64(out))
             }
         }
@@ -411,40 +440,86 @@ impl BackendStorage for CpuStorage {
     fn index_select(
         &self,
         layout: &Layout,
+        dim: usize,
         indices: &Self,
         indices_layout: &Layout,
     ) -> Result<Self> {
         assert!(layout.is_compact());
-        assert_eq!(layout.ndim(), 2, "index_select requires 2D input");
         assert!(indices_layout.is_compact());
+        assert_eq!(indices_layout.ndim(), 1, "index_select requires 1D indices");
+        assert!(dim < layout.ndim(), "index_select dim out of bounds");
 
-        let rows = layout.shape[0];
-        let cols = layout.shape[1];
         let indices = Self::compact_indices(indices, indices_layout);
+        let left_len: usize = layout.shape().iter().take(dim).product();
+        let src_dim = layout.shape()[dim];
+        let right_len: usize = layout.shape().iter().skip(dim + 1).product();
         for idx in &indices {
-            assert!(*idx < rows, "index_select index {} out of bounds ({})", idx, rows);
+            assert!(*idx < src_dim, "index_select index {} out of bounds ({})", idx, src_dim);
         }
 
         match self {
             CpuStorage::F16(data) => {
-                let mut out = Vec::with_capacity(indices.len() * cols);
-                for &idx in &indices {
-                    out.extend_from_slice(&data[idx * cols..(idx + 1) * cols]);
-                }
+                let out = index_select_into(data, left_len, src_dim, right_len, &indices);
                 Ok(CpuStorage::F16(out))
             }
             CpuStorage::F32(data) => {
-                let mut out = Vec::with_capacity(indices.len() * cols);
-                for &idx in &indices {
-                    out.extend_from_slice(&data[idx * cols..(idx + 1) * cols]);
-                }
+                let out = index_select_into(data, left_len, src_dim, right_len, &indices);
                 Ok(CpuStorage::F32(out))
             }
             CpuStorage::I64(data) => {
-                let mut out = Vec::with_capacity(indices.len() * cols);
-                for &idx in &indices {
-                    out.extend_from_slice(&data[idx * cols..(idx + 1) * cols]);
-                }
+                let out = index_select_into(data, left_len, src_dim, right_len, &indices);
+                Ok(CpuStorage::I64(out))
+            }
+        }
+    }
+
+    fn index_add(
+        &self,
+        layout: &Layout,
+        dim: usize,
+        indices: &Self,
+        indices_layout: &Layout,
+        dst_shape: &[usize],
+    ) -> Result<Self> {
+        assert!(layout.is_compact());
+        assert!(indices_layout.is_compact());
+        assert_eq!(indices_layout.ndim(), 1, "index_add requires 1D indices");
+        assert!(dim < dst_shape.len(), "index_add dim out of bounds");
+
+        let indices = Self::compact_indices(indices, indices_layout);
+        let left_len: usize = dst_shape[..dim].iter().product();
+        let dst_dim = dst_shape[dim];
+        let right_len: usize = dst_shape[(dim + 1)..].iter().product();
+        let src_dim = layout.shape()[dim];
+
+        assert_eq!(
+            src_dim,
+            indices.len(),
+            "index_add source length along dim must match indices length"
+        );
+        assert_eq!(
+            layout.size(),
+            left_len * src_dim * right_len,
+            "index_add source shape must match destination outside indexed dim"
+        );
+        for idx in &indices {
+            assert!(*idx < dst_dim, "index_add index {} out of bounds ({})", idx, dst_dim);
+        }
+
+        match self {
+            CpuStorage::F16(data) => {
+                let mut out = vec![f16::from_f32(0.0); dst_shape.iter().product()];
+                index_add_into(&mut out, data, left_len, dst_dim, right_len, &indices);
+                Ok(CpuStorage::F16(out))
+            }
+            CpuStorage::F32(data) => {
+                let mut out = vec![0.0f32; dst_shape.iter().product()];
+                index_add_into(&mut out, data, left_len, dst_dim, right_len, &indices);
+                Ok(CpuStorage::F32(out))
+            }
+            CpuStorage::I64(data) => {
+                let mut out = vec![0i64; dst_shape.iter().product()];
+                index_add_into(&mut out, data, left_len, dst_dim, right_len, &indices);
                 Ok(CpuStorage::I64(out))
             }
         }
@@ -491,6 +566,91 @@ impl BackendStorage for CpuStorage {
                 Ok(CpuStorage::F32(out))
             }
             _ => todo!("matmul only supports floating tensors"),
+        }
+    }
+}
+
+fn gather_into<T: Copy>(
+    data: &[T],
+    left_len: usize,
+    src_dim: usize,
+    index_len: usize,
+    right_len: usize,
+    indices: &[usize],
+) -> Vec<T> {
+    let mut out = Vec::with_capacity(left_len * index_len * right_len);
+    for left in 0..left_len {
+        let src_base = left * src_dim * right_len;
+        let ids_base = left * index_len * right_len;
+        for index_i in 0..index_len {
+            let ids_offset = ids_base + index_i * right_len;
+            for right in 0..right_len {
+                let src_i = indices[ids_offset + right];
+                out.push(data[src_base + src_i * right_len + right]);
+            }
+        }
+    }
+    out
+}
+
+fn scatter_add_into<T: Copy + std::ops::AddAssign>(
+    out: &mut [T],
+    data: &[T],
+    left_len: usize,
+    dst_dim: usize,
+    index_len: usize,
+    right_len: usize,
+    indices: &[usize],
+) {
+    for left in 0..left_len {
+        let src_base = left * index_len * right_len;
+        let dst_base = left * dst_dim * right_len;
+        for index_i in 0..index_len {
+            let ids_offset = src_base + index_i * right_len;
+            for right in 0..right_len {
+                let dst_i = indices[ids_offset + right];
+                out[dst_base + dst_i * right_len + right] += data[ids_offset + right];
+            }
+        }
+    }
+}
+
+fn index_select_into<T: Copy>(
+    data: &[T],
+    left_len: usize,
+    src_dim: usize,
+    right_len: usize,
+    indices: &[usize],
+) -> Vec<T> {
+    let mut out = Vec::with_capacity(left_len * indices.len() * right_len);
+    for left in 0..left_len {
+        let src_base = left * src_dim * right_len;
+        for &idx in indices {
+            let start = src_base + idx * right_len;
+            out.extend_from_slice(&data[start..start + right_len]);
+        }
+    }
+    out
+}
+
+fn index_add_into<T: Copy + std::ops::AddAssign>(
+    out: &mut [T],
+    data: &[T],
+    left_len: usize,
+    dst_dim: usize,
+    right_len: usize,
+    indices: &[usize],
+) {
+    let src_dim = indices.len();
+    for left in 0..left_len {
+        let src_base = left * src_dim * right_len;
+        let dst_base = left * dst_dim * right_len;
+        for (src_i, &dst_i) in indices.iter().enumerate() {
+            let src_offset = src_base + src_i * right_len;
+            let dst_offset = dst_base + dst_i * right_len;
+            for right in 0..right_len {
+                out[dst_offset + right] += data[src_offset + right];
+            }
         }
     }
 }

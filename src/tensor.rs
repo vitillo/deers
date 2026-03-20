@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use half::f16;
-use rand::Rng;
+use rand::RngExt;
 
 use crate::device::Device;
 use crate::dtype::{DType, WithDType};
@@ -154,15 +154,15 @@ impl Tensor {
     /// Create a tensor with values drawn from a uniform distribution in [0, 1).
     pub fn rand(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let storage = match dtype {
             DType::F16 => {
                 let data: Vec<f16> =
-                    (0..shape.size()).map(|_| f16::from_f32(rng.gen::<f32>())).collect();
+                    (0..shape.size()).map(|_| f16::from_f32(rng.random::<f32>())).collect();
                 CpuStorage::from(data).to(device)
             }
             DType::F32 => {
-                let data: Vec<f32> = (0..shape.size()).map(|_| rng.gen()).collect();
+                let data: Vec<f32> = (0..shape.size()).map(|_| rng.random()).collect();
                 CpuStorage::from(data).to(device)
             }
             _ => unimplemented!(),
@@ -173,15 +173,16 @@ impl Tensor {
     /// Create a tensor with values drawn from a standard normal distribution.
     pub fn randn(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         // Box-Muller transform
         let storage = match dtype {
             DType::F16 => {
                 let data: Vec<f16> = (0..shape.size())
                     .map(|_| {
-                        let u1: f32 = rng.gen();
-                        let u2: f32 = rng.gen();
-                        let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos();
+                        let u1: f32 = rng.random();
+                        let u2: f32 = rng.random();
+                        let z =
+                            (-2.0f32 * u1.ln()).sqrt() * (2.0f32 * std::f32::consts::PI * u2).cos();
                         f16::from_f32(z)
                     })
                     .collect();
@@ -190,9 +191,9 @@ impl Tensor {
             DType::F32 => {
                 let data: Vec<f32> = (0..shape.size())
                     .map(|_| {
-                        let u1: f32 = rng.gen();
-                        let u2: f32 = rng.gen();
-                        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
+                        let u1: f32 = rng.random();
+                        let u2: f32 = rng.random();
+                        (-2.0f32 * u1.ln()).sqrt() * (2.0f32 * std::f32::consts::PI * u2).cos()
                     })
                     .collect();
                 CpuStorage::from(data).to(device)
@@ -407,16 +408,19 @@ impl Tensor {
 
     /// Gathers values along `dim` using integer indices.
     ///
-    /// For a 2D tensor of shape `(rows, cols)` with `dim=1` and indices of shape `(rows,)`,
-    /// returns shape `(rows, 1)` where `out[i, 0] = self[i, indices[i]]`.
+    /// The index tensor must have the same rank as `self` and the same shape on
+    /// every non-indexed dimension. The output shape matches `indices`, so each
+    /// index element picks one value from `self` along `dim`.
     pub fn gather(&self, dim: usize, indices: &Tensor) -> Tensor {
         ops::Gather::new(self.clone(), dim, indices.clone()).forward().unwrap()
     }
 
-    /// Selects rows from a 2D tensor by index.
-    /// Input: (rows, cols), indices: 1D i64 -> output: (num_indices, cols).
-    pub fn index_select(&self, indices: &Tensor) -> Tensor {
-        ops::IndexSelect::new(self.clone(), indices.clone()).forward().unwrap()
+    /// Selects slices along `dim` using a 1-D integer index tensor.
+    ///
+    /// The output shape matches `self` except the size at `dim` becomes
+    /// `indices.len()`.
+    pub fn index_select(&self, dim: usize, indices: &Tensor) -> Tensor {
+        ops::IndexSelect::new(self.clone(), dim, indices.clone()).forward().unwrap()
     }
 }
 

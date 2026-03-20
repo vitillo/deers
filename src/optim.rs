@@ -24,7 +24,8 @@ impl SGD {
         let grads = loss.backward()?;
         for parameter in &self.parameters {
             if let Some(grad) = grads.get(parameter.id()) {
-                let updated = (&**parameter - &(grad * self.lr)).attach();
+                let step = grad * self.lr;
+                let updated = (&**parameter - &step).attach();
                 parameter.set(&updated)?;
             }
         }

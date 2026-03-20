@@ -10,7 +10,7 @@ use crate::tensor::Tensor;
 /// Equivalent to PyTorch's `F.nll_loss` or candle's `loss::nll`.
 pub fn nll_loss(log_probs: &Tensor, targets: &Tensor) -> Tensor {
     let batch_size = log_probs.layout().shape()[0] as f64;
-    let picked = log_probs.gather(1, targets); // (batch, 1)
+    let picked = log_probs.gather(1, &targets.reshape((targets.layout().shape()[0], 1)));
     picked.sum(vec![0, 1], true) * (-1.0 / batch_size)
 }
 

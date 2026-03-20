@@ -84,19 +84,11 @@ impl UnaryOp for ReluBackward {
     const KERNEL: &'static str = "relu_backward";
 
     fn f16(&self, v: f16) -> f16 {
-        if v > f16::from_f32(0.0) {
-            f16::from_f32(1.0)
-        } else {
-            f16::from_f32(0.0)
-        }
+        if v > f16::from_f32(0.0) { f16::from_f32(1.0) } else { f16::from_f32(0.0) }
     }
 
     fn f32(&self, v: f32) -> f32 {
-        if v > 0.0 {
-            1.0
-        } else {
-            0.0
-        }
+        if v > 0.0 { 1.0 } else { 0.0 }
     }
 }
 
@@ -175,19 +167,11 @@ impl BinaryOp for EWiseEq {
     const KERNEL: &'static str = "eq";
 
     fn f16(v: f16, w: f16) -> f16 {
-        if v == w {
-            f16::from_f32(1.0)
-        } else {
-            f16::from_f32(0.0)
-        }
+        if v == w { f16::from_f32(1.0) } else { f16::from_f32(0.0) }
     }
 
     fn f32(v: f32, w: f32) -> f32 {
-        if v == w {
-            1.0
-        } else {
-            0.0
-        }
+        if v == w { 1.0 } else { 0.0 }
     }
 }
 
@@ -244,9 +228,9 @@ pub trait BackendStorage: Sized {
     fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()>;
     /// Matrix multiplication for layouts whose shapes are compatible under matmul rules.
     fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self>;
-    /// Gathers values along `dim` using integer indices.
-    /// `indices` must be a compact integer tensor. Returns a new compact storage
-    /// with one value per index.
+    /// Gathers values along `dim` using compact integer indices.
+    /// `indices` must have the same rank as `layout` and the same shape on every
+    /// non-indexed dimension. The returned compact storage matches `indices`.
     fn gather(
         &self,
         layout: &Layout,
@@ -254,24 +238,34 @@ pub trait BackendStorage: Sized {
         indices: &Self,
         indices_layout: &Layout,
     ) -> Result<Self>;
-    /// Scatters `src` values into a zero-initialized tensor of shape `full_shape`,
-    /// placing each value at the corresponding index along `dim`.
-    fn scatter(
+    /// Scatter-adds `src` values into a zero-initialized tensor of shape `dst_shape`,
+    /// accumulating each value at the corresponding index along `dim`.
+    fn scatter_add(
         &self,
         layout: &Layout,
         dim: usize,
         indices: &Self,
         indices_layout: &Layout,
-        full_shape: &[usize],
+        dst_shape: &[usize],
     ) -> Result<Self>;
-    /// Selects rows along dimension 0 using integer indices.
-    /// Input must be compact 2D and `indices` must be a compact 1-D integer tensor.
-    /// Returns compact `(num_indices, cols)` storage.
+    /// Selects slices along `dim` using a compact 1-D integer index tensor.
+    /// The output matches `layout` except the length at `dim` becomes `indices.len()`.
     fn index_select(
         &self,
         layout: &Layout,
+        dim: usize,
         indices: &Self,
         indices_layout: &Layout,
+    ) -> Result<Self>;
+    /// Adds source slices into a zero-initialized tensor of shape `dst_shape`
+    /// along `dim` using a compact 1-D integer index tensor.
+    fn index_add(
+        &self,
+        layout: &Layout,
+        dim: usize,
+        indices: &Self,
+        indices_layout: &Layout,
+        dst_shape: &[usize],
     ) -> Result<Self>;
     fn dtype(&self) -> DType;
     fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D>;
@@ -386,39 +380,67 @@ impl BackendStorage for Storage {
         }
     }
 
-    fn scatter(
+    fn scatter_add(
         &self,
         layout: &Layout,
         dim: usize,
         indices: &Self,
         indices_layout: &Layout,
-        full_shape: &[usize],
+        dst_shape: &[usize],
     ) -> Result<Self> {
         match (self, indices) {
-            (Storage::Cpu(storage), Storage::Cpu(indices)) => {
-                Ok(Self::Cpu(storage.scatter(layout, dim, indices, indices_layout, full_shape)?))
-            }
-            (Storage::Mps(storage), Storage::Mps(indices)) => {
-                Ok(Self::Mps(storage.scatter(layout, dim, indices, indices_layout, full_shape)?))
-            }
-            _ => Err(Error::DeviceMismatch { op: "scatter" }),
+            (Storage::Cpu(storage), Storage::Cpu(indices)) => Ok(Self::Cpu(storage.scatter_add(
+                layout,
+                dim,
+                indices,
+                indices_layout,
+                dst_shape,
+            )?)),
+            (Storage::Mps(storage), Storage::Mps(indices)) => Ok(Self::Mps(storage.scatter_add(
+                layout,
+                dim,
+                indices,
+                indices_layout,
+                dst_shape,
+            )?)),
+            _ => Err(Error::DeviceMismatch { op: "scatter_add" }),
         }
     }
 
     fn index_select(
         &self,
         layout: &Layout,
+        dim: usize,
         indices: &Self,
         indices_layout: &Layout,
     ) -> Result<Self> {
         match (self, indices) {
             (Storage::Cpu(storage), Storage::Cpu(indices)) => {
-                Ok(Self::Cpu(storage.index_select(layout, indices, indices_layout)?))
+                Ok(Self::Cpu(storage.index_select(layout, dim, indices, indices_layout)?))
             }
             (Storage::Mps(storage), Storage::Mps(indices)) => {
-                Ok(Self::Mps(storage.index_select(layout, indices, indices_layout)?))
+                Ok(Self::Mps(storage.index_select(layout, dim, indices, indices_layout)?))
             }
             _ => Err(Error::DeviceMismatch { op: "index_select" }),
+        }
+    }
+
+    fn index_add(
+        &self,
+        layout: &Layout,
+        dim: usize,
+        indices: &Self,
+        indices_layout: &Layout,
+        dst_shape: &[usize],
+    ) -> Result<Self> {
+        match (self, indices) {
+            (Storage::Cpu(storage), Storage::Cpu(indices)) => {
+                Ok(Self::Cpu(storage.index_add(layout, dim, indices, indices_layout, dst_shape)?))
+            }
+            (Storage::Mps(storage), Storage::Mps(indices)) => {
+                Ok(Self::Mps(storage.index_add(layout, dim, indices, indices_layout, dst_shape)?))
+            }
+            _ => Err(Error::DeviceMismatch { op: "index_add" }),
         }
     }
 }
