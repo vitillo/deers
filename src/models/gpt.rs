@@ -1,7 +1,7 @@
 use half::f16;
 
 use crate::error::Result;
-use crate::nn::{Linear, Module, Parameter, functional};
+use crate::nn::{Linear, Module, Parameter, RMSNorm, functional};
 use crate::tensor::Tensor;
 use crate::{DType, Device};
 
@@ -193,5 +193,43 @@ impl Module for MLP {
         let mut parameters = self.up_proj.parameters();
         parameters.extend(self.down_proj.parameters());
         parameters
+    }
+}
+
+/// Pre-norm residual GPT block.
+pub struct Block {
+    norm1: RMSNorm,
+    attn: CausalSelfAttention,
+    norm2: RMSNorm,
+    mlp: MLP,
+}
+
+impl Block {
+    pub fn new(n_embd: usize, n_head: usize, hidden_dim: usize, eps: f64) -> Self {
+        Self {
+            norm1: RMSNorm::new(eps),
+            attn: CausalSelfAttention::new(n_embd, n_head),
+            norm2: RMSNorm::new(eps),
+            mlp: MLP::new(n_embd, hidden_dim),
+        }
+    }
+
+    pub fn forward(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+        let x = x + &self.attn.forward(&self.norm1.forward(x)?, cos, sin)?;
+        let y = self.mlp.forward(&self.norm2.forward(&x)?)?;
+        Ok(&x + &y)
+    }
+
+    pub fn parameters(&self) -> Vec<Parameter> {
+        let mut parameters = self.attn.parameters();
+        parameters.extend(self.mlp.parameters());
+        parameters
+    }
+
+    pub fn to_device(&self, device: Device) -> Result<()> {
+        for parameter in self.parameters() {
+            parameter.to_device(device)?;
+        }
+        Ok(())
     }
 }
