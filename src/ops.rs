@@ -634,7 +634,7 @@ pub struct Permute {
 impl Permute {
     pub fn new(arg: Tensor, axes: Shape) -> Result<Self> {
         if arg.layout().ndim() != axes.ndim() {
-            return Err(Error::ShapeMismatch(format!(
+            return Err(Error::LayoutMismatch(format!(
                 "permute: tensor has {} dims but got {} axes",
                 arg.layout().ndim(),
                 axes.ndim()
@@ -677,7 +677,7 @@ pub struct Broadcast {
 impl Broadcast {
     pub fn new(arg: Tensor, new_shape: Shape) -> Result<Self> {
         if new_shape.ndim() < arg.layout().ndim() {
-            return Err(Error::ShapeMismatch(format!(
+            return Err(Error::LayoutMismatch(format!(
                 "broadcast: target ndim {} < source ndim {}",
                 new_shape.ndim(),
                 arg.layout().ndim()
@@ -703,7 +703,7 @@ impl TensorOp for Broadcast {
             if *old_dim == 1 {
                 new_strides[i] = 0;
             } else if old_dim != new_dim {
-                return Err(Error::ShapeMismatch(format!(
+                return Err(Error::LayoutMismatch(format!(
                     "broadcast: dimension {} is {} but target is {}",
                     i, old_dim, new_dim
                 )));
@@ -755,7 +755,7 @@ pub struct Sum {
 impl Sum {
     pub fn new(arg: Tensor, axis: Vec<usize>, keep_dims: bool) -> Result<Self> {
         if let Some(&bad) = axis.iter().find(|&&i| i >= arg.layout().ndim()) {
-            return Err(Error::ShapeMismatch(format!(
+            return Err(Error::LayoutMismatch(format!(
                 "sum: axis {} out of bounds for {} dims",
                 bad,
                 arg.layout().ndim()
@@ -799,7 +799,7 @@ pub struct Max {
 impl Max {
     pub fn new(arg: Tensor, axis: Vec<usize>, keep_dims: bool) -> Result<Self> {
         if let Some(&bad) = axis.iter().find(|&&i| i >= arg.layout().ndim()) {
-            return Err(Error::ShapeMismatch(format!(
+            return Err(Error::LayoutMismatch(format!(
                 "max: axis {} out of bounds for {} dims",
                 bad,
                 arg.layout().ndim()
@@ -846,7 +846,7 @@ pub struct Reshape {
 impl Reshape {
     pub fn new(arg: Tensor, new_shape: Shape) -> Result<Self> {
         if arg.layout().size() != new_shape.size() {
-            return Err(Error::ShapeMismatch(format!(
+            return Err(Error::LayoutMismatch(format!(
                 "reshape: size {} cannot be reshaped to size {}",
                 arg.layout().size(),
                 new_shape.size()
@@ -886,14 +886,14 @@ pub struct Narrow {
 impl Narrow {
     pub fn new(arg: Tensor, dim: usize, start: usize, len: usize) -> Result<Self> {
         if dim >= arg.layout().ndim() {
-            return Err(Error::ShapeMismatch(format!(
+            return Err(Error::LayoutMismatch(format!(
                 "narrow: dim {} out of bounds for {} dims",
                 dim,
                 arg.layout().ndim()
             )));
         }
         if start + len > arg.layout().shape()[dim] {
-            return Err(Error::ShapeMismatch(format!(
+            return Err(Error::LayoutMismatch(format!(
                 "narrow: start {} + len {} exceeds dim size {}",
                 start,
                 len,
@@ -901,7 +901,7 @@ impl Narrow {
             )));
         }
         if !arg.is_compact() {
-            return Err(Error::ShapeMismatch("narrow requires compact tensors".into()));
+            return Err(Error::LayoutMismatch("narrow requires compact tensors".into()));
         }
         Ok(Self { arg, dim, start, len })
     }
@@ -1125,14 +1125,14 @@ pub struct Gather {
 impl Gather {
     pub fn new(arg: Tensor, dim: usize, indices: Tensor) -> Result<Self> {
         if arg.layout().ndim() != indices.layout().ndim() {
-            return Err(Error::ShapeMismatch(format!(
+            return Err(Error::LayoutMismatch(format!(
                 "gather: arg has {} dims but indices has {}",
                 arg.layout().ndim(),
                 indices.layout().ndim()
             )));
         }
         if dim >= arg.layout().ndim() {
-            return Err(Error::ShapeMismatch(format!(
+            return Err(Error::LayoutMismatch(format!(
                 "gather: dim {} out of bounds for {} dims",
                 dim,
                 arg.layout().ndim()
@@ -1140,7 +1140,7 @@ impl Gather {
         }
         for axis in 0..arg.layout().ndim() {
             if axis != dim && arg.layout().shape()[axis] != indices.layout().shape()[axis] {
-                return Err(Error::ShapeMismatch(format!(
+                return Err(Error::LayoutMismatch(format!(
                     "gather: shape mismatch at dim {}: {} vs {}",
                     axis,
                     arg.layout().shape()[axis],
@@ -1149,7 +1149,7 @@ impl Gather {
             }
         }
         if indices.dtype() != crate::DType::I64 {
-            return Err(Error::ShapeMismatch("gather indices must be i64".into()));
+            return Err(Error::DTypeMismatch("gather indices must be i64".into()));
         }
         let indices = indices.to_device(arg.device())?;
         Ok(Self { arg: arg.compact(), dim, indices: indices.compact() })
@@ -1208,17 +1208,17 @@ pub struct IndexSelect {
 impl IndexSelect {
     pub fn new(arg: Tensor, dim: usize, indices: Tensor) -> Result<Self> {
         if dim >= arg.layout().ndim() {
-            return Err(Error::ShapeMismatch(format!(
+            return Err(Error::LayoutMismatch(format!(
                 "index_select: dim {} out of bounds for {} dims",
                 dim,
                 arg.layout().ndim()
             )));
         }
         if indices.layout().ndim() != 1 {
-            return Err(Error::ShapeMismatch("index_select requires 1D indices".into()));
+            return Err(Error::LayoutMismatch("index_select requires 1D indices".into()));
         }
         if indices.dtype() != crate::DType::I64 {
-            return Err(Error::ShapeMismatch("index_select indices must be i64".into()));
+            return Err(Error::DTypeMismatch("index_select indices must be i64".into()));
         }
         let indices = indices.to_device(arg.device())?;
         Ok(Self { arg: arg.compact(), dim, indices: indices.compact() })
@@ -1273,28 +1273,28 @@ pub struct Cat {
 impl Cat {
     pub fn new(args: Vec<Tensor>) -> Result<Self> {
         if args.is_empty() {
-            return Err(Error::ShapeMismatch("cat requires at least one tensor".into()));
+            return Err(Error::LayoutMismatch("cat requires at least one tensor".into()));
         }
         let ndim = args[0].layout().ndim();
         let dtype = args[0].dtype();
         for arg in &args[1..] {
             if arg.layout().ndim() != ndim {
-                return Err(Error::ShapeMismatch(format!(
+                return Err(Error::LayoutMismatch(format!(
                     "cat: ndim mismatch, expected {} but got {}",
                     ndim,
                     arg.layout().ndim()
                 )));
             }
             if arg.dtype() != dtype {
-                return Err(Error::ShapeMismatch(format!(
-                    "cat: dtype mismatch, expected {:?} but got {:?}",
+                return Err(Error::DTypeMismatch(format!(
+                    "cat: expected {:?} but got {:?}",
                     dtype,
                     arg.dtype()
                 )));
             }
             for d in 1..ndim {
                 if arg.layout().shape()[d] != args[0].layout().shape()[d] {
-                    return Err(Error::ShapeMismatch(format!(
+                    return Err(Error::LayoutMismatch(format!(
                         "cat: dimension {} mismatch, expected {} but got {}",
                         d,
                         args[0].layout().shape()[d],
