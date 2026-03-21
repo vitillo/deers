@@ -17,6 +17,7 @@ mod ops;
 pub mod optim;
 mod storage;
 mod tensor;
+pub mod tokenizer;
 pub use device::Device;
 pub use dtype::DType;
 pub use tensor::Tensor;
