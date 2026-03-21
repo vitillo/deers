@@ -125,7 +125,7 @@ impl CpuStorage {
                 false,
                 false,
                 false,
-                gemm::Parallelism::Rayon(0),
+                gemm::Parallelism::None,
             );
         }
     }
