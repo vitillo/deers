@@ -11,7 +11,7 @@ use deers::dataset::TextDataset;
 use deers::models::gpt::{GPT, GPTConfig};
 use deers::optim::{AdamWConfig, LrSchedule, WarmupWarmdown};
 use deers::tokenizer::Tokenizer;
-use deers::{Device, loss};
+use deers::{Device, Tensor, loss};
 
 fn main() {
     let device = parse_device_arg();
@@ -105,6 +105,11 @@ fn main() {
                 lr,
                 t_step,
             );
+
+            if (step + 1) % 10 == 0 {
+                let sample = generate(&model, &tokenizer, "Once upon a time", 64, device);
+                println!("  >> {sample}");
+            }
         }
 
         let avg_loss = epoch_loss / num_batches as f32;
@@ -113,6 +118,34 @@ fn main() {
     }
 
     println!("Done in {:.1}s.", train_start.elapsed().as_secs_f64());
+}
+
+/// Greedy autoregressive generation: feed the full sequence each step, take argmax.
+fn generate(model: &GPT, tokenizer: &Tokenizer, prompt: &str, max_tokens: usize, device: Device) -> String {
+    let mut tokens: Vec<i64> = tokenizer.encode(prompt).iter().map(|&t| t as i64).collect();
+
+    for _ in 0..max_tokens {
+        let seq_len = tokens.len();
+        let input = Tensor::from_vec(tokens.clone(), (1, seq_len), device);
+        let logits = model.forward(&input).unwrap(); // [1, T, V]
+
+        // Get logits for the last position
+        let last_logits = logits.narrow(1, seq_len - 1, 1).reshape(vec![logits.layout().shape()[2]]);
+        let probs: Vec<f32> = last_logits.to_vec().unwrap();
+
+        // Argmax
+        let next_token = probs
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .unwrap()
+            .0;
+
+        tokens.push(next_token as i64);
+    }
+
+    let u32_tokens: Vec<u32> = tokens.iter().map(|&t| t as u32).collect();
+    tokenizer.decode(&u32_tokens)
 }
 
 fn parse_device_arg() -> Device {
