@@ -158,6 +158,59 @@ impl AdamW {
     }
 }
 
+/// A learning rate schedule maps a step number to a multiplier in [0, 1].
+///
+/// Usage in a training loop:
+/// ```ignore
+/// let lr = base_lr * schedule.lr_multiplier(step);
+/// opt.set_lr(lr);
+/// ```
+pub trait LrSchedule {
+    /// Returns the learning rate multiplier for the given step.
+    fn lr_multiplier(&self, step: usize) -> f64;
+}
+
+/// nanochat-style schedule: linear warmup → constant → linear warmdown.
+///
+/// ```text
+/// 1.0 |    /‾‾‾‾‾‾‾‾‾\
+///     |   /             \
+/// f   |  /               \___
+///     | /
+/// 0.0 +------------------------
+///     0  warmup        total
+/// ```
+pub struct WarmupWarmdown {
+    warmup_steps: usize,
+    total_steps: usize,
+    warmdown_steps: usize,
+    final_lr_frac: f64,
+}
+
+impl WarmupWarmdown {
+    pub fn new(warmup_steps: usize, total_steps: usize, warmdown_ratio: f64, final_lr_frac: f64) -> Self {
+        let warmdown_steps = (warmdown_ratio * total_steps as f64).round() as usize;
+        Self { warmup_steps, total_steps, warmdown_steps, final_lr_frac }
+    }
+}
+
+impl LrSchedule for WarmupWarmdown {
+    fn lr_multiplier(&self, step: usize) -> f64 {
+        if step < self.warmup_steps {
+            // Linear warmup: 0 → 1
+            (step + 1) as f64 / self.warmup_steps as f64
+        } else if step + self.warmdown_steps <= self.total_steps {
+            // Constant phase
+            1.0
+        } else {
+            // Linear warmdown: 1 → final_lr_frac
+            let remaining = self.total_steps.saturating_sub(step) as f64;
+            let progress = remaining / self.warmdown_steps as f64;
+            progress + (1.0 - progress) * self.final_lr_frac
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +337,54 @@ mod tests {
 
         // Assert
         assert!(x.requires_grad());
+    }
+
+    #[test]
+    fn test_warmup_warmdown_warmup_phase() {
+        // Arrange — 10 warmup steps, 100 total, 50% warmdown, final_frac=0.05
+        let sched = WarmupWarmdown::new(10, 100, 0.5, 0.05);
+
+        // Act / Assert — linear ramp from 0.1 to 1.0
+        assert!((sched.lr_multiplier(0) - 0.1).abs() < 1e-10);
+        assert!((sched.lr_multiplier(4) - 0.5).abs() < 1e-10);
+        assert!((sched.lr_multiplier(9) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_warmup_warmdown_constant_phase() {
+        // Arrange
+        let sched = WarmupWarmdown::new(10, 100, 0.5, 0.05);
+
+        // Act / Assert — constant at 1.0 between warmup and warmdown
+        assert!((sched.lr_multiplier(10) - 1.0).abs() < 1e-10);
+        assert!((sched.lr_multiplier(30) - 1.0).abs() < 1e-10);
+        assert!((sched.lr_multiplier(50) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_warmup_warmdown_warmdown_phase() {
+        // Arrange
+        let sched = WarmupWarmdown::new(10, 100, 0.5, 0.05);
+
+        // Act / Assert — linear decay toward final_lr_frac
+        let mid_warmdown = sched.lr_multiplier(75);
+        assert!(mid_warmdown < 1.0 && mid_warmdown > 0.05);
+
+        let at_end = sched.lr_multiplier(100);
+        assert!((at_end - 0.05).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_warmup_warmdown_monotonic() {
+        // Arrange
+        let sched = WarmupWarmdown::new(10, 100, 0.5, 0.05);
+
+        // Act — collect multipliers for all steps
+        let multipliers: Vec<f64> = (0..=100).map(|s| sched.lr_multiplier(s)).collect();
+
+        // Assert — warmup is increasing, warmdown is decreasing
+        assert!(multipliers[..10].windows(2).all(|w| w[1] > w[0]));
+        assert!(multipliers[51..].windows(2).all(|w| w[1] <= w[0]));
     }
 
     #[test]
