@@ -81,8 +81,7 @@ impl TensorOp for Neg {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum - out_grad;
+        grads.accumulate(&self.arg, -out_grad);
         Ok(())
     }
 
@@ -120,12 +119,8 @@ impl TensorOp for EWiseAdd {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let grad_sum = grads.get_or_insert_zero(&self.arg1);
-        *grad_sum = &*grad_sum + out_grad;
-
-        let grad_sum = grads.get_or_insert_zero(&self.arg2);
-        *grad_sum = &*grad_sum + out_grad;
-
+        grads.accumulate(&self.arg1, out_grad.clone());
+        grads.accumulate(&self.arg2, out_grad.clone());
         Ok(())
     }
 
@@ -163,12 +158,8 @@ impl TensorOp for EWiseSub {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let grad_sum = grads.get_or_insert_zero(&self.arg1);
-        *grad_sum = &*grad_sum + out_grad;
-
-        let grad_sum = grads.get_or_insert_zero(&self.arg2);
-        *grad_sum = &*grad_sum - out_grad;
-
+        grads.accumulate(&self.arg1, out_grad.clone());
+        grads.accumulate(&self.arg2, -out_grad);
         Ok(())
     }
 
@@ -206,11 +197,8 @@ impl TensorOp for EWiseMul {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let grad_sum = grads.get_or_insert_zero(&self.arg1);
-        *grad_sum = &*grad_sum + &self.arg2 * out_grad;
-
-        let grad_sum = grads.get_or_insert_zero(&self.arg2);
-        *grad_sum = &*grad_sum + &self.arg1 * out_grad;
+        grads.accumulate(&self.arg1, &self.arg2 * out_grad);
+        grads.accumulate(&self.arg2, &self.arg1 * out_grad);
 
         Ok(())
     }
@@ -249,11 +237,8 @@ impl TensorOp for EWiseDiv {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let grad_sum = grads.get_or_insert_zero(&self.arg1);
-        *grad_sum = &*grad_sum + out_grad / &self.arg2;
-
-        let grad_sum = grads.get_or_insert_zero(&self.arg2);
-        *grad_sum = &*grad_sum + -out_grad * &self.arg1 / (&self.arg2.scalar_powf(2.0));
+        grads.accumulate(&self.arg1, out_grad / &self.arg2);
+        grads.accumulate(&self.arg2, -out_grad * &self.arg1 / (&self.arg2.scalar_powf(2.0)));
         Ok(())
     }
 
@@ -292,12 +277,10 @@ impl TensorOp for EWisePowf {
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let arg_grad = out_grad * &self.e * self.arg.powf(&self.e - 1.0);
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + arg_grad;
+        grads.accumulate(&self.arg, arg_grad);
 
         let e_grad = out_grad * self.arg.powf(&self.e) * self.arg.log();
-        let grad_sum = grads.get_or_insert_zero(&self.e);
-        *grad_sum = &*grad_sum + e_grad;
+        grads.accumulate(&self.e, e_grad);
 
         Ok(())
     }
@@ -331,8 +314,7 @@ impl TensorOp for EWiseLog {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + out_grad / &self.arg;
+        grads.accumulate(&self.arg, out_grad / &self.arg);
         Ok(())
     }
 
@@ -365,8 +347,7 @@ impl TensorOp for EWiseExp {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + out_grad * &self.arg.exp();
+        grads.accumulate(&self.arg, out_grad * &self.arg.exp());
         Ok(())
     }
 
@@ -399,8 +380,7 @@ impl TensorOp for EWiseSin {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + out_grad * &self.arg.cos();
+        grads.accumulate(&self.arg, out_grad * &self.arg.cos());
         Ok(())
     }
 
@@ -433,8 +413,7 @@ impl TensorOp for EWiseCos {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + out_grad * &self.arg.sin() * -1.0;
+        grads.accumulate(&self.arg, out_grad * &self.arg.sin() * -1.0);
         Ok(())
     }
 
@@ -469,8 +448,7 @@ impl TensorOp for Tanh {
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let out = self.arg.tanh();
         let arg_grad = out_grad * (&(&out * &out) * -1.0 + 1.0);
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + arg_grad;
+        grads.accumulate(&self.arg, arg_grad);
         Ok(())
     }
 
@@ -509,8 +487,7 @@ impl TensorOp for Relu {
         ));
         let mask =
             Tensor::new(mask_storage, Layout::from(self.arg.layout().shape().clone()), false, None);
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + out_grad * &mask;
+        grads.accumulate(&self.arg, out_grad * &mask);
         Ok(())
     }
 
@@ -545,9 +522,7 @@ impl TensorOp for ScalarAdd {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + out_grad;
-
+        grads.accumulate(&self.arg, out_grad.clone());
         Ok(())
     }
 
@@ -583,8 +558,7 @@ impl TensorOp for ScalarMul {
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let arg_grad = out_grad * self.scalar;
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + arg_grad;
+        grads.accumulate(&self.arg, arg_grad);
 
         Ok(())
     }
@@ -620,8 +594,7 @@ impl TensorOp for ScalarPowf {
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let arg_grad = out_grad * self.e * self.arg.scalar_powf(self.e - 1.0);
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + arg_grad;
+        grads.accumulate(&self.arg, arg_grad);
         Ok(())
     }
 
@@ -663,8 +636,7 @@ impl TensorOp for Permute {
         }
 
         let arg_grad = out_grad.permute(inverse);
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + arg_grad;
+        grads.accumulate(&self.arg, arg_grad);
         Ok(())
     }
 
@@ -740,8 +712,7 @@ impl TensorOp for Broadcast {
         // Sum out broadcasted axes
         let out_grad = out_grad.sum(axes, false).reshape(self.arg.layout().shape().clone());
 
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + out_grad;
+        grads.accumulate(&self.arg, out_grad);
         Ok(())
     }
 
@@ -784,8 +755,7 @@ impl TensorOp for Sum {
         let shape = reduce_shape(self.arg.layout().shape(), &self.axis, true);
 
         let out_grad = out_grad.reshape(shape).broadcast(self.arg.layout().shape().clone());
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + out_grad;
+        grads.accumulate(&self.arg, out_grad);
         Ok(())
     }
 
@@ -832,8 +802,7 @@ impl TensorOp for Max {
             .broadcast(self.arg.layout().shape().clone());
         let arg_grad = self.arg.eq(&max_broadcast) * grad;
 
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + arg_grad;
+        grads.accumulate(&self.arg, arg_grad);
         Ok(())
     }
 
@@ -870,8 +839,7 @@ impl TensorOp for Reshape {
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let out_grad = out_grad.reshape(self.arg.layout().shape().clone());
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + out_grad;
+        grads.accumulate(&self.arg, out_grad);
         Ok(())
     }
 
@@ -946,8 +914,7 @@ impl TensorOp for Narrow {
         }
 
         let arg_grad = Tensor::cat(&parts, self.dim);
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + arg_grad;
+        grads.accumulate(&self.arg, arg_grad);
         Ok(())
     }
 
@@ -1023,12 +990,10 @@ impl TensorOp for MatMul {
         // db = a^T @ out_grad   -> [..., k, n]
 
         let arg1_grad = out_grad.matmul(&self.arg2.transpose(None));
-        let grad_sum = grads.get_or_insert_zero(&self.arg1);
-        *grad_sum = &*grad_sum + arg1_grad;
+        grads.accumulate(&self.arg1, arg1_grad);
 
         let arg2_grad = self.arg1.transpose(None).matmul(out_grad);
-        let grad_sum = grads.get_or_insert_zero(&self.arg2);
-        *grad_sum = &*grad_sum + arg2_grad;
+        grads.accumulate(&self.arg2, arg2_grad);
 
         Ok(())
     }
@@ -1077,8 +1042,7 @@ impl TensorOp for LogSumExp {
             (out_grad / sum_z).reshape(expand_shape).broadcast(self.arg.layout().shape().clone());
         let arg_grad = grad_sum_z * exp_z;
 
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + arg_grad;
+        grads.accumulate(&self.arg, arg_grad);
         Ok(())
     }
 
@@ -1113,8 +1077,7 @@ impl TensorOp for Compact {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + out_grad;
+        grads.accumulate(&self.arg, out_grad.clone());
         Ok(())
     }
 
@@ -1186,8 +1149,9 @@ impl TensorOp for Gather {
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let arg_shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
-        let grad_storage = out_grad.compact().storage().scatter_add(
-            out_grad.layout(),
+        let out_compact = out_grad.compact();
+        let grad_storage = out_compact.storage().scatter_add(
+            out_compact.layout(),
             self.dim,
             &self.indices.storage(),
             self.indices.layout(),
@@ -1199,8 +1163,7 @@ impl TensorOp for Gather {
             false,
             None,
         );
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + &grad_tensor;
+        grads.accumulate(&self.arg, grad_tensor);
         Ok(())
     }
 
@@ -1252,8 +1215,9 @@ impl TensorOp for IndexSelect {
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let arg_shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
-        let grad_storage = out_grad.compact().storage().index_add(
-            out_grad.layout(),
+        let out_compact = out_grad.compact();
+        let grad_storage = out_compact.storage().index_add(
+            out_compact.layout(),
             self.dim,
             &self.indices.storage(),
             self.indices.layout(),
@@ -1265,8 +1229,7 @@ impl TensorOp for IndexSelect {
             false,
             None,
         );
-        let grad_sum = grads.get_or_insert_zero(&self.arg);
-        *grad_sum = &*grad_sum + &grad_tensor;
+        grads.accumulate(&self.arg, grad_tensor);
         Ok(())
     }
 
@@ -1347,12 +1310,12 @@ impl TensorOp for Cat {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let out_grad = out_grad.compact();
         let mut offset = 0;
         for arg in &self.args {
             let size = arg.layout().shape()[0];
             let grad_slice = out_grad.narrow(0, offset, size);
-            let grad_sum = grads.get_or_insert_zero(arg);
-            *grad_sum = &*grad_sum + &grad_slice;
+            grads.accumulate(arg, grad_slice);
             offset += size;
         }
         Ok(())

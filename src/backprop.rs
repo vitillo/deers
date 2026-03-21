@@ -89,6 +89,46 @@ impl GradientStore {
         self.store.entry(tensor.id()).or_insert_with(|| tensor.zeros_like())
     }
 
+    /// Accumulates `grad` into the gradient for `tensor`, adding element-wise.
+    /// If no gradient exists yet, stores `grad` directly (avoiding a zero-init + add).
+    /// When possible, performs the addition in-place on the existing storage.
+    pub fn accumulate(&mut self, tensor: &Tensor, grad: Tensor) {
+        use std::collections::hash_map::Entry;
+        match self.store.entry(tensor.id()) {
+            Entry::Vacant(e) => {
+                // First gradient — just store it, no addition needed.
+                e.insert(grad);
+            }
+            Entry::Occupied(mut e) => {
+                let existing = e.get_mut();
+                // Try in-place addition on the storage.
+                if existing.layout().is_compact()
+                    && grad.layout().is_compact()
+                    && existing.layout().shape() == grad.layout().shape()
+                {
+                    // In-place add directly on storage.
+                    let mut dst = existing.storage_mut();
+                    let src = grad.storage();
+                    if let (
+                        crate::storage::Storage::Cpu(crate::storage::CpuStorage::F32(dst)),
+                        crate::storage::Storage::Cpu(crate::storage::CpuStorage::F32(src)),
+                    ) = (&mut *dst, &*src)
+                    {
+                        for (d, s) in dst.iter_mut().zip(src.iter()) {
+                            *d += s;
+                        }
+                        return;
+                    }
+                    drop(dst);
+                    drop(src);
+                }
+                // Fallback: allocate new tensor.
+                let sum = &*existing + &grad;
+                *existing = sum;
+            }
+        }
+    }
+
     pub fn insert(&mut self, id: TensorId, tensor: Tensor) {
         self.store.insert(id, tensor);
     }
