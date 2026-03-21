@@ -173,9 +173,15 @@ impl Layout {
         Self { shape: Shape::new(shape), strides: Strides(strides), offset: self.offset }
     }
 
-    /// Returns true if this layout is contiguous row-major (no gaps, reordering, or offset).
+    /// Returns true if elements are laid out contiguously in row-major order.
+    /// The offset may be nonzero (e.g. after `narrow` on dim 0).
+    pub fn is_contiguous(&self) -> bool {
+        self.shape.compact_strides() == self.strides
+    }
+
+    /// Returns true if this layout is contiguous row-major with zero offset.
     pub fn is_compact(&self) -> bool {
-        self.offset == 0 && self.shape.compact_strides() == self.strides
+        self.offset == 0 && self.is_contiguous()
     }
 }
 

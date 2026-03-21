@@ -279,7 +279,12 @@ impl Tensor {
         ops::Max::new(self.clone(), axis, keep_dims).unwrap().forward().unwrap()
     }
 
-    /// Returns true if the tensor's memory layout is contiguous (row-major).
+    /// Returns true if elements are contiguous in memory (row-major strides).
+    pub fn is_contiguous(&self) -> bool {
+        self.0.layout.is_contiguous()
+    }
+
+    /// Returns true if contiguous with zero offset.
     pub fn is_compact(&self) -> bool {
         self.0.layout.is_compact()
     }

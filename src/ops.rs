@@ -900,8 +900,8 @@ impl Narrow {
                 arg.layout().shape()[dim]
             )));
         }
-        if !arg.is_compact() {
-            return Err(Error::LayoutMismatch("narrow requires compact tensors".into()));
+        if !arg.layout().is_contiguous() {
+            return Err(Error::LayoutMismatch("narrow requires contiguous tensors".into()));
         }
         Ok(Self { arg, dim, start, len })
     }
