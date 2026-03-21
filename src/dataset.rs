@@ -4,7 +4,7 @@ use std::io::Read;
 use std::{fs::File, path::Path};
 
 use crate::error::Result;
-
+use crate::tokenizer::Tokenizer;
 use crate::{Device, Tensor};
 
 /// The MNIST handwritten digit dataset (60k train + 10k test images).
@@ -62,6 +62,67 @@ impl MNISTDataset {
     }
 }
 
+/// A text dataset for language modelling (nanoGPT-style).
+///
+/// Loads a text file, tokenizes it, then packs the token stream into
+/// fixed-length rows of `seq_len + 1`. Each row yields an input window
+/// `row[..seq_len]` and a target window `row[1..]`, so the model learns
+/// to predict the next token at every position.
+///
+/// This is the simplest approach: concatenate all tokens and chunk.
+/// Tail tokens that don't fill a complete row are discarded.
+pub struct TextDataset {
+    /// All rows packed into a single `(num_sequences, seq_len + 1)` i64 tensor.
+    data: Tensor,
+    pub seq_len: usize,
+    pub vocab_size: usize,
+}
+
+impl TextDataset {
+    /// Loads and tokenizes a plain-text file.
+    ///
+    /// `seq_len` is the context window the model sees (e.g. 256 or 1024).
+    /// The file is read in full, tokenized with the provided [`Tokenizer`],
+    /// then chunked into rows of `seq_len + 1` tokens.
+    pub fn load(path: &Path, tokenizer: &Tokenizer, seq_len: usize) -> Result<Self> {
+        let text = std::fs::read_to_string(path)?;
+        let tokens = tokenizer.encode(&text);
+
+        let row_len = seq_len + 1;
+        let num_sequences = tokens.len() / row_len;
+        assert!(num_sequences > 0, "text file too short for seq_len={seq_len}");
+
+        // Truncate to an exact multiple of row_len and cast to i64.
+        let tokens: Vec<i64> = tokens[..num_sequences * row_len]
+            .iter()
+            .map(|&t| t as i64)
+            .collect();
+
+        let data = Tensor::from_vec(tokens, (num_sequences, row_len), Device::Cpu);
+
+        Ok(Self { data, seq_len, vocab_size: tokenizer.vocab_size() })
+    }
+
+    /// Number of sequences (rows) in the dataset.
+    pub fn len(&self) -> usize {
+        self.data.layout().shape()[0]
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The input tokens: `(num_sequences, seq_len)`.
+    pub fn inputs(&self) -> Tensor {
+        self.data.narrow(1, 0, self.seq_len)
+    }
+
+    /// The target tokens: `(num_sequences, seq_len)`, shifted by one.
+    pub fn targets(&self) -> Tensor {
+        self.data.narrow(1, 1, self.seq_len)
+    }
+}
+
 fn read_u32(reader: &mut impl Read) -> Result<u32> {
     let mut buf = [0u8; 4];
     reader.read_exact(&mut buf)?;
@@ -72,6 +133,45 @@ fn read_u32(reader: &mut impl Read) -> Result<u32> {
 mod tests {
     use super::*;
     use crate::layout::Shape;
+
+    #[test]
+    fn test_text_dataset() {
+        // Arrange — write a small text file with enough tokens.
+        let dir = std::env::temp_dir().join("deers_text_dataset_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiny.txt");
+        // Repeat a sentence so we get plenty of tokens.
+        let text = "Once upon a time there was a little cat. ".repeat(200);
+        std::fs::write(&path, &text).unwrap();
+
+        let tokenizer = Tokenizer::cl100k_base();
+        let seq_len = 16;
+
+        // Act
+        let dataset = TextDataset::load(&path, &tokenizer, seq_len).unwrap();
+
+        // Assert
+        let num_seq = dataset.len();
+        assert!(num_seq > 0);
+        assert_eq!(
+            *dataset.inputs().layout().shape(),
+            Shape::from((num_seq, seq_len))
+        );
+        assert_eq!(
+            *dataset.targets().layout().shape(),
+            Shape::from((num_seq, seq_len))
+        );
+
+        // Verify the shift: for the first row, target[i] == data[0][i+1].
+        let row: Vec<i64> = dataset.data.narrow(0, 0, 1).to_vec().unwrap();
+        // row has seq_len+1 elements; inputs = row[0..seq_len], targets = row[1..seq_len+1]
+        assert_eq!(row.len(), seq_len + 1);
+        // Targets are just the inputs shifted by one position.
+        assert_eq!(&row[1..], &row[1..seq_len + 1]);
+
+        // Cleanup
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn test_mnist_dataset() {
