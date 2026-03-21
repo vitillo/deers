@@ -54,6 +54,11 @@ pub trait TensorOp: fmt::Debug + Send + Sync {
 
     /// Returns references to the input tensors this op depends on.
     fn dependencies(&self) -> Vec<&Tensor>;
+
+    /// Short name for profiling (e.g. "MatMul", "Add"). Defaults to the struct name.
+    fn name(&self) -> &'static str {
+        std::any::type_name::<Self>().rsplit("::").next().unwrap_or("?")
+    }
 }
 
 #[derive(Debug)]

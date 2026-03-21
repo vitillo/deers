@@ -26,8 +26,10 @@ impl SGD {
         let grads = loss.backward()?;
         for parameter in &self.parameters {
             if let Some(grad) = grads.get(parameter.id()) {
-                let step = grad * self.lr;
-                let updated = (&**parameter - &step).attach();
+                let grad = grad.detach();
+                let w = parameter.detach();
+                let step = &grad * self.lr;
+                let updated = (&w - &step).attach();
                 parameter.set(&updated)?;
             }
         }
@@ -125,9 +127,10 @@ impl AdamW {
 
         for param in &self.parameters {
             let grad = match grads.get(param.id()) {
-                Some(g) => g,
+                Some(g) => g.detach(),
                 None => continue,
             };
+            let w = param.detach();
 
             // First moment: m = β₁ * m + (1 - β₁) * grad
             let m = self.m.entry(param.id()).or_insert_with(|| param.zeros_like());
@@ -142,11 +145,8 @@ impl AdamW {
             let v_hat = &*v * (1.0 / bias_correction2);
 
             // Decoupled weight decay: w = w * (1 - lr * λ)
-            let decayed = if self.weight_decay > 0.0 {
-                &**param * (1.0 - self.lr * self.weight_decay)
-            } else {
-                (**param).clone()
-            };
+            let decayed =
+                if self.weight_decay > 0.0 { &w * (1.0 - self.lr * self.weight_decay) } else { w };
 
             // Parameter update: w = w_decayed - lr * m̂ / (√v̂ + ε)
             let update = &m_hat / &(&v_hat.sqrt() + self.eps);
@@ -188,7 +188,12 @@ pub struct WarmupWarmdown {
 }
 
 impl WarmupWarmdown {
-    pub fn new(warmup_steps: usize, total_steps: usize, warmdown_ratio: f64, final_lr_frac: f64) -> Self {
+    pub fn new(
+        warmup_steps: usize,
+        total_steps: usize,
+        warmdown_ratio: f64,
+        final_lr_frac: f64,
+    ) -> Self {
         let warmdown_steps = (warmdown_ratio * total_steps as f64).round() as usize;
         Self { warmup_steps, total_steps, warmdown_steps, final_lr_frac }
     }

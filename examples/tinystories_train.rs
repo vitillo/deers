@@ -18,9 +18,12 @@ fn main() {
 
     // --- Tokenizer ---
     let t0 = Instant::now();
-    let tokenizer = Tokenizer::cl100k_base();
-    println!("Tokenizer: cl100k_base (vocab_size={}) [{:.1}s]",
-        tokenizer.vocab_size(), t0.elapsed().as_secs_f64());
+    let tokenizer = Tokenizer::gpt2();
+    println!(
+        "Tokenizer: gpt2 (vocab_size={}) [{:.1}s]",
+        tokenizer.vocab_size(),
+        t0.elapsed().as_secs_f64()
+    );
 
     // --- Dataset ---
     // Use the tiny slice for fast iteration; swap to the full file once perf is sorted.
@@ -75,13 +78,11 @@ fn main() {
 
             let step_t0 = Instant::now();
 
-            // Slice batch from dataset
+            // Slice batch from dataset and move to device
             let start = batch_idx * batch_size;
             let batch = dataset.data.narrow(0, start, batch_size);
-            let inputs = batch.narrow(1, 0, seq_len);
-            let targets = batch.narrow(1, 1, seq_len);
-
-            let t_data = step_t0.elapsed().as_secs_f64();
+            let inputs = batch.narrow(1, 0, seq_len).to_device(device).unwrap();
+            let targets = batch.narrow(1, 1, seq_len).to_device(device).unwrap();
 
             // Forward
             let logits = model.forward(&inputs).unwrap();
@@ -92,21 +93,18 @@ fn main() {
             let loss_val: Vec<f32> = batch_loss.to_vec().unwrap();
             epoch_loss += loss_val[0];
 
-            let t_fwd = step_t0.elapsed().as_secs_f64() - t_data;
-
             // Backward + optimizer step
             opt.backward_step(&batch_loss).unwrap();
 
-            let t_total = step_t0.elapsed().as_secs_f64();
-            let t_bwd = t_total - t_fwd - t_data;
+            let t_step = step_t0.elapsed().as_secs_f64();
 
-            if batch_idx % 10 == 0 || batch_idx + 1 == num_batches {
-                println!(
-                    "step {:>4}/{total_steps} | loss: {:.4} | lr: {:.2e} | \
-                     data: {:.3}s fwd: {:.3}s bwd: {:.3}s total: {:.3}s",
-                    step + 1, loss_val[0], lr, t_data, t_fwd, t_bwd, t_total,
-                );
-            }
+            println!(
+                "step {:>4}/{total_steps} | loss: {:.4} | lr: {:.2e} | {:.3}s/step",
+                step + 1,
+                loss_val[0],
+                lr,
+                t_step,
+            );
         }
 
         let avg_loss = epoch_loss / num_batches as f32;
