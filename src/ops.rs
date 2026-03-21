@@ -986,7 +986,14 @@ impl MatMul {
                 b.shape()[i]
             );
         }
-        Ok(Self { arg1: arg1.compact(), arg2: arg2.compact() })
+        // CPU backend passes strides directly to gemm, so no need to compact.
+        // MPS backend requires compact inputs.
+        let (arg1, arg2) = if matches!(arg1.device(), crate::Device::Cpu) {
+            (arg1, arg2)
+        } else {
+            (arg1.compact(), arg2.compact())
+        };
+        Ok(Self { arg1, arg2 })
     }
 }
 

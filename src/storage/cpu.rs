@@ -88,31 +88,38 @@ impl CpuStorage {
         }
     }
 
-    fn gemm<T: 'static>(
+    fn gemm_strided<T: 'static>(
         left: &[T],
+        lhs_rs: isize,
+        lhs_cs: isize,
         right: &[T],
+        rhs_rs: isize,
+        rhs_cs: isize,
         out: &mut [T],
         m: usize,
+        k: usize,
         n: usize,
-        p: usize,
         alpha: T,
         beta: T,
     ) {
+        // gemm convention: dst = alpha * dst + beta * lhs * rhs
+        // _rs = row stride (dim-0), _cs = column stride (dim-1)
+        // dst is row-major [m, n]: rs = n, cs = 1
         unsafe {
             gemm::gemm(
                 m,
-                p,
                 n,
+                k,
                 out.as_mut_ptr(),
-                1,
-                p as isize,
+                /* dst_cs */ 1,
+                /* dst_rs */ n as isize,
                 false,
                 left.as_ptr(),
-                1,
-                n as isize,
+                /* lhs_cs */ lhs_cs,
+                /* lhs_rs */ lhs_rs,
                 right.as_ptr(),
-                1,
-                p as isize,
+                /* rhs_cs */ rhs_cs,
+                /* rhs_rs */ rhs_rs,
                 alpha,
                 beta,
                 false,
@@ -121,6 +128,36 @@ impl CpuStorage {
                 gemm::Parallelism::Rayon(0),
             );
         }
+    }
+
+    /// Computes the flat starting offset for each batch element in a batched matmul.
+    /// The batch dimensions are all dims except the last two.
+    fn batch_offsets(layout: &Layout, batch: usize) -> Vec<usize> {
+        let ndim = layout.shape.ndim();
+        if ndim <= 2 {
+            return vec![layout.offset];
+        }
+        let batch_dims = ndim - 2;
+        let batch_shape: Vec<usize> = (0..batch_dims).map(|i| layout.shape[i]).collect();
+        let batch_strides: Vec<isize> = (0..batch_dims).map(|i| layout.strides.0[i]).collect();
+        let mut offsets = Vec::with_capacity(batch);
+        let mut cursor = vec![0usize; batch_dims];
+        for _ in 0..batch {
+            let mut off = layout.offset;
+            for (d, &c) in cursor.iter().enumerate() {
+                off = (off as isize + c as isize * batch_strides[d]) as usize;
+            }
+            offsets.push(off);
+            // Increment cursor (row-major order)
+            for d in (0..batch_dims).rev() {
+                cursor[d] += 1;
+                if cursor[d] < batch_shape[d] {
+                    break;
+                }
+                cursor[d] = 0;
+            }
+        }
+        offsets
     }
 
     fn compact_indices(indices: &CpuStorage, layout: &Layout) -> Result<Vec<usize>> {
@@ -647,28 +684,36 @@ impl BackendStorage for CpuStorage {
     }
 
     fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self> {
-        if !layout.is_compact() {
-            return Err(Error::LayoutMismatch("matmul: left layout must be compact".into()));
-        }
-        if !layout_other.is_compact() {
-            return Err(Error::LayoutMismatch("matmul: right layout must be compact".into()));
-        }
         let ndim = layout.shape.ndim();
         let k = layout.shape[ndim - 1];
         let m = layout.shape[ndim - 2];
         let n = layout_other.shape[ndim - 1];
         let batch: usize = (0..ndim - 2).map(|i| layout.shape[i]).product();
-        let a_skip = m * k;
-        let b_skip = k * n;
+
+        // Read strides from layouts — supports non-contiguous (e.g. transposed) inputs.
+        let lhs_rs = layout.strides.0[ndim - 2];
+        let lhs_cs = layout.strides.0[ndim - 1];
+        let rhs_rs = layout_other.strides.0[ndim - 2];
+        let rhs_cs = layout_other.strides.0[ndim - 1];
+
+        // Compute per-batch offsets from batch strides.
+        // For contiguous batch dims these are sequential; for permuted tensors
+        // they may jump around in memory.
+        let a_offsets = Self::batch_offsets(layout, batch);
+        let b_offsets = Self::batch_offsets(layout_other, batch);
         let c_skip = m * n;
 
         match (self, other) {
             (CpuStorage::F16(left), CpuStorage::F16(right)) => {
                 let mut out = vec![f16::from_f32(0.0); batch * m * n];
                 for i in 0..batch {
-                    CpuStorage::gemm(
-                        &left[i * a_skip..],
-                        &right[i * b_skip..],
+                    Self::gemm_strided(
+                        &left[a_offsets[i]..],
+                        lhs_rs,
+                        lhs_cs,
+                        &right[b_offsets[i]..],
+                        rhs_rs,
+                        rhs_cs,
                         &mut out[i * c_skip..],
                         m,
                         k,
@@ -682,9 +727,13 @@ impl BackendStorage for CpuStorage {
             (CpuStorage::F32(left), CpuStorage::F32(right)) => {
                 let mut out = vec![0.0f32; batch * m * n];
                 for i in 0..batch {
-                    CpuStorage::gemm(
-                        &left[i * a_skip..],
-                        &right[i * b_skip..],
+                    Self::gemm_strided(
+                        &left[a_offsets[i]..],
+                        lhs_rs,
+                        lhs_cs,
+                        &right[b_offsets[i]..],
+                        rhs_rs,
+                        rhs_cs,
                         &mut out[i * c_skip..],
                         m,
                         k,
