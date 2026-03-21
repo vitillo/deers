@@ -133,6 +133,16 @@ impl Tensor {
         Tensor::new(self.0.storage.clone(), self.0.layout.clone(), true, None)
     }
 
+    /// Returns a view of this tensor that does not track gradients.
+    /// Operations on the detached tensor will not build a computation graph.
+    /// This is the equivalent of PyTorch's `Tensor.detach()`.
+    pub fn detach(&self) -> Tensor {
+        if !self.0.requires_grad {
+            return self.clone();
+        }
+        Tensor::new(self.0.storage.clone(), self.0.layout.clone(), false, None)
+    }
+
     /// Creates a tensor filled with zeros.
     pub fn zeros(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();

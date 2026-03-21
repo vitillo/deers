@@ -12,6 +12,13 @@ pub struct Tokenizer {
 }
 
 impl Tokenizer {
+    /// Creates a tokenizer using GPT-2's r50k_base encoding (50257 vocab).
+    pub fn gpt2() -> Self {
+        let bpe = tiktoken_rs::r50k_base().expect("failed to load r50k_base");
+        // r50k_base: 50256 base tokens + 1 special token (<|endoftext|>)
+        Self { bpe, vocab_size: 50257 }
+    }
+
     /// Creates a tokenizer using OpenAI's cl100k_base encoding (100K vocab).
     pub fn cl100k_base() -> Self {
         let bpe = tiktoken_rs::cl100k_base().expect("failed to load cl100k_base");
