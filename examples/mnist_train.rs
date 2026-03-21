@@ -3,7 +3,7 @@ use std::{env, process};
 
 use deers::dataset::MNISTDataset;
 use deers::nn::{self, Module};
-use deers::optim::SGD;
+use deers::optim::AdamWConfig;
 use deers::{Device, Tensor, loss};
 
 fn main() {
@@ -28,13 +28,14 @@ fn main() {
     println!("Model: 784 -> 128 (relu) -> 10");
     println!("Parameters: {}", model.parameters().len());
 
-    let lr = 0.1;
-    let mut sgd = SGD::new(model.parameters(), lr);
+    let lr = 1e-3;
+    let mut opt = AdamWConfig::new(lr).build(model.parameters());
     let batch_size = 256;
     let num_batches = 60000 / batch_size;
     let epochs = 3;
 
-    println!("Training: {epochs} epochs, batch_size={batch_size}, lr={lr}\n");
+    println!("Optimizer: AdamW, lr={lr}");
+    println!("Training: {epochs} epochs, batch_size={batch_size}\n");
 
     for epoch in 0..epochs {
         let epoch_start = Instant::now();
@@ -49,7 +50,7 @@ fn main() {
             let batch_loss = loss::cross_entropy(&logits, &labels);
             let loss_val: Vec<f32> = batch_loss.to_vec().unwrap();
             epoch_loss += loss_val[0];
-            sgd.backward_step(&batch_loss).unwrap();
+            opt.backward_step(&batch_loss).unwrap();
 
             if batch_idx % 25 == 0 || batch_idx + 1 == num_batches {
                 println!("batch {}/{num_batches} | loss: {:.4}", batch_idx + 1, loss_val[0]);

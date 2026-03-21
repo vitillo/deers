@@ -92,8 +92,8 @@ mod imp {
         Buffer, CommandBuffer, CommandQueue, CompileOptions, ComputePipelineState, Device,
         MTLResourceOptions, MTLSize,
     };
-    use std::collections::HashMap;
     use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::ffi::c_void;
     use std::fmt;
     use std::sync::{Arc, OnceLock};
@@ -101,7 +101,7 @@ mod imp {
     const KERNELS: &str = include_str!("kernels.metal");
 
     thread_local! {
-        static ACTIVE_COMMAND_BUFFER: RefCell<Option<CommandBuffer>> = RefCell::new(None);
+        static ACTIVE_COMMAND_BUFFER: RefCell<Option<CommandBuffer>> = const { RefCell::new(None) };
     }
 
     const ALL_KERNELS: &[&str] = &[
@@ -212,9 +212,7 @@ mod imp {
         }
 
         fn pipeline(&self, name: &'static str) -> &ComputePipelineState {
-            self.pipelines
-                .get(name)
-                .unwrap_or_else(|| panic!("missing pipeline {name}"))
+            self.pipelines.get(name).unwrap_or_else(|| panic!("missing pipeline {name}"))
         }
 
         fn buffer_from_f32(&self, data: &[f32]) -> Buffer {
@@ -298,10 +296,7 @@ mod imp {
                 configure(&encoder);
                 let width = total_threads.max(1) as u64;
                 let tg = pipeline.max_total_threads_per_threadgroup().min(256) as u64;
-                encoder.dispatch_threads(
-                    MTLSize::new(width, 1, 1),
-                    MTLSize::new(tg.max(1), 1, 1),
-                );
+                encoder.dispatch_threads(MTLSize::new(width, 1, 1), MTLSize::new(tg.max(1), 1, 1));
                 encoder.end_encoding();
             });
         }
