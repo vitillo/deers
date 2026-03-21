@@ -93,11 +93,16 @@ mod imp {
         MTLResourceOptions, MTLSize,
     };
     use std::collections::HashMap;
+    use std::cell::RefCell;
     use std::ffi::c_void;
     use std::fmt;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, OnceLock};
 
     const KERNELS: &str = include_str!("kernels.metal");
+
+    thread_local! {
+        static ACTIVE_COMMAND_BUFFER: RefCell<Option<CommandBuffer>> = RefCell::new(None);
+    }
 
     const ALL_KERNELS: &[&str] = &[
         "neg_f16",
@@ -160,7 +165,6 @@ mod imp {
         device: Device,
         queue: CommandQueue,
         pipelines: HashMap<&'static str, ComputePipelineState>,
-        active_command_buffer: Mutex<Option<CommandBuffer>>,
     }
 
     impl MpsContext {
@@ -189,19 +193,28 @@ mod imp {
                 pipelines.insert(name, pipeline);
             }
 
-            Self { device, queue, pipelines, active_command_buffer: Mutex::new(None) }
+            Self { device, queue, pipelines }
         }
 
-        fn command_buffer(&self) -> std::sync::MutexGuard<'_, Option<CommandBuffer>> {
-            let mut guard = self.active_command_buffer.lock().unwrap();
-            if guard.is_none() {
-                *guard = Some(self.queue.new_command_buffer().to_owned());
-            }
-            guard
+        fn with_command_buffer<R>(&self, f: impl FnOnce(&CommandBuffer) -> R) -> R {
+            ACTIVE_COMMAND_BUFFER.with(|slot| {
+                let mut guard = slot.borrow_mut();
+                if guard.is_none() {
+                    *guard = Some(self.queue.new_command_buffer().to_owned());
+                }
+                let cb = guard.as_ref().unwrap();
+                f(cb)
+            })
+        }
+
+        fn clear_command_buffer(&self) -> Option<CommandBuffer> {
+            ACTIVE_COMMAND_BUFFER.with(|slot| slot.borrow_mut().take())
         }
 
         fn pipeline(&self, name: &'static str) -> &ComputePipelineState {
-            self.pipelines.get(name).unwrap_or_else(|| panic!("missing pipeline {name}"))
+            self.pipelines
+                .get(name)
+                .unwrap_or_else(|| panic!("missing pipeline {name}"))
         }
 
         fn buffer_from_f32(&self, data: &[f32]) -> Buffer {
@@ -253,15 +266,12 @@ mod imp {
         }
 
         fn synchronize(&self) {
-            let mut guard = self.active_command_buffer.lock().unwrap();
-            if let Some(command_buffer) = guard.take() {
-                drop(guard);
+            if let Some(command_buffer) = self.clear_command_buffer() {
                 command_buffer.commit();
                 command_buffer.wait_until_completed();
                 return;
             }
 
-            drop(guard);
             let command_buffer = self.queue.new_command_buffer();
             command_buffer.commit();
             command_buffer.wait_until_completed();
@@ -282,15 +292,18 @@ mod imp {
             configure: impl FnOnce(&metal::ComputeCommandEncoderRef),
         ) {
             let pipeline = self.pipeline(pipeline_name);
-            let guard = self.command_buffer();
-            let cb = guard.as_ref().unwrap();
-            let encoder = cb.new_compute_command_encoder();
-            encoder.set_compute_pipeline_state(&pipeline);
-            configure(&encoder);
-            let width = total_threads.max(1) as u64;
-            let tg = pipeline.max_total_threads_per_threadgroup().min(256) as u64;
-            encoder.dispatch_threads(MTLSize::new(width, 1, 1), MTLSize::new(tg.max(1), 1, 1));
-            encoder.end_encoding();
+            self.with_command_buffer(|cb| {
+                let encoder = cb.new_compute_command_encoder();
+                encoder.set_compute_pipeline_state(&pipeline);
+                configure(&encoder);
+                let width = total_threads.max(1) as u64;
+                let tg = pipeline.max_total_threads_per_threadgroup().min(256) as u64;
+                encoder.dispatch_threads(
+                    MTLSize::new(width, 1, 1),
+                    MTLSize::new(tg.max(1), 1, 1),
+                );
+                encoder.end_encoding();
+            });
         }
 
         fn dispatch_2d(
@@ -312,16 +325,16 @@ mod imp {
             configure: impl FnOnce(&metal::ComputeCommandEncoderRef),
         ) {
             let pipeline = self.pipeline(pipeline_name);
-            let guard = self.command_buffer();
-            let cb = guard.as_ref().unwrap();
-            let encoder = cb.new_compute_command_encoder();
-            encoder.set_compute_pipeline_state(&pipeline);
-            configure(&encoder);
-            encoder.dispatch_threads(
-                MTLSize::new(width as u64, height as u64, depth as u64),
-                MTLSize::new(16, 16, 1),
-            );
-            encoder.end_encoding();
+            self.with_command_buffer(|cb| {
+                let encoder = cb.new_compute_command_encoder();
+                encoder.set_compute_pipeline_state(&pipeline);
+                configure(&encoder);
+                encoder.dispatch_threads(
+                    MTLSize::new(width as u64, height as u64, depth as u64),
+                    MTLSize::new(16, 16, 1),
+                );
+                encoder.end_encoding();
+            });
         }
     }
 
@@ -903,23 +916,23 @@ mod imp {
                 let meta =
                     MatmulMeta { m: m as u32, k: k as u32, n: n as u32, batch: batch as u32 };
                 let pipeline = ctx.pipeline("matmul_f16");
-                let guard = ctx.command_buffer();
-                let cb = guard.as_ref().unwrap();
-                let encoder = cb.new_compute_command_encoder();
-                encoder.set_compute_pipeline_state(&pipeline);
-                encoder.set_buffer(0, Some(lhs), 0);
-                encoder.set_buffer(1, Some(rhs), 0);
-                encoder.set_buffer(2, Some(&out), 0);
-                MpsContext::set_params(&encoder, 3, &meta);
-                let tile = 16u64;
-                let groups = MTLSize::new(
-                    (n as u64 + tile - 1) / tile,
-                    (m as u64 + tile - 1) / tile,
-                    batch as u64,
-                );
-                let tg_size = MTLSize::new(tile, tile, 1);
-                encoder.dispatch_thread_groups(groups, tg_size);
-                encoder.end_encoding();
+                ctx.with_command_buffer(|cb| {
+                    let encoder = cb.new_compute_command_encoder();
+                    encoder.set_compute_pipeline_state(&pipeline);
+                    encoder.set_buffer(0, Some(lhs), 0);
+                    encoder.set_buffer(1, Some(rhs), 0);
+                    encoder.set_buffer(2, Some(&out), 0);
+                    MpsContext::set_params(&encoder, 3, &meta);
+                    let tile = 16u64;
+                    let groups = MTLSize::new(
+                        (n as u64 + tile - 1) / tile,
+                        (m as u64 + tile - 1) / tile,
+                        batch as u64,
+                    );
+                    let tg_size = MTLSize::new(tile, tile, 1);
+                    encoder.dispatch_thread_groups(groups, tg_size);
+                    encoder.end_encoding();
+                });
                 return Ok(Self {
                     inner: MpsInner::Accelerated {
                         ctx: ctx.clone(),
@@ -946,23 +959,23 @@ mod imp {
                 // Matmul uses tiled algorithm — must dispatch full threadgroups
                 // so all 16x16 threads cooperate on tile loading.
                 let pipeline = ctx.pipeline("matmul_f32");
-                let guard = ctx.command_buffer();
-                let cb = guard.as_ref().unwrap();
-                let encoder = cb.new_compute_command_encoder();
-                encoder.set_compute_pipeline_state(&pipeline);
-                encoder.set_buffer(0, Some(lhs), 0);
-                encoder.set_buffer(1, Some(rhs), 0);
-                encoder.set_buffer(2, Some(&out), 0);
-                MpsContext::set_params(&encoder, 3, &meta);
-                let tile = 16u64;
-                let groups = MTLSize::new(
-                    (n as u64 + tile - 1) / tile,
-                    (m as u64 + tile - 1) / tile,
-                    batch as u64,
-                );
-                let tg_size = MTLSize::new(tile, tile, 1);
-                encoder.dispatch_thread_groups(groups, tg_size);
-                encoder.end_encoding();
+                ctx.with_command_buffer(|cb| {
+                    let encoder = cb.new_compute_command_encoder();
+                    encoder.set_compute_pipeline_state(&pipeline);
+                    encoder.set_buffer(0, Some(lhs), 0);
+                    encoder.set_buffer(1, Some(rhs), 0);
+                    encoder.set_buffer(2, Some(&out), 0);
+                    MpsContext::set_params(&encoder, 3, &meta);
+                    let tile = 16u64;
+                    let groups = MTLSize::new(
+                        (n as u64 + tile - 1) / tile,
+                        (m as u64 + tile - 1) / tile,
+                        batch as u64,
+                    );
+                    let tg_size = MTLSize::new(tile, tile, 1);
+                    encoder.dispatch_thread_groups(groups, tg_size);
+                    encoder.end_encoding();
+                });
                 return Ok(Self {
                     inner: MpsInner::Accelerated {
                         ctx: ctx.clone(),
