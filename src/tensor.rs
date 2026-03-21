@@ -2,8 +2,30 @@
 
 use std::borrow::Borrow;
 use std::ops::{Add, Div, Mul, Neg, Sub};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+thread_local! {
+    static NO_GRAD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// RAII guard that disables autograd tracking for all tensor operations
+/// within its scope. Used during backward to avoid building secondary graphs.
+pub(crate) struct NoGradGuard;
+
+impl NoGradGuard {
+    pub fn new() -> Self {
+        NO_GRAD.with(|f| f.set(true));
+        NoGradGuard
+    }
+}
+
+impl Drop for NoGradGuard {
+    fn drop(&mut self) {
+        NO_GRAD.with(|f| f.set(false));
+    }
+}
 
 use half::f16;
 use rand::RngExt;
@@ -66,11 +88,17 @@ impl Tensor {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let id = TensorId(COUNTER.fetch_add(1, Ordering::Relaxed));
 
-        let requires_grad = requires_grad
-            || op
-                .as_ref()
-                .map(|o| o.dependencies().iter().any(|dep| dep.requires_grad()))
-                .unwrap_or(false);
+        // When no_grad is active (e.g. during backward), skip autograd tracking.
+        let (requires_grad, op) = if NO_GRAD.with(|f| f.get()) {
+            (false, None)
+        } else {
+            let requires_grad = requires_grad
+                || op
+                    .as_ref()
+                    .map(|o| o.dependencies().iter().any(|dep| dep.requires_grad()))
+                    .unwrap_or(false);
+            (requires_grad, op)
+        };
 
         TensorInternal { id, storage, layout, op, requires_grad }.into()
     }

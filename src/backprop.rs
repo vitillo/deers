@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::error::Result;
-use crate::tensor::{Tensor, TensorId};
+use crate::tensor::{NoGradGuard, Tensor, TensorId};
 
 impl Tensor {
     /// Returns nodes in reverse topological order (output before inputs).
@@ -45,6 +45,7 @@ impl Tensor {
     ///
     /// Returns a [`GradientStore`] mapping each tensor's [`TensorId`] to its gradient.
     pub fn backward(&self) -> Result<GradientStore> {
+        let _no_grad = NoGradGuard::new();
         let mut grads = GradientStore::new();
         grads.get_or_insert_with(self.id(), || Tensor::ones_like(self));
 
