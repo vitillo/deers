@@ -1007,21 +1007,29 @@ impl TensorOp for MatMul {
 pub struct LogSumExp {
     arg: Tensor,
     axes: Vec<usize>,
+    /// Cached from forward: exp(arg - max) and sum(exp(arg - max)).
+    exp_z: Tensor,
+    sum_z: Tensor,
 }
 
 impl LogSumExp {
     pub fn new(arg: Tensor, axes: Vec<usize>) -> Result<Self> {
-        Ok(Self { arg, axes })
+        // Compute forward intermediates and cache them for backward.
+        let max_z = arg.max(axes.clone(), true);
+        let broadcast_max_z = max_z.broadcast(arg.layout().shape().clone());
+        let exp_z = (&arg - &broadcast_max_z).exp();
+        let sum_z = exp_z.sum(axes.clone(), false);
+        Ok(Self { arg, axes, exp_z, sum_z })
     }
 }
 
 impl TensorOp for LogSumExp {
     fn forward(self) -> Result<Tensor> {
-        // https://gregorygundersen.com/blog/2020/02/09/log-sum-exp/
+        // max_z needs recomputing here because it was consumed during new().
+        // But since new() already computed exp_z = exp(arg - max) and sum_z = sum(exp_z),
+        // we can get logsumexp = log(sum_z) + max_z. Recompute max cheaply.
         let max_z = self.arg.max(self.axes.clone(), true);
-        let broadcast_max_z = max_z.broadcast(self.arg.layout().shape().clone());
-        let sum_z = (&self.arg - &broadcast_max_z).exp().sum(self.axes.clone(), false);
-        let logsumexp = max_z.reshape(sum_z.layout().shape.clone()) + sum_z.log();
+        let logsumexp = max_z.reshape(self.sum_z.layout().shape.clone()) + self.sum_z.log();
 
         Ok(Tensor::new(
             logsumexp.storage_clone(),
@@ -1032,15 +1040,11 @@ impl TensorOp for LogSumExp {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let max_z = self.arg.max(self.axes.clone(), true);
-        let broadcast_max_z = max_z.broadcast(self.arg.layout().shape().clone());
-        let exp_z = (&self.arg - broadcast_max_z).exp();
-        let sum_z = exp_z.sum(self.axes.clone(), false);
-
         let expand_shape = reduce_shape(self.arg.layout().shape(), &self.axes, true);
-        let grad_sum_z =
-            (out_grad / sum_z).reshape(expand_shape).broadcast(self.arg.layout().shape().clone());
-        let arg_grad = grad_sum_z * exp_z;
+        let grad_sum_z = (out_grad / &self.sum_z)
+            .reshape(expand_shape)
+            .broadcast(self.arg.layout().shape().clone());
+        let arg_grad = grad_sum_z * &self.exp_z;
 
         grads.accumulate(&self.arg, arg_grad);
         Ok(())
