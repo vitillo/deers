@@ -15,8 +15,9 @@ impl Tokenizer {
     /// Creates a tokenizer using OpenAI's cl100k_base encoding (100K vocab).
     pub fn cl100k_base() -> Self {
         let bpe = tiktoken_rs::cl100k_base().expect("failed to load cl100k_base");
-        // cl100k_base has 100256 tokens (100K base + 256 special)
-        Self { bpe, vocab_size: 100256 }
+        // cl100k_base: 100256 base tokens + 5 special tokens
+        // (<|endoftext|>, <|fim_prefix|>, <|fim_middle|>, <|fim_suffix|>, <|endofprompt|>)
+        Self { bpe, vocab_size: 100261 }
     }
 
     pub fn vocab_size(&self) -> usize {
@@ -71,6 +72,18 @@ mod tests {
         let tok = Tokenizer::cl100k_base();
 
         // Assert
-        assert_eq!(tok.vocab_size(), 100256);
+        assert_eq!(tok.vocab_size(), 100261);
+    }
+
+    #[test]
+    fn test_special_tokens_within_vocab() {
+        // Arrange
+        let tok = Tokenizer::cl100k_base();
+
+        // Act — encode text containing <|endoftext|>
+        let tokens = tok.encode("hello <|endoftext|> world");
+
+        // Assert — all token ids must be < vocab_size
+        assert!(tokens.iter().all(|&t| (t as usize) < tok.vocab_size()));
     }
 }
