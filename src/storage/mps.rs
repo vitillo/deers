@@ -466,6 +466,26 @@ mod imp {
             });
         }
 
+        /// Dispatches one threadgroup per output row for parallel reductions.
+        fn dispatch_reduce(
+            &self,
+            pipeline_name: &'static str,
+            outer_size: usize,
+            configure: impl FnOnce(&metal::ComputeCommandEncoderRef),
+        ) {
+            const REDUCE_THREADS: u64 = 256;
+            let pipeline = self.pipeline(pipeline_name);
+            self.with_command_buffer(|active| {
+                let encoder = active.new_compute_encoder();
+                encoder.set_compute_pipeline_state(&pipeline);
+                configure(&encoder);
+                let groups = MTLSize::new(outer_size as u64, 1, 1);
+                let tg_size = MTLSize::new(REDUCE_THREADS, 1, 1);
+                encoder.dispatch_thread_groups(groups, tg_size);
+                encoder.end_encoding();
+            });
+        }
+
         fn dispatch_2d(
             &self,
             pipeline_name: &'static str,
@@ -1039,7 +1059,7 @@ mod imp {
                     "reduce_max" => "reduce_max_f16",
                     _ => unreachable!(),
                 };
-                ctx.dispatch_1d(kernel, out_len, |encoder| {
+                ctx.dispatch_reduce(kernel, out_len, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(output), 0);
                     MpsContext::set_params(encoder, 2, &meta);
@@ -1059,7 +1079,7 @@ mod imp {
                     "reduce_max" => "reduce_max_f32",
                     _ => unreachable!(),
                 };
-                ctx.dispatch_1d(kernel, out_len, |encoder| {
+                ctx.dispatch_reduce(kernel, out_len, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(output), 0);
                     MpsContext::set_params(encoder, 2, &meta);

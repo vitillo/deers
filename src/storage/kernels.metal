@@ -486,66 +486,101 @@ kernel void eq_f16(
     output[id] = lhs[linear_to_offset(id, meta.lhs)] == rhs[linear_to_offset(id, meta.rhs)] ? half(1.0h) : half(0.0h);
 }
 
-// --- Reductions ---
+// --- Reductions (parallel threadgroup) ---
+// Each threadgroup reduces one output row using REDUCE_THREADS cooperating threads.
+
+constant uint REDUCE_THREADS = 256;
 
 kernel void reduce_sum_f16(
     device const half* input [[buffer(0)]],
     device half* output [[buffer(1)]],
     constant ReduceMeta& meta [[buffer(2)]],
-    uint id [[thread_position_in_grid]]
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
 ) {
-    if (id >= meta.outer_size) return;
-    uint start = id * meta.reduce_size;
-    half acc = half(0.0h);
-    for (uint i = 0; i < meta.reduce_size; i++) {
-        acc += input[start + i];
+    if (tgid >= meta.outer_size) return;
+    uint start = tgid * meta.reduce_size;
+    float acc = 0.0f;
+    for (uint i = tid; i < meta.reduce_size; i += REDUCE_THREADS) {
+        acc += float(input[start + i]);
     }
-    output[id] = acc;
+    threadgroup float shared[REDUCE_THREADS];
+    shared[tid] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = REDUCE_THREADS / 2; s > 0; s >>= 1) {
+        if (tid < s) shared[tid] += shared[tid + s];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) output[tgid] = half(shared[0]);
 }
 
 kernel void reduce_sum_f32(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
     constant ReduceMeta& meta [[buffer(2)]],
-    uint id [[thread_position_in_grid]]
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
 ) {
-    if (id >= meta.outer_size) return;
-    uint start = id * meta.reduce_size;
+    if (tgid >= meta.outer_size) return;
+    uint start = tgid * meta.reduce_size;
     float acc = 0.0f;
-    for (uint i = 0; i < meta.reduce_size; i++) {
+    for (uint i = tid; i < meta.reduce_size; i += REDUCE_THREADS) {
         acc += input[start + i];
     }
-    output[id] = acc;
+    threadgroup float shared[REDUCE_THREADS];
+    shared[tid] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = REDUCE_THREADS / 2; s > 0; s >>= 1) {
+        if (tid < s) shared[tid] += shared[tid + s];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) output[tgid] = shared[0];
 }
 
 kernel void reduce_max_f32(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
     constant ReduceMeta& meta [[buffer(2)]],
-    uint id [[thread_position_in_grid]]
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
 ) {
-    if (id >= meta.outer_size) return;
-    uint start = id * meta.reduce_size;
-    float acc = input[start];
-    for (uint i = 1; i < meta.reduce_size; i++) {
+    if (tgid >= meta.outer_size) return;
+    uint start = tgid * meta.reduce_size;
+    float acc = -INFINITY;
+    for (uint i = tid; i < meta.reduce_size; i += REDUCE_THREADS) {
         acc = max(acc, input[start + i]);
     }
-    output[id] = acc;
+    threadgroup float shared[REDUCE_THREADS];
+    shared[tid] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = REDUCE_THREADS / 2; s > 0; s >>= 1) {
+        if (tid < s) shared[tid] = max(shared[tid], shared[tid + s]);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) output[tgid] = shared[0];
 }
 
 kernel void reduce_max_f16(
     device const half* input [[buffer(0)]],
     device half* output [[buffer(1)]],
     constant ReduceMeta& meta [[buffer(2)]],
-    uint id [[thread_position_in_grid]]
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
 ) {
-    if (id >= meta.outer_size) return;
-    uint start = id * meta.reduce_size;
-    half acc = input[start];
-    for (uint i = 1; i < meta.reduce_size; i++) {
-        acc = max(acc, input[start + i]);
+    if (tgid >= meta.outer_size) return;
+    uint start = tgid * meta.reduce_size;
+    float acc = -INFINITY;
+    for (uint i = tid; i < meta.reduce_size; i += REDUCE_THREADS) {
+        acc = max(acc, float(input[start + i]));
     }
-    output[id] = acc;
+    threadgroup float shared[REDUCE_THREADS];
+    shared[tid] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = REDUCE_THREADS / 2; s > 0; s >>= 1) {
+        if (tid < s) shared[tid] = max(shared[tid], shared[tid + s]);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) output[tgid] = half(shared[0]);
 }
 
 // --- Tiled matrix multiply ---
