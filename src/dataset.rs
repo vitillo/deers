@@ -14,10 +14,15 @@ use crate::{Device, Tensor};
 /// Images are `(N, 28, 28)` tensors with pixel values normalized to `[0, 1]`.
 /// Labels are `(N,)` tensors with integer class values `0..=9` stored as i64.
 pub struct MNISTDataset {
+    /// Training images shaped `(60000, 28, 28)`.
     pub train_images: Tensor,
+    /// Training labels shaped `(60000,)`.
     pub train_labels: Tensor,
+    /// Test images shaped `(10000, 28, 28)`.
     pub test_images: Tensor,
+    /// Test labels shaped `(10000,)`.
     pub test_labels: Tensor,
+    /// Number of digit classes in the dataset.
     pub num_classes: usize,
 }
 
@@ -95,7 +100,9 @@ impl MNISTDataset {
 pub struct TextDataset {
     /// All rows packed into a single `(num_sequences, seq_len + 1)` i64 tensor.
     pub data: Tensor,
+    /// Context length used to form input/target windows.
     pub seq_len: usize,
+    /// Vocabulary size of the tokenizer used to create the dataset.
     pub vocab_size: usize,
 }
 
@@ -163,6 +170,7 @@ impl TextDataset {
         self.data.layout().shape()[0]
     }
 
+    /// Returns whether the dataset contains no complete sequences.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -180,7 +188,9 @@ impl TextDataset {
 
 /// Paths for a prepared token-bin dataset.
 pub struct TokenBinPaths {
+    /// Path to the training token bin.
     pub train: PathBuf,
+    /// Path to the validation token bin.
     pub val: PathBuf,
 }
 
@@ -195,6 +205,7 @@ pub struct TokenBinDataset {
 }
 
 impl TokenBinDataset {
+    /// Loads a flat `u16` token bin from disk.
     pub fn load(path: &Path, seq_len: usize) -> Result<Self> {
         let bytes = std::fs::read(path)?;
         assert!(bytes.len().is_multiple_of(2), "token bin must contain u16 values");
@@ -208,10 +219,12 @@ impl TokenBinDataset {
         Ok(Self { tokens, seq_len })
     }
 
+    /// Returns the number of tokens in the underlying flat stream.
     pub fn num_tokens(&self) -> usize {
         self.tokens.len()
     }
 
+    /// Samples a random batch of contiguous token windows.
     pub fn sample_batch(&self, batch_size: usize, device: Device) -> (Tensor, Tensor) {
         let mut rng = rand::rng();
         let max_start = self.tokens.len() - (self.seq_len + 1);
@@ -219,6 +232,7 @@ impl TokenBinDataset {
         self.batch_from_starts(&starts, device)
     }
 
+    /// Builds a batch from explicit start offsets into the token stream.
     pub fn batch_from_starts(&self, starts: &[usize], device: Device) -> (Tensor, Tensor) {
         let mut inputs = Vec::with_capacity(starts.len() * self.seq_len);
         let mut targets = Vec::with_capacity(starts.len() * self.seq_len);

@@ -74,7 +74,8 @@ fn bench_deers(device: deers::Device, profile_enabled: bool) {
         rms_norm_eps: 1e-5,
         rope_base: 10_000.0,
     };
-    let mut model = GPT::new(config);
+    let store = deers::nn::ParamStore::new();
+    let mut model = GPT::new(config, store.root());
     model.to_device(device).unwrap();
 
     let num_params: usize = model.parameters().iter().map(|p| p.layout().size()).sum();

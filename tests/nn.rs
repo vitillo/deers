@@ -2,9 +2,13 @@ use deers::nn::{self, Module};
 use deers::optim::SGD;
 use deers::{DType, Device, Tensor};
 
+fn root() -> nn::ParamBuilder {
+    nn::ParamStore::new().root()
+}
+
 #[test]
 fn test_linear_forward() {
-    let linear = nn::Linear::new(4, 3);
+    let linear = nn::Linear::new(root(), 4, 3);
     let x = Tensor::from_vec(vec![1.0f32; 8], (2, 4), Device::Cpu);
     let out = linear.forward(&x).unwrap();
     assert_eq!(out.layout().shape, (2, 3).into());
@@ -12,14 +16,14 @@ fn test_linear_forward() {
 
 #[test]
 fn test_linear_parameters() {
-    let linear = nn::Linear::new(4, 3);
+    let linear = nn::Linear::new(root(), 4, 3);
     let parameters = linear.parameters();
     assert_eq!(parameters.len(), 2); // weight + bias
 }
 
 #[test]
 fn test_linear_no_bias() {
-    let linear = nn::Linear::no_bias(4, 3);
+    let linear = nn::Linear::no_bias(root(), 4, 3);
     let parameters = linear.parameters();
     assert_eq!(parameters.len(), 1); // weight only
     let x = Tensor::from_vec(vec![1.0f32; 8], (2, 4), Device::Cpu);
@@ -33,7 +37,7 @@ fn test_linear_to_device() {
         return;
     }
 
-    let linear = nn::Linear::new(4, 3);
+    let linear = nn::Linear::new(root(), 4, 3);
     linear.to_device(Device::Mps).unwrap();
 
     for parameter in linear.parameters() {
@@ -43,7 +47,7 @@ fn test_linear_to_device() {
 
 #[test]
 fn test_linear_to_same_device_noop() {
-    let linear = nn::Linear::new(4, 3);
+    let linear = nn::Linear::new(root(), 4, 3);
     linear.to_device(Device::Cpu).unwrap();
 
     for parameter in linear.parameters() {
@@ -53,7 +57,8 @@ fn test_linear_to_same_device_noop() {
 
 #[test]
 fn test_sequential_forward() {
-    let model = nn::seq().add(nn::Linear::new(4, 3)).add(nn::ReLU).add(nn::Linear::new(3, 2));
+    let model =
+        nn::seq().add(nn::Linear::new(root(), 4, 3)).add(nn::ReLU).add(nn::Linear::new(root(), 3, 2));
     let x = Tensor::from_vec(vec![1.0f32; 8], (2, 4), Device::Cpu);
     let out = model.forward(&x).unwrap();
     assert_eq!(out.layout().shape, (2, 2).into());
@@ -61,7 +66,8 @@ fn test_sequential_forward() {
 
 #[test]
 fn test_sequential_parameters() {
-    let model = nn::seq().add(nn::Linear::new(4, 3)).add(nn::ReLU).add(nn::Linear::new(3, 2));
+    let model =
+        nn::seq().add(nn::Linear::new(root(), 4, 3)).add(nn::ReLU).add(nn::Linear::new(root(), 3, 2));
     // 2 Linear layers × 2 parameters each (weight + bias)
     assert_eq!(model.parameters().len(), 4);
 }
@@ -72,7 +78,8 @@ fn test_sequential_to_device() {
         return;
     }
 
-    let model = nn::seq().add(nn::Linear::new(4, 3)).add(nn::ReLU).add(nn::Linear::new(3, 2));
+    let model =
+        nn::seq().add(nn::Linear::new(root(), 4, 3)).add(nn::ReLU).add(nn::Linear::new(root(), 3, 2));
     model.to_device(Device::Mps).unwrap();
 
     assert!(model.parameters().iter().all(|parameter| parameter.device() == Device::Mps));
@@ -80,7 +87,8 @@ fn test_sequential_to_device() {
 
 #[test]
 fn test_sequential_trains() {
-    let model = nn::seq().add(nn::Linear::new(2, 4)).add(nn::ReLU).add(nn::Linear::new(4, 1));
+    let model =
+        nn::seq().add(nn::Linear::new(root(), 2, 4)).add(nn::ReLU).add(nn::Linear::new(root(), 4, 1));
     let mut sgd = SGD::new(model.parameters(), 0.01);
 
     let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);
@@ -98,7 +106,7 @@ fn test_sequential_trains() {
 
 #[test]
 fn test_embedding_forward() {
-    let emb = nn::Embedding::new(10, 4);
+    let emb = nn::Embedding::new(root(), 10, 4);
     let indices = Tensor::from_vec(vec![0i64, 3, 7], (3,), Device::Cpu);
     let out = emb.forward(&indices).unwrap();
     assert_eq!(out.layout().shape, (3, 4).into());
@@ -106,7 +114,7 @@ fn test_embedding_forward() {
 
 #[test]
 fn test_embedding_2d_indices() {
-    let emb = nn::Embedding::new(10, 4);
+    let emb = nn::Embedding::new(root(), 10, 4);
     // batch of 2, sequence length 3
     let indices = Tensor::from_vec(vec![0i64, 1, 2, 3, 4, 5], (2, 3), Device::Cpu);
     let out = emb.forward(&indices).unwrap();
@@ -115,7 +123,7 @@ fn test_embedding_2d_indices() {
 
 #[test]
 fn test_embedding_selects_correct_rows() {
-    let emb = nn::Embedding::new(4, 3);
+    let emb = nn::Embedding::new(root(), 4, 3);
     // Look up indices 2 then 0
     let indices = Tensor::from_vec(vec![2i64, 0], (2,), Device::Cpu);
     let out = emb.forward(&indices).unwrap();
@@ -133,7 +141,7 @@ fn test_embedding_mps() {
         return;
     }
 
-    let emb = nn::Embedding::new(10, 4);
+    let emb = nn::Embedding::new(root(), 10, 4);
     emb.to_device(Device::Mps).unwrap();
     let indices = Tensor::from_vec(vec![0i64, 3, 7], (3,), Device::Mps);
     let out = emb.forward(&indices).unwrap();

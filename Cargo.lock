@@ -331,6 +331,7 @@ dependencies = [
  "half",
  "metal 0.33.0",
  "rand 0.10.0",
+ "safetensors 0.7.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

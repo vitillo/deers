@@ -1,7 +1,7 @@
 use half::f16;
 
 use crate::error::Result;
-use crate::nn::{Embedding, Linear, Module, Parameter, RMSNorm, functional};
+use crate::nn::{Embedding, Linear, Module, ParamBuilder, Parameter, RMSNorm, functional};
 use crate::tensor::Tensor;
 use crate::{DType, Device};
 
@@ -80,19 +80,21 @@ pub struct CausalSelfAttention {
 }
 
 impl CausalSelfAttention {
-    pub fn new(n_embd: usize, n_head: usize) -> Self {
+    /// Creates a causal self-attention module whose projections are registered under `builder`.
+    pub fn new(builder: ParamBuilder, n_embd: usize, n_head: usize) -> Self {
         assert!(n_embd.is_multiple_of(n_head), "n_embd must be divisible by n_head");
         let head_dim = n_embd / n_head;
         Self {
             n_head,
             head_dim,
-            q_proj: Linear::no_bias(n_embd, n_embd),
-            k_proj: Linear::no_bias(n_embd, n_embd),
-            v_proj: Linear::no_bias(n_embd, n_embd),
-            out_proj: Linear::no_bias(n_embd, n_embd),
+            q_proj: Linear::no_bias(builder.pp("q_proj"), n_embd, n_embd),
+            k_proj: Linear::no_bias(builder.pp("k_proj"), n_embd, n_embd),
+            v_proj: Linear::no_bias(builder.pp("v_proj"), n_embd, n_embd),
+            out_proj: Linear::no_bias(builder.pp("out_proj"), n_embd, n_embd),
         }
     }
 
+    /// Runs self-attention on `[B, T, C]` inputs using the provided RoPE caches.
     pub fn forward(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
         let shape = x.layout().shape();
         assert_eq!(shape.ndim(), 3, "attention expects input shape [B, T, C]");
@@ -141,6 +143,7 @@ impl CausalSelfAttention {
         self.out_proj.forward(&y_flat).map(|out| out.reshape(vec![batch_size, seq_len, channels]))
     }
 
+    /// Returns the trainable parameters owned by the attention module.
     pub fn parameters(&self) -> Vec<Parameter> {
         let mut parameters = self.q_proj.parameters();
         parameters.extend(self.k_proj.parameters());
@@ -149,6 +152,7 @@ impl CausalSelfAttention {
         parameters
     }
 
+    /// Moves the attention parameters to `device`.
     pub fn to_device(&self, device: Device) -> Result<()> {
         for parameter in self.parameters() {
             parameter.to_device(device)?;
@@ -164,10 +168,11 @@ pub struct MLP {
 }
 
 impl MLP {
-    pub fn new(n_embd: usize, hidden_dim: usize) -> Self {
+    /// Creates an MLP whose projections are registered under `builder`.
+    pub fn new(builder: ParamBuilder, n_embd: usize, hidden_dim: usize) -> Self {
         Self {
-            up_proj: Linear::no_bias(n_embd, hidden_dim),
-            down_proj: Linear::no_bias(hidden_dim, n_embd),
+            up_proj: Linear::no_bias(builder.pp("up_proj"), n_embd, hidden_dim),
+            down_proj: Linear::no_bias(builder.pp("down_proj"), hidden_dim, n_embd),
         }
     }
 }
@@ -205,27 +210,37 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn new(n_embd: usize, n_head: usize, hidden_dim: usize, eps: f64) -> Self {
+    /// Creates a transformer block whose trainable weights are registered under `builder`.
+    pub fn new(
+        builder: ParamBuilder,
+        n_embd: usize,
+        n_head: usize,
+        hidden_dim: usize,
+        eps: f64,
+    ) -> Self {
         Self {
             norm1: RMSNorm::new(eps),
-            attn: CausalSelfAttention::new(n_embd, n_head),
+            attn: CausalSelfAttention::new(builder.pp("attn"), n_embd, n_head),
             norm2: RMSNorm::new(eps),
-            mlp: MLP::new(n_embd, hidden_dim),
+            mlp: MLP::new(builder.pp("mlp"), n_embd, hidden_dim),
         }
     }
 
+    /// Runs the pre-norm attention and MLP residual block.
     pub fn forward(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
         let x = x + &self.attn.forward(&self.norm1.forward(x)?, cos, sin)?;
         let y = self.mlp.forward(&self.norm2.forward(&x)?)?;
         Ok(&x + &y)
     }
 
+    /// Returns the trainable parameters owned by the block.
     pub fn parameters(&self) -> Vec<Parameter> {
         let mut parameters = self.attn.parameters();
         parameters.extend(self.mlp.parameters());
         parameters
     }
 
+    /// Moves the block parameters to `device`.
     pub fn to_device(&self, device: Device) -> Result<()> {
         for parameter in self.parameters() {
             parameter.to_device(device)?;
@@ -237,17 +252,26 @@ impl Block {
 /// Minimal GPT configuration for the nanochat-style decoder stack.
 #[derive(Clone)]
 pub struct GPTConfig {
+    /// Token vocabulary size.
     pub vocab_size: usize,
+    /// Maximum sequence length supported by the rotary cache.
     pub sequence_len: usize,
+    /// Number of transformer blocks.
     pub n_layer: usize,
+    /// Number of attention heads per block.
     pub n_head: usize,
+    /// Hidden width of the model.
     pub n_embd: usize,
+    /// Inner width of the MLP projection.
     pub mlp_hidden_dim: usize,
+    /// Epsilon used by RMSNorm.
     pub rms_norm_eps: f64,
+    /// Base frequency used by RoPE.
     pub rope_base: f32,
 }
 
 impl GPTConfig {
+    /// Returns the per-head channel width.
     pub fn head_dim(&self) -> usize {
         self.n_embd / self.n_head
     }
@@ -265,17 +289,24 @@ pub struct GPT {
 }
 
 impl GPT {
-    pub fn new(config: GPTConfig) -> Self {
+    /// Creates a GPT model whose trainable weights are registered under `builder`.
+    pub fn new(config: GPTConfig, builder: ParamBuilder) -> Self {
         assert!(config.n_embd.is_multiple_of(config.n_head), "n_embd must be divisible by n_head");
 
-        let wte = Embedding::new(config.vocab_size, config.n_embd);
+        let wte = Embedding::new(builder.pp("wte"), config.vocab_size, config.n_embd);
         let blocks = (0..config.n_layer)
-            .map(|_| {
-                Block::new(config.n_embd, config.n_head, config.mlp_hidden_dim, config.rms_norm_eps)
+            .map(|index| {
+                Block::new(
+                    builder.pp("blocks").pp(index.to_string()),
+                    config.n_embd,
+                    config.n_head,
+                    config.mlp_hidden_dim,
+                    config.rms_norm_eps,
+                )
             })
             .collect();
         let norm = RMSNorm::new(config.rms_norm_eps);
-        let lm_head = Linear::no_bias(config.n_embd, config.vocab_size);
+        let lm_head = Linear::no_bias(builder.pp("lm_head"), config.n_embd, config.vocab_size);
         let (cos, sin) = precompute_rotary_embeddings(
             config.sequence_len,
             config.head_dim(),
@@ -287,6 +318,7 @@ impl GPT {
         Self { vocab_size: config.vocab_size, wte, blocks, norm, lm_head, cos, sin }
     }
 
+    /// Runs the decoder on token ids shaped `[B, T]`.
     pub fn forward(&self, idx: &Tensor) -> Result<Tensor> {
         let shape = idx.layout().shape();
         assert_eq!(shape.ndim(), 2, "GPT expects token ids with shape [B, T]");
@@ -315,6 +347,7 @@ impl GPT {
         Ok(logits.reshape(vec![batch_size, seq_len, self.vocab_size])) // [B, T, V]
     }
 
+    /// Returns the trainable parameters owned by the model.
     pub fn parameters(&self) -> Vec<Parameter> {
         let mut parameters = self.wte.parameters();
         for block in &self.blocks {
@@ -324,6 +357,7 @@ impl GPT {
         parameters
     }
 
+    /// Moves the model parameters and rotary caches to `device`.
     pub fn to_device(&mut self, device: Device) -> Result<()> {
         self.wte.to_device(device)?;
         for block in &self.blocks {

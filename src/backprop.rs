@@ -81,10 +81,12 @@ impl GradientStore {
         self.store.get(&id).cloned()
     }
 
+    /// Returns the stored gradient for `id`, inserting `f()` if missing.
     pub fn get_or_insert_with(&mut self, id: TensorId, f: impl FnOnce() -> Tensor) -> Tensor {
         self.store.entry(id).or_insert_with(f).clone()
     }
 
+    /// Returns a mutable gradient slot for `tensor`, inserting zeros if missing.
     pub fn get_or_insert_zero(&mut self, tensor: &Tensor) -> &mut Tensor {
         self.store.entry(tensor.id()).or_insert_with(|| tensor.zeros_like())
     }
@@ -104,6 +106,7 @@ impl GradientStore {
         }
     }
 
+    /// Stores `tensor` as the gradient for `id`, replacing any previous value.
     pub fn insert(&mut self, id: TensorId, tensor: Tensor) {
         self.store.insert(id, tensor);
     }
@@ -113,6 +116,7 @@ impl GradientStore {
         self.store.len()
     }
 
+    /// Returns whether the store contains no gradients.
     pub fn is_empty(&self) -> bool {
         self.store.is_empty()
     }

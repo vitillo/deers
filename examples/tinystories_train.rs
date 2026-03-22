@@ -4,19 +4,18 @@
 //!   cargo run --release --example tinystories_train -- --device mps
 //!   cargo run --release --example tinystories_train -- --device mps --prepare-only
 
-use half::f16;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::env;
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Instant;
 
+use deers::checkpoint;
 use deers::dataset::{TokenBinDataset, TokenBinPaths, prepare_text_token_bins};
 use deers::models::gpt::{GPT, GPTConfig};
-use deers::nn::Parameter;
-use deers::optim::{AdamWConfig, LrSchedule, WarmupWarmdown, clip_grad_norm};
+use deers::nn::{ParamStore, Parameter};
+use deers::optim::{AdamW, AdamWConfig, LrSchedule, WarmupWarmdown, clip_grad_norm};
 use deers::tokenizer::Tokenizer;
 use deers::{Device, GradientStore, Tensor, loss};
 
@@ -25,6 +24,8 @@ const DEFAULT_BIN_DIR: &str = "data/tinystories_gpt2";
 const DEFAULT_OUT_DIR: &str = "out/tinystories";
 const DEFAULT_PROMPT: &str = "Once upon a time";
 const DEFAULT_VAL_RATIO: f32 = 0.01;
+const MODEL_FILE: &str = "model.safetensors";
+const OPTIMIZER_FILE: &str = "optimizer.safetensors";
 
 fn main() {
     let options = parse_args();
@@ -56,10 +57,11 @@ fn main() {
     );
 
     let config = options.gpt_config(tokenizer.vocab_size());
-    let mut model = GPT::new(config.clone());
+    let store = ParamStore::new();
+    let mut model = GPT::new(config.clone(), store.root());
     model.to_device(options.device).unwrap();
 
-    let parameters = model.parameters();
+    let parameters = store.parameters();
     let num_params: usize = parameters.iter().map(|parameter| parameter.layout().size()).sum();
     println!("Model: {num_params} parameters on {:?}", options.device);
 
@@ -76,18 +78,37 @@ fn main() {
         .betas(options.betas)
         .weight_decay(options.weight_decay)
         .build(parameters.clone());
+    let start_step = if let Some(resume) = &options.resume {
+        let step = load_checkpoint(&store, &mut opt, &config, options.device, resume);
+        println!("Resumed from {} at step {}", resume.display(), step);
+        step
+    } else {
+        0
+    };
 
     println!(
-        "Training: steps={}, micro_batch={}, grad_accum={}, eval_every={}, sample_every={}",
+        "Training: start_step={}, target_steps={}, micro_batch={}, grad_accum={}, eval_every={}, save_every={}, sample_every={}",
+        start_step,
         options.max_steps,
         options.micro_batch_size,
         options.grad_accum_steps,
         options.eval_every,
+        options.save_every,
         options.sample_every
     );
 
+    if options.eval_every > 0 {
+        let val_loss = evaluate(&model, &val_dataset, tokenizer.vocab_size(), &options);
+        println!("step {:>5}/{:>5} | initial val_loss {:.4}", start_step, options.max_steps, val_loss);
+    }
+
+    if options.sample_every > 0 {
+        let sample = generate(&model, &tokenizer, &options.prompt, 64, options.device, options.seq_len);
+        println!("step {:>5}/{:>5} | initial sample: {sample}", start_step, options.max_steps);
+    }
+
     let train_start = Instant::now();
-    for step in 0..options.max_steps {
+    for step in start_step..options.max_steps {
         let step_start = Instant::now();
         let lr = options.lr * schedule.lr_multiplier(step);
         opt.set_lr(lr);
@@ -119,10 +140,16 @@ fn main() {
             );
         }
 
-        if options.eval_every > 0 && step_num.is_multiple_of(options.eval_every) {
+        let val_loss = if options.eval_every > 0 && step_num.is_multiple_of(options.eval_every) {
             let val_loss = evaluate(&model, &val_dataset, tokenizer.vocab_size(), &options);
             println!("  val_loss {:.4}", val_loss);
-            save_checkpoint(&model, &config, &options, step_num, train_loss, Some(val_loss));
+            Some(val_loss)
+        } else {
+            None
+        };
+
+        if should_save_checkpoint(step_num, start_step, options.save_every) {
+            save_checkpoint(&store, &config, &options, &opt, step_num, train_loss, val_loss);
         }
 
         if options.sample_every > 0 && step_num.is_multiple_of(options.sample_every) {
@@ -249,6 +276,22 @@ fn resolve_token_bins(options: &TrainOptions, tokenizer: &Tokenizer) -> TokenBin
     TokenBinPaths { train, val }
 }
 
+fn should_save_checkpoint(step_num: usize, start_step: usize, save_every: usize) -> bool {
+    if save_every == 0 {
+        return false;
+    }
+
+    if step_num < save_every {
+        return false;
+    }
+
+    if start_step == 0 {
+        return step_num.is_multiple_of(save_every);
+    }
+
+    step_num >= start_step + save_every && (step_num - start_step).is_multiple_of(save_every)
+}
+
 fn write_run_config(options: &TrainOptions, config: &GPTConfig, vocab_size: usize, num_params: usize) {
     let metadata = RunMetadata {
         preset: options.preset.name().to_owned(),
@@ -264,6 +307,7 @@ fn write_run_config(options: &TrainOptions, config: &GPTConfig, vocab_size: usiz
         grad_accum_steps: options.grad_accum_steps,
         max_steps: options.max_steps,
         eval_every: options.eval_every,
+        save_every: options.save_every,
         sample_every: options.sample_every,
         eval_batches: options.eval_batches,
         log_every: options.log_every,
@@ -277,6 +321,7 @@ fn write_run_config(options: &TrainOptions, config: &GPTConfig, vocab_size: usiz
         text_path: options.text_path.display().to_string(),
         bin_dir: options.bin_dir.display().to_string(),
         out_dir: options.out_dir.display().to_string(),
+        resume: options.resume.as_ref().map(|path| path.display().to_string()),
         prompt: options.prompt.clone(),
     };
 
@@ -286,9 +331,10 @@ fn write_run_config(options: &TrainOptions, config: &GPTConfig, vocab_size: usiz
 }
 
 fn save_checkpoint(
-    model: &GPT,
+    store: &ParamStore,
     config: &GPTConfig,
     options: &TrainOptions,
+    opt: &AdamW,
     step: usize,
     train_loss: f32,
     val_loss: Option<f32>,
@@ -296,57 +342,89 @@ fn save_checkpoint(
     let dir = options.out_dir.join(format!("step-{step:05}"));
     fs::create_dir_all(&dir).unwrap();
 
-    let mut tensors = Vec::new();
-    for (index, parameter) in model.parameters().into_iter().enumerate() {
-        let file_name = format!("param-{index:05}.bin");
-        let path = dir.join(&file_name);
-        write_parameter_file(&path, &parameter);
-        tensors.push(TensorMetadata {
-            file: file_name,
-            shape: parameter.layout().shape().iter().copied().collect(),
-            dtype: format!("{:?}", parameter.dtype()),
-        });
-    }
+    let named_parameters = store.named_parameters();
+    let optimizer_state = opt.state_dict(&named_parameters);
+    store.save(&dir.join(MODEL_FILE)).unwrap();
+    checkpoint::save_tensors(&dir.join(OPTIMIZER_FILE), &optimizer_state).unwrap();
 
     let checkpoint = CheckpointMetadata {
         step,
         train_loss,
         val_loss,
+        lr: opt.lr(),
         sequence_len: config.sequence_len,
         n_layer: config.n_layer,
         n_head: config.n_head,
         n_embd: config.n_embd,
         mlp_hidden_dim: config.mlp_hidden_dim,
-        tensors,
+        model_file: MODEL_FILE.to_owned(),
+        optimizer: OptimizerCheckpointMetadata {
+            step: opt.step_count(),
+            file: OPTIMIZER_FILE.to_owned(),
+            tensor_count: optimizer_state.len(),
+        },
+        tensor_count: named_parameters.len(),
     };
     let json = serde_json::to_string_pretty(&checkpoint).unwrap();
     std::fs::write(dir.join("metadata.json"), json).unwrap();
+    std::fs::write(options.out_dir.join("latest-checkpoint.txt"), format!("step-{step:05}\n")).unwrap();
 }
 
-fn write_parameter_file(path: &Path, parameter: &Parameter) {
-    let file = File::create(path).unwrap();
-    let mut writer = BufWriter::new(file);
+fn load_checkpoint(
+    store: &ParamStore,
+    opt: &mut AdamW,
+    config: &GPTConfig,
+    device: Device,
+    checkpoint_dir: &Path,
+) -> usize {
+    let checkpoint_dir = resolve_resume_dir(checkpoint_dir);
+    let metadata: CheckpointMetadata =
+        serde_json::from_str(&std::fs::read_to_string(checkpoint_dir.join("metadata.json")).unwrap())
+            .unwrap();
 
-    match parameter.dtype() {
-        deers::DType::F16 => {
-            for value in parameter.to_vec::<f16>().unwrap() {
-                writer.write_all(&value.to_bits().to_le_bytes()).unwrap();
-            }
-        }
-        deers::DType::F32 => {
-            for value in parameter.to_vec::<f32>().unwrap() {
-                writer.write_all(&value.to_le_bytes()).unwrap();
-            }
-        }
-        deers::DType::I64 => {
-            for value in parameter.to_vec::<i64>().unwrap() {
-                writer.write_all(&value.to_le_bytes()).unwrap();
-            }
-        }
+    assert_eq!(metadata.sequence_len, config.sequence_len, "checkpoint seq_len mismatch");
+    assert_eq!(metadata.n_layer, config.n_layer, "checkpoint n_layer mismatch");
+    assert_eq!(metadata.n_head, config.n_head, "checkpoint n_head mismatch");
+    assert_eq!(metadata.n_embd, config.n_embd, "checkpoint n_embd mismatch");
+    assert_eq!(
+        metadata.mlp_hidden_dim, config.mlp_hidden_dim,
+        "checkpoint mlp_hidden_dim mismatch"
+    );
+    let named_parameters = store.named_parameters();
+    assert_eq!(
+        metadata.tensor_count, named_parameters.len(),
+        "checkpoint parameter count mismatch"
+    );
+
+    store.load(&checkpoint_dir.join(&metadata.model_file), device).unwrap();
+
+    assert_eq!(
+        metadata.optimizer.tensor_count,
+        named_parameters.len() * 2,
+        "checkpoint optimizer state count mismatch"
+    );
+    let optimizer_state = checkpoint::load_tensors(&checkpoint_dir.join(&metadata.optimizer.file), device)
+        .unwrap();
+    opt.load_state_dict(&named_parameters, &optimizer_state, metadata.optimizer.step).unwrap();
+    metadata.step
+}
+
+fn resolve_resume_dir(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        return path.to_path_buf();
     }
 
-    writer.flush().unwrap();
+    if path.is_file() {
+        let target = std::fs::read_to_string(path).unwrap();
+        let checkpoint = target.trim();
+        let checkpoint = path.parent().unwrap_or_else(|| Path::new(".")).join(checkpoint);
+        assert!(checkpoint.is_dir(), "resume pointer does not target a checkpoint dir");
+        return checkpoint;
+    }
+
+    panic!("resume checkpoint must be a directory: {}", path.display());
 }
+
 
 #[derive(Clone, Copy)]
 enum Preset {
@@ -381,6 +459,7 @@ struct TrainOptions {
     bin_dir: PathBuf,
     train_bin: Option<PathBuf>,
     val_bin: Option<PathBuf>,
+    resume: Option<PathBuf>,
     out_dir: PathBuf,
     val_ratio: f32,
     seq_len: usize,
@@ -392,6 +471,7 @@ struct TrainOptions {
     grad_accum_steps: usize,
     max_steps: usize,
     eval_every: usize,
+    save_every: usize,
     sample_every: usize,
     eval_batches: usize,
     log_every: usize,
@@ -417,6 +497,7 @@ impl TrainOptions {
                 bin_dir: PathBuf::from(DEFAULT_BIN_DIR),
                 train_bin: None,
                 val_bin: None,
+                resume: None,
                 out_dir: PathBuf::from(DEFAULT_OUT_DIR),
                 val_ratio: DEFAULT_VAL_RATIO,
                 seq_len: 256,
@@ -428,7 +509,8 @@ impl TrainOptions {
                 grad_accum_steps: 8,
                 max_steps: 12_000,
                 eval_every: 250,
-                sample_every: 500,
+                save_every: 50,
+                sample_every: 50,
                 eval_batches: 20,
                 log_every: 10,
                 lr: 5e-4,
@@ -449,6 +531,7 @@ impl TrainOptions {
                 bin_dir: PathBuf::from(DEFAULT_BIN_DIR),
                 train_bin: None,
                 val_bin: None,
+                resume: None,
                 out_dir: PathBuf::from(DEFAULT_OUT_DIR),
                 val_ratio: DEFAULT_VAL_RATIO,
                 seq_len: 256,
@@ -460,7 +543,8 @@ impl TrainOptions {
                 grad_accum_steps: 8,
                 max_steps: 20_000,
                 eval_every: 250,
-                sample_every: 500,
+                save_every: 50,
+                sample_every: 50,
                 eval_batches: 20,
                 log_every: 10,
                 lr: 5e-4,
@@ -517,6 +601,7 @@ fn parse_args() -> TrainOptions {
             "--val-bin" => {
                 options.val_bin = Some(PathBuf::from(next_arg(&args, &mut index, "--val-bin")))
             }
+            "--resume" => options.resume = Some(PathBuf::from(next_arg(&args, &mut index, "--resume"))),
             "--out-dir" => options.out_dir = PathBuf::from(next_arg(&args, &mut index, "--out-dir")),
             "--val-ratio" => options.val_ratio = parse_f32(&next_arg(&args, &mut index, "--val-ratio")),
             "--seq-len" => options.seq_len = parse_usize(&next_arg(&args, &mut index, "--seq-len")),
@@ -540,6 +625,9 @@ fn parse_args() -> TrainOptions {
             "--max-steps" => options.max_steps = parse_usize(&next_arg(&args, &mut index, "--max-steps")),
             "--eval-every" => {
                 options.eval_every = parse_usize(&next_arg(&args, &mut index, "--eval-every"));
+            }
+            "--save-every" => {
+                options.save_every = parse_usize(&next_arg(&args, &mut index, "--save-every"));
             }
             "--sample-every" => {
                 options.sample_every = parse_usize(&next_arg(&args, &mut index, "--sample-every"));
@@ -629,6 +717,7 @@ fn usage(message: &str) -> ! {
     eprintln!("  --bin-dir <path>");
     eprintln!("  --train-bin <path>");
     eprintln!("  --val-bin <path>");
+    eprintln!("  --resume <checkpoint_dir>");
     eprintln!("  --out-dir <path>");
     eprintln!("  --seq-len <usize>");
     eprintln!("  --n-layer <usize>");
@@ -639,6 +728,7 @@ fn usage(message: &str) -> ! {
     eprintln!("  --grad-accum-steps <usize>");
     eprintln!("  --max-steps <usize>");
     eprintln!("  --eval-every <usize>");
+    eprintln!("  --save-every <usize>");
     eprintln!("  --sample-every <usize>");
     eprintln!("  --eval-batches <usize>");
     eprintln!("  --log-every <usize>");
@@ -665,6 +755,7 @@ struct RunMetadata {
     grad_accum_steps: usize,
     max_steps: usize,
     eval_every: usize,
+    save_every: usize,
     sample_every: usize,
     eval_batches: usize,
     log_every: usize,
@@ -678,25 +769,29 @@ struct RunMetadata {
     text_path: String,
     bin_dir: String,
     out_dir: String,
+    resume: Option<String>,
     prompt: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct CheckpointMetadata {
     step: usize,
     train_loss: f32,
     val_loss: Option<f32>,
+    lr: f64,
     sequence_len: usize,
     n_layer: usize,
     n_head: usize,
     n_embd: usize,
     mlp_hidden_dim: usize,
-    tensors: Vec<TensorMetadata>,
+    model_file: String,
+    tensor_count: usize,
+    optimizer: OptimizerCheckpointMetadata,
 }
 
-#[derive(Serialize)]
-struct TensorMetadata {
+#[derive(Serialize, Deserialize)]
+struct OptimizerCheckpointMetadata {
+    step: usize,
     file: String,
-    shape: Vec<usize>,
-    dtype: String,
+    tensor_count: usize,
 }

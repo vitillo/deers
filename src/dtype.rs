@@ -7,12 +7,16 @@ use crate::storage::CpuStorage;
 /// Supported tensor element types.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum DType {
+    /// IEEE half-precision floating point.
     F16,
+    /// IEEE single-precision floating point.
     F32,
+    /// 64-bit signed integer.
     I64,
 }
 
 impl DType {
+    /// Returns the byte width of one element of this dtype.
     pub fn size_in_bytes(self) -> usize {
         match self {
             DType::F16 => std::mem::size_of::<f16>(),

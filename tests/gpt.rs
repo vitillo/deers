@@ -2,6 +2,7 @@ use candle_core::{D, Device as CDevice, Tensor as CTensor, Var};
 use candle_nn::{loss as candle_loss, ops as candle_ops};
 use deers::loss;
 use deers::models::gpt;
+use deers::nn::ParamStore;
 use deers::{Device, Tensor};
 
 const CPU_TOL: f32 = 1e-4;
@@ -268,7 +269,7 @@ impl CandleGptRef {
 #[test]
 fn test_gpt_forward_conforms_with_candle_on_cpu_and_mps() {
     // Arrange
-    let mut model = gpt::GPT::new(test_config());
+    let mut model = gpt::GPT::new(test_config(), ParamStore::new().root());
     let candle = CandleGptRef::from_model(test_config(), &model);
     let batch_size = 2;
     let seq_len = 3;
@@ -292,7 +293,7 @@ fn test_gpt_forward_conforms_with_candle_on_cpu_and_mps() {
 fn test_gpt_backward_conforms_with_candle_on_cpu_and_mps() {
     // Arrange
     let config = test_config();
-    let mut model = gpt::GPT::new(test_config());
+    let mut model = gpt::GPT::new(test_config(), ParamStore::new().root());
     let candle = CandleGptRef::from_model(test_config(), &model);
     let batch_size = 2;
     let seq_len = 3;

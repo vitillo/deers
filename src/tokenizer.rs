@@ -6,6 +6,7 @@
 
 use tiktoken_rs::CoreBPE;
 
+/// Thin wrapper around a `tiktoken-rs` BPE tokenizer.
 pub struct Tokenizer {
     bpe: CoreBPE,
     vocab_size: usize,
@@ -27,6 +28,7 @@ impl Tokenizer {
         Self { bpe, vocab_size: 100261 }
     }
 
+    /// Returns the tokenizer vocabulary size.
     pub fn vocab_size(&self) -> usize {
         self.vocab_size
     }

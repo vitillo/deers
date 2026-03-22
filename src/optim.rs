@@ -1,9 +1,9 @@
 //! Optimizers for updating trainable parameters.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::GradientStore;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::nn::Parameter;
 use crate::tensor::{Tensor, TensorId};
 
@@ -14,10 +14,12 @@ pub struct SGD {
 }
 
 impl SGD {
+    /// Creates an SGD optimizer over `parameters` with learning rate `lr`.
     pub fn new(parameters: Vec<Parameter>, lr: f64) -> Self {
         Self { parameters, lr }
     }
 
+    /// Sets the learning rate used on subsequent steps.
     pub fn set_lr(&mut self, lr: f64) {
         self.lr = lr;
     }
@@ -28,6 +30,7 @@ impl SGD {
         self.step_with_grads(&grads)
     }
 
+    /// Applies one SGD step using a precomputed gradient store.
     pub fn step_with_grads(&mut self, grads: &GradientStore) -> Result<()> {
         for parameter in &self.parameters {
             if let Some(grad) = grads.get(parameter.id()) {
@@ -51,25 +54,30 @@ pub struct AdamWConfig {
 }
 
 impl AdamWConfig {
+    /// Creates a default AdamW config with learning rate `lr`.
     pub fn new(lr: f64) -> Self {
         Self { lr, betas: (0.9, 0.999), eps: 1e-8, weight_decay: 0.0 }
     }
 
+    /// Sets the `(beta1, beta2)` momentum coefficients.
     pub fn betas(mut self, betas: (f64, f64)) -> Self {
         self.betas = betas;
         self
     }
 
+    /// Sets the epsilon added to the denominator for numerical stability.
     pub fn eps(mut self, eps: f64) -> Self {
         self.eps = eps;
         self
     }
 
+    /// Sets the decoupled weight decay coefficient.
     pub fn weight_decay(mut self, weight_decay: f64) -> Self {
         self.weight_decay = weight_decay;
         self
     }
 
+    /// Builds an AdamW optimizer over `parameters`.
     pub fn build(self, parameters: Vec<Parameter>) -> AdamW {
         AdamW {
             parameters,
@@ -114,19 +122,92 @@ pub struct AdamW {
 }
 
 impl AdamW {
+    /// Sets the learning rate used on subsequent steps.
     pub fn set_lr(&mut self, lr: f64) {
         self.lr = lr;
     }
 
+    /// Returns the current learning rate.
+    pub fn lr(&self) -> f64 {
+        self.lr
+    }
+
+    /// Returns the number of optimizer steps already applied.
     pub fn step_count(&self) -> usize {
         self.step
     }
 
+    /// Overrides the internal optimizer step counter.
+    pub fn set_step_count(&mut self, step: usize) {
+        self.step = step;
+    }
+
+    /// Returns the Adam moments tracked for `parameter`, if any.
+    pub fn state_for(&self, parameter: &Parameter) -> Option<(Tensor, Tensor)> {
+        let m = self.m.get(&parameter.id())?.clone();
+        let v = self.v.get(&parameter.id())?.clone();
+        Some((m, v))
+    }
+
+    /// Loads Adam moments for `parameter`.
+    pub fn load_state_for(&mut self, parameter: &Parameter, m: Tensor, v: Tensor) {
+        self.m.insert(parameter.id(), m.detach());
+        self.v.insert(parameter.id(), v.detach());
+    }
+
+    /// Exports optimizer state using the same names as the model parameters.
+    pub fn state_dict(&self, named_parameters: &[(String, Parameter)]) -> BTreeMap<String, Tensor> {
+        let mut state = BTreeMap::new();
+        for (name, parameter) in named_parameters {
+            if let Some((m, v)) = self.state_for(parameter) {
+                state.insert(format!("{name}.exp_avg"), m.detach());
+                state.insert(format!("{name}.exp_avg_sq"), v.detach());
+            }
+        }
+        state
+    }
+
+    /// Loads optimizer state from a named tensor map and restores the step counter.
+    pub fn load_state_dict(
+        &mut self,
+        named_parameters: &[(String, Parameter)],
+        state: &BTreeMap<String, Tensor>,
+        step: usize,
+    ) -> Result<()> {
+        if state.len() != named_parameters.len() * 2 {
+            return Err(Error::Checkpoint(format!(
+                "optimizer state count mismatch: expected {}, found {}",
+                named_parameters.len() * 2,
+                state.len()
+            )));
+        }
+
+        self.step = step;
+        self.m.clear();
+        self.v.clear();
+
+        for (name, parameter) in named_parameters {
+            let m_key = format!("{name}.exp_avg");
+            let v_key = format!("{name}.exp_avg_sq");
+            let m = state
+                .get(&m_key)
+                .ok_or_else(|| Error::Checkpoint(format!("missing optimizer state: {m_key}")))?;
+            let v = state
+                .get(&v_key)
+                .ok_or_else(|| Error::Checkpoint(format!("missing optimizer state: {v_key}")))?;
+            self.load_state_for(parameter, m.clone(), v.clone());
+        }
+
+        Ok(())
+    }
+
+    /// Runs backward on `loss`, then applies one AdamW step.
     pub fn backward_step(&mut self, loss: &Tensor) -> Result<()> {
         let grads = loss.backward()?;
         self.step_with_grads(&grads)
     }
 
+    /// Applies one AdamW step using a precomputed gradient store.
     pub fn step_with_grads(&mut self, grads: &GradientStore) -> Result<()> {
         self.step += 1;
 
@@ -239,6 +320,7 @@ pub struct WarmupWarmdown {
 }
 
 impl WarmupWarmdown {
+    /// Creates a warmup/hold/warmdown learning-rate schedule.
     pub fn new(
         warmup_steps: usize,
         total_steps: usize,

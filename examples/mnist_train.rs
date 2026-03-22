@@ -2,7 +2,8 @@ use std::time::Instant;
 use std::{env, process};
 
 use deers::dataset::MNISTDataset;
-use deers::nn::{self, Module};
+use deers::models::mnist::MnistMLP;
+use deers::nn::{Module, ParamStore};
 use deers::optim::AdamWConfig;
 use deers::{Device, Tensor, loss};
 
@@ -20,8 +21,8 @@ fn main() {
     let train_labels = dataset.train_labels;
     let test_labels = dataset.test_labels;
 
-    let model =
-        nn::seq().add(nn::Linear::new(784, 128)).add(nn::ReLU).add(nn::Linear::new(128, 10));
+    let store = ParamStore::new();
+    let model = MnistMLP::new(store.root(), 128);
     model.to_device(device).unwrap();
 
     println!("Device: {device:?}");
@@ -29,7 +30,7 @@ fn main() {
     println!("Parameters: {}", model.parameters().len());
 
     let lr = 1e-3;
-    let mut opt = AdamWConfig::new(lr).build(model.parameters());
+    let mut opt = AdamWConfig::new(lr).build(store.parameters());
     let batch_size = 256;
     let num_batches = 60000 / batch_size;
     let epochs = 3;

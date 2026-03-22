@@ -8,8 +8,11 @@ use crate::{
 /// The compute device where tensor data is stored and operations run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Device {
+    /// Host CPU backend.
     Cpu,
+    /// Placeholder CUDA backend.
     Cuda,
+    /// Apple Metal Performance Shaders backend.
     Mps,
 }
 

@@ -24,7 +24,16 @@ pub enum Error {
     IndexOutOfBounds(String),
 
     #[error(transparent)]
-    DatasetParseError(#[from] io::Error),
+    Io(#[from] io::Error),
+
+    #[error(transparent)]
+    SafeTensors(#[from] safetensors::SafeTensorError),
+
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+
+    #[error("{0}")]
+    Checkpoint(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

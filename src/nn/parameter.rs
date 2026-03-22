@@ -18,11 +18,12 @@ impl Parameter {
     }
 
     /// Copies `src` data into the variable's existing storage, keeping the same tensor id.
-    pub(crate) fn set(&self, src: &Tensor) -> Result<()> {
+    pub fn set(&self, src: &Tensor) -> Result<()> {
         *self.0.storage_mut() = src.storage().clone();
         Ok(())
     }
 
+    /// Moves the parameter to `device` while preserving its tensor identity.
     pub fn to_device(&self, device: Device) -> Result<()> {
         if self.device() != device {
             let tensor = self.0.to_device(device)?;
