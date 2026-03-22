@@ -1004,12 +1004,13 @@ impl MatMul {
                 b.shape()[i]
             );
         }
-        // CPU backend passes strides directly to gemm, so no need to compact.
-        // MPS backend requires compact inputs.
-        let (arg1, arg2) = if matches!(arg1.device(), crate::Device::Cpu) {
-            (arg1, arg2)
-        } else {
+        // CPU and CUDA backends handle non-compact layouts directly (CPU passes strides to gemm;
+        // CUDA uses try_gemm_params to avoid copies for transposed inputs).
+        // MPS requires compact inputs.
+        let (arg1, arg2) = if matches!(arg1.device(), crate::Device::Mps) {
             (arg1.compact(), arg2.compact())
+        } else {
+            (arg1, arg2)
         };
         Ok(Self { arg1, arg2 })
     }
