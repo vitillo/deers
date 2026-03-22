@@ -1130,7 +1130,7 @@ mod imp {
 
         fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self> {
             // Use 32×32 tiled kernel for large matmuls, 16×16 for small ones.
-            const BIG_MATMUL_THRESHOLD: usize = 1 << 20; // 1M output elements
+            const BIG_MATMUL_THRESHOLD: usize = 1 << 15; // 32K output elements
 
             if let (Some((ctx, lhs, _)), Some((_, rhs, _))) =
                 (self.accelerated(DType::F16), other.accelerated(DType::F16))
