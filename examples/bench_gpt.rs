@@ -62,6 +62,11 @@ fn main() {
 
 fn bench_deers(device: deers::Device, profile_enabled: bool) {
     use deers::models::gpt::{GPT, GPTConfig};
+
+    if !device.is_available() {
+        eprintln!("error: device {device:?} is not available on this platform");
+        process::exit(1);
+    }
     use deers::{ProfilerConfig, Tensor, loss, profile};
 
     let config = GPTConfig {
@@ -198,14 +203,21 @@ fn bench_candle(device: deers::Device) {
 
     let (device, device_name) = match device {
         deers::Device::Cpu => (CDevice::Cpu, "cpu"),
-        deers::Device::Mps => match CDevice::new_metal(0) {
-            Ok(device) => (device, "metal"),
-            Err(err) => {
-                println!("=== candle skipped ===");
-                println!("  failed to initialize candle metal device: {err}\n");
-                return;
+        deers::Device::Mps => {
+            // bench_deers already exited if MPS is unavailable, so this is
+            // only reached on macOS.
+            #[cfg(not(target_os = "macos"))]
+            unreachable!("MPS device checked before bench_candle is called");
+            #[cfg(target_os = "macos")]
+            match CDevice::new_metal(0) {
+                Ok(d) => (d, "metal"),
+                Err(err) => {
+                    println!("=== candle skipped ===");
+                    println!("  failed to initialize candle metal device: {err}\n");
+                    return;
+                }
             }
-        },
+        }
         deers::Device::Cuda => {
             println!("=== candle skipped ===");
             println!("  candle cuda benchmark is not wired in this example\n");
