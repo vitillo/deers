@@ -20,8 +20,8 @@ fn assert_close(actual: &[f32], expected: &[f32], tol: f32, label: &str) {
     }
 }
 
-fn devices() -> [Device; 2] {
-    [Device::Cpu, Device::Mps]
+fn devices() -> Vec<Device> {
+    [Device::Cpu, Device::Mps].into_iter().filter(|device| device.is_available()).collect()
 }
 
 fn tol_for(device: Device) -> f32 {

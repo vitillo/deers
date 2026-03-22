@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use std::borrow::Borrow;
-use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::cell::Cell;
+use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -799,6 +799,10 @@ mod tests {
 
     #[test]
     fn test_to_device() {
+        if !Device::Mps.is_available() {
+            return;
+        }
+
         // Arrange
         let tensor = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu);
 
@@ -812,6 +816,10 @@ mod tests {
 
     #[test]
     fn test_to_device_backward() {
+        if !Device::Mps.is_available() {
+            return;
+        }
+
         // Arrange
         let tensor = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Mps).attach();
 

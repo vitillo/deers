@@ -88,9 +88,10 @@ struct IndexAddMeta {
 #[cfg(target_os = "macos")]
 mod imp {
     use super::*;
+    use crate::profiler;
     use metal::{
-        Buffer, CommandBuffer, CommandQueue, CompileOptions, ComputePipelineState, Device,
-        MTLResourceOptions, MTLSize,
+        Buffer, CommandBuffer, CommandQueue, CompileOptions, ComputePipelineState,
+        CounterSampleBuffer, Device, MTLCounterSamplingPoint, MTLResourceOptions, MTLSize, NSRange,
     };
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -99,9 +100,167 @@ mod imp {
     use std::sync::{Arc, OnceLock};
 
     const KERNELS: &str = include_str!("kernels.metal");
+    // Metal caps this counter sample buffer path at 32 KiB. Timestamp samples
+    // resolve to one u64 each, so 4096 samples is the practical maximum.
+    const MAX_PROFILE_SAMPLES: u64 = 4_096;
+
+    struct PendingProfileSample {
+        event_id: usize,
+        start_idx: u64,
+        end_idx: u64,
+    }
+
+    struct CommandBufferProfile {
+        counter_sample_buffer: CounterSampleBuffer,
+        resolved_sample_buffer: Buffer,
+        cpu_start: u64,
+        gpu_start: u64,
+        next_sample: u64,
+        samples: Vec<PendingProfileSample>,
+    }
+
+    impl CommandBufferProfile {
+        fn try_new(ctx: &MpsContext) -> Option<Self> {
+            if !profiler::is_active() {
+                return None;
+            }
+            if !ctx.device.supports_counter_sampling(MTLCounterSamplingPoint::AtStageBoundary) {
+                return None;
+            }
+
+            let counter_sets = ctx.device.counter_sets();
+            let timestamp_counter_set =
+                counter_sets.iter().find(|set| set.name() == "timestamp")?;
+
+            let descriptor = metal::CounterSampleBufferDescriptor::new();
+            descriptor.set_storage_mode(metal::MTLStorageMode::Shared);
+            descriptor.set_sample_count(MAX_PROFILE_SAMPLES);
+            descriptor.set_counter_set(&timestamp_counter_set);
+
+            let counter_sample_buffer =
+                ctx.device.new_counter_sample_buffer_with_descriptor(&descriptor).ok()?;
+            let resolved_sample_buffer = ctx.device.new_buffer(
+                (MAX_PROFILE_SAMPLES as usize * std::mem::size_of::<u64>()) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+
+            let mut cpu_start = 0;
+            let mut gpu_start = 0;
+            ctx.device.sample_timestamps(&mut cpu_start, &mut gpu_start);
+
+            Some(Self {
+                counter_sample_buffer,
+                resolved_sample_buffer,
+                cpu_start,
+                gpu_start,
+                next_sample: 0,
+                samples: Vec::new(),
+            })
+        }
+
+        fn reserve_sample(&mut self) -> Option<(u64, u64)> {
+            let event_id = profiler::current_scope_id()?;
+            if self.next_sample + 2 > MAX_PROFILE_SAMPLES {
+                return None;
+            }
+
+            let start_idx = self.next_sample;
+            let end_idx = start_idx + 1;
+            self.next_sample += 2;
+            self.samples.push(PendingProfileSample { event_id, start_idx, end_idx });
+            Some((start_idx, end_idx))
+        }
+
+        fn has_samples(&self) -> bool {
+            !self.samples.is_empty()
+        }
+
+        fn resolve_pending_samples(&self, command_buffer: &CommandBuffer) {
+            let blit = command_buffer.new_blit_command_encoder();
+            blit.resolve_counters(
+                &self.counter_sample_buffer,
+                NSRange::new(0, self.next_sample),
+                &self.resolved_sample_buffer,
+                0,
+            );
+            blit.end_encoding();
+        }
+
+        fn record_elapsed_times(&self, ctx: &MpsContext) {
+            let mut cpu_end = 0;
+            let mut gpu_end = 0;
+            ctx.device.sample_timestamps(&mut cpu_end, &mut gpu_end);
+            let cpu_span = cpu_end.saturating_sub(self.cpu_start);
+            let gpu_span = gpu_end.saturating_sub(self.gpu_start);
+            if cpu_span == 0 || gpu_span == 0 {
+                return;
+            }
+
+            let samples = unsafe {
+                std::slice::from_raw_parts(
+                    self.resolved_sample_buffer.contents().cast::<u64>(),
+                    self.next_sample as usize,
+                )
+            };
+            for sample in &self.samples {
+                let begin = samples[sample.start_idx as usize];
+                let end = samples[sample.end_idx as usize];
+                if end <= begin {
+                    continue;
+                }
+
+                let gpu_delta = end - begin;
+                let elapsed_ns =
+                    ((gpu_delta as f64 / gpu_span as f64) * cpu_span as f64).round() as u64;
+                profiler::record_mps_time(sample.event_id, elapsed_ns);
+            }
+        }
+    }
+
+    struct ActiveCommandBuffer {
+        command_buffer: CommandBuffer,
+        profile: Option<CommandBufferProfile>,
+    }
+
+    impl ActiveCommandBuffer {
+        fn new(ctx: &MpsContext) -> Self {
+            let command_buffer = ctx.queue.new_command_buffer().to_owned();
+            let profile = CommandBufferProfile::try_new(ctx);
+            Self { command_buffer, profile }
+        }
+
+        fn new_compute_encoder(&mut self) -> &metal::ComputeCommandEncoderRef {
+            let Some(profile) = self.profile.as_mut() else {
+                return self.command_buffer.new_compute_command_encoder();
+            };
+            let Some((start_idx, end_idx)) = profile.reserve_sample() else {
+                return self.command_buffer.new_compute_command_encoder();
+            };
+
+            let descriptor = metal::ComputePassDescriptor::new();
+            let attachment = descriptor.sample_buffer_attachments().object_at(0).unwrap();
+            attachment.set_sample_buffer(&profile.counter_sample_buffer);
+            attachment.set_start_of_encoder_sample_index(start_idx);
+            attachment.set_end_of_encoder_sample_index(end_idx);
+            self.command_buffer.compute_command_encoder_with_descriptor(descriptor)
+        }
+
+        fn commit_and_wait(self, ctx: &MpsContext) {
+            if let Some(profile) = self.profile.as_ref().filter(|profile| profile.has_samples()) {
+                profile.resolve_pending_samples(&self.command_buffer);
+            }
+
+            self.command_buffer.commit();
+            self.command_buffer.wait_until_completed();
+
+            if let Some(profile) = self.profile.as_ref().filter(|profile| profile.has_samples()) {
+                profile.record_elapsed_times(ctx);
+            }
+        }
+    }
 
     thread_local! {
-        static ACTIVE_COMMAND_BUFFER: RefCell<Option<CommandBuffer>> = const { RefCell::new(None) };
+        static ACTIVE_COMMAND_BUFFER: RefCell<Option<ActiveCommandBuffer>> = const { RefCell::new(None) };
     }
 
     const ALL_KERNELS: &[&str] = &[
@@ -196,18 +355,18 @@ mod imp {
             Self { device, queue, pipelines }
         }
 
-        fn with_command_buffer<R>(&self, f: impl FnOnce(&CommandBuffer) -> R) -> R {
+        fn with_command_buffer<R>(&self, f: impl FnOnce(&mut ActiveCommandBuffer) -> R) -> R {
             ACTIVE_COMMAND_BUFFER.with(|slot| {
                 let mut guard = slot.borrow_mut();
                 if guard.is_none() {
-                    *guard = Some(self.queue.new_command_buffer().to_owned());
+                    *guard = Some(ActiveCommandBuffer::new(self));
                 }
-                let cb = guard.as_ref().unwrap();
+                let cb = guard.as_mut().unwrap();
                 f(cb)
             })
         }
 
-        fn clear_command_buffer(&self) -> Option<CommandBuffer> {
+        fn clear_command_buffer(&self) -> Option<ActiveCommandBuffer> {
             ACTIVE_COMMAND_BUFFER.with(|slot| slot.borrow_mut().take())
         }
 
@@ -263,10 +422,16 @@ mod imp {
             )
         }
 
-        fn synchronize(&self) {
+        fn flush_command_buffer(&self) {
             if let Some(command_buffer) = self.clear_command_buffer() {
-                command_buffer.commit();
-                command_buffer.wait_until_completed();
+                command_buffer.commit_and_wait(self);
+            }
+        }
+
+        fn synchronize(&self) {
+            let has_active = ACTIVE_COMMAND_BUFFER.with(|slot| slot.borrow().is_some());
+            if has_active {
+                self.flush_command_buffer();
                 return;
             }
 
@@ -290,8 +455,8 @@ mod imp {
             configure: impl FnOnce(&metal::ComputeCommandEncoderRef),
         ) {
             let pipeline = self.pipeline(pipeline_name);
-            self.with_command_buffer(|cb| {
-                let encoder = cb.new_compute_command_encoder();
+            self.with_command_buffer(|active| {
+                let encoder = active.new_compute_encoder();
                 encoder.set_compute_pipeline_state(&pipeline);
                 configure(&encoder);
                 let width = total_threads.max(1) as u64;
@@ -320,8 +485,8 @@ mod imp {
             configure: impl FnOnce(&metal::ComputeCommandEncoderRef),
         ) {
             let pipeline = self.pipeline(pipeline_name);
-            self.with_command_buffer(|cb| {
-                let encoder = cb.new_compute_command_encoder();
+            self.with_command_buffer(|active| {
+                let encoder = active.new_compute_encoder();
                 encoder.set_compute_pipeline_state(&pipeline);
                 configure(&encoder);
                 encoder.dispatch_threads(
@@ -359,6 +524,10 @@ mod imp {
     }
 
     impl MpsStorage {
+        pub(crate) fn synchronize_profiler() {
+            MpsContext::shared().flush_command_buffer();
+        }
+
         pub fn empty(len: usize, dtype: DType) -> Self {
             let ctx = MpsContext::shared();
             let buffer = match dtype {
@@ -455,7 +624,7 @@ mod imp {
             }
         }
 
-        /// Concatenates compact MPS storages by memcpy into a single output buffer.
+        /// Concatenates compact MPS storages into a single output buffer.
         pub fn cat(parts: &[(&MpsStorage, usize)]) -> MpsStorage {
             assert!(!parts.is_empty());
             let total_len: usize = parts.iter().map(|(_, len)| *len).sum();
@@ -464,7 +633,6 @@ mod imp {
                 MpsInner::Cpu(_) => panic!("cat requires accelerated MPS storage"),
             };
             let ctx = MpsContext::shared();
-            ctx.synchronize();
             let elem_size = match dtype {
                 DType::F16 => std::mem::size_of::<f16>(),
                 DType::F32 => std::mem::size_of::<f32>(),
@@ -475,22 +643,26 @@ mod imp {
                 DType::F32 => ctx.empty_f32_buffer(total_len),
                 DType::I64 => ctx.empty_i64_buffer(total_len),
             };
-            let mut byte_offset = 0usize;
-            for (storage, len) in parts {
-                let src_buffer = match &storage.inner {
-                    MpsInner::Accelerated { buffer, .. } => buffer,
-                    MpsInner::Cpu(_) => panic!("cat requires accelerated MPS storage"),
-                };
-                let byte_len = len * elem_size;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        src_buffer.contents().cast::<u8>(),
-                        out_buffer.contents().cast::<u8>().add(byte_offset),
-                        byte_len,
+            ctx.with_command_buffer(|active| {
+                let blit = active.command_buffer.new_blit_command_encoder();
+                let mut byte_offset = 0usize;
+                for (storage, len) in parts {
+                    let src_buffer = match &storage.inner {
+                        MpsInner::Accelerated { buffer, .. } => buffer,
+                        MpsInner::Cpu(_) => panic!("cat requires accelerated MPS storage"),
+                    };
+                    let byte_len = len * elem_size;
+                    blit.copy_from_buffer(
+                        src_buffer,
+                        0,
+                        &out_buffer,
+                        byte_offset as u64,
+                        byte_len as u64,
                     );
+                    byte_offset += byte_len;
                 }
-                byte_offset += byte_len;
-            }
+                blit.end_encoding();
+            });
             MpsStorage {
                 inner: MpsInner::Accelerated { ctx, buffer: out_buffer, len: total_len, dtype },
             }
@@ -607,6 +779,10 @@ mod imp {
                 MpsInner::Accelerated { .. } => None,
             }
         }
+    }
+
+    pub(crate) fn has_active_command_buffer() -> bool {
+        ACTIVE_COMMAND_BUFFER.with(|slot| slot.borrow().is_some())
     }
 
     impl From<Vec<f16>> for MpsStorage {
@@ -911,8 +1087,8 @@ mod imp {
                 let meta =
                     MatmulMeta { m: m as u32, k: k as u32, n: n as u32, batch: batch as u32 };
                 let pipeline = ctx.pipeline("matmul_f16");
-                ctx.with_command_buffer(|cb| {
-                    let encoder = cb.new_compute_command_encoder();
+                ctx.with_command_buffer(|active| {
+                    let encoder = active.new_compute_encoder();
                     encoder.set_compute_pipeline_state(&pipeline);
                     encoder.set_buffer(0, Some(lhs), 0);
                     encoder.set_buffer(1, Some(rhs), 0);
@@ -954,8 +1130,8 @@ mod imp {
                 // Matmul uses tiled algorithm — must dispatch full threadgroups
                 // so all 16x16 threads cooperate on tile loading.
                 let pipeline = ctx.pipeline("matmul_f32");
-                ctx.with_command_buffer(|cb| {
-                    let encoder = cb.new_compute_command_encoder();
+                ctx.with_command_buffer(|active| {
+                    let encoder = active.new_compute_encoder();
                     encoder.set_compute_pipeline_state(&pipeline);
                     encoder.set_buffer(0, Some(lhs), 0);
                     encoder.set_buffer(1, Some(rhs), 0);
@@ -1520,6 +1696,14 @@ mod imp {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn synchronize() {
+    if !imp::has_active_command_buffer() {
+        return;
+    }
+    imp::MpsStorage::synchronize_profiler();
+}
+
 #[cfg(not(target_os = "macos"))]
 mod imp {
     use super::*;
@@ -1550,6 +1734,8 @@ mod imp {
         pub fn into_cpu(self) -> CpuStorage {
             Self::unavailable()
         }
+
+        pub(crate) fn synchronize_profiler() {}
     }
 
     impl From<Vec<f16>> for MpsStorage {
@@ -1623,5 +1809,8 @@ mod imp {
         }
     }
 }
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn synchronize() {}
 
 pub use imp::MpsStorage;

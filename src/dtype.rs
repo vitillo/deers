@@ -12,6 +12,16 @@ pub enum DType {
     I64,
 }
 
+impl DType {
+    pub fn size_in_bytes(self) -> usize {
+        match self {
+            DType::F16 => std::mem::size_of::<f16>(),
+            DType::F32 => std::mem::size_of::<f32>(),
+            DType::I64 => std::mem::size_of::<i64>(),
+        }
+    }
+}
+
 /// Trait implemented by Rust types that can be stored in a tensor.
 pub trait WithDType: Sized + Copy {
     fn to_vec(storage: &CpuStorage) -> Vec<Self>;

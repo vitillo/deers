@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 mod cpu;
-mod mps;
+pub(crate) mod mps;
 
 use std::borrow::Borrow;
 
@@ -15,6 +15,11 @@ use crate::{
 
 pub use cpu::*;
 pub use mps::*;
+
+pub(crate) fn synchronize_all() {
+    mps::synchronize();
+    // cuda::synchronize() when added
+}
 
 /// An element-wise kernel shared by storage backends.
 ///

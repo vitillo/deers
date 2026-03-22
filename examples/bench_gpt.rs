@@ -5,38 +5,64 @@
 //!
 //! Run:
 //!   cargo run --release --example bench_gpt
+//!   cargo run --release --example bench_gpt -- --profile
+//!   cargo run --release --example bench_gpt -- --device mps --profile
 
+use std::env;
+use std::process;
 use std::time::Instant;
 
 // --- Config shared by both implementations ---
 
-const VOCAB_SIZE: usize = 512; // small for benchmarking
-const SEQ_LEN: usize = 64;
-const N_LAYER: usize = 2;
+// Matches the TinyStories training model shape.
+const VOCAB_SIZE: usize = 50_257;
+const SEQ_LEN: usize = 256;
+const N_LAYER: usize = 4;
 const N_HEAD: usize = 4;
-const N_EMBD: usize = 64;
+const N_EMBD: usize = 128;
 const MLP_HIDDEN: usize = N_EMBD * 4;
 const BATCH_SIZE: usize = 4;
-const WARMUP: usize = 2;
-const ITERATIONS: usize = 10;
+const WARMUP: usize = 1;
+const ITERATIONS: usize = 3;
+
+fn average_us(iterations: usize, mut f: impl FnMut()) -> f64 {
+    let t0 = Instant::now();
+    for _ in 0..iterations {
+        f();
+    }
+    t0.elapsed().as_micros() as f64 / iterations as f64
+}
+
+fn average_sample_us(iterations: usize, mut f: impl FnMut() -> f64) -> f64 {
+    let mut total_us = 0.0;
+    for _ in 0..iterations {
+        total_us += f();
+    }
+    total_us / iterations as f64
+}
 
 fn main() {
+    let options = parse_args();
+
     println!(
         "GPT benchmark: vocab={VOCAB_SIZE}, seq={SEQ_LEN}, layers={N_LAYER}, heads={N_HEAD}, d={N_EMBD}"
     );
     println!("batch={BATCH_SIZE}, warmup={WARMUP}, iterations={ITERATIONS}\n");
+    if cfg!(debug_assertions) {
+        println!("note: run with --release for meaningful benchmark timings\n");
+    }
 
-    bench_deers();
-    bench_candle();
+    bench_deers(options.device, options.profile);
+    bench_candle(options.device);
 }
 
 // ---------------------------------------------------------------------------
 // deers
 // ---------------------------------------------------------------------------
 
-fn bench_deers() {
+fn bench_deers(device: deers::Device, profile_enabled: bool) {
     use deers::models::gpt::{GPT, GPTConfig};
-    use deers::{Device, Tensor, loss};
+    use deers::{ProfilerConfig, Tensor, loss, profile};
 
     let config = GPTConfig {
         vocab_size: VOCAB_SIZE,
@@ -48,59 +74,143 @@ fn bench_deers() {
         rms_norm_eps: 1e-5,
         rope_base: 10_000.0,
     };
-    let model = GPT::new(config);
+    let mut model = GPT::new(config);
+    model.to_device(device).unwrap();
 
     let num_params: usize = model.parameters().iter().map(|p| p.layout().size()).sum();
 
     // Random-ish token ids
     let ids: Vec<i64> = (0..BATCH_SIZE * SEQ_LEN).map(|i| (i % VOCAB_SIZE) as i64).collect();
-    let input = Tensor::from_vec(ids.clone(), (BATCH_SIZE, SEQ_LEN), Device::Cpu);
+    let input = Tensor::from_vec(ids.clone(), (BATCH_SIZE, SEQ_LEN), device);
     let target_ids: Vec<i64> =
         (0..BATCH_SIZE * SEQ_LEN).map(|i| ((i + 1) % VOCAB_SIZE) as i64).collect();
-    let targets = Tensor::from_vec(target_ids, (BATCH_SIZE * SEQ_LEN,), Device::Cpu);
+    let targets = Tensor::from_vec(target_ids, (BATCH_SIZE * SEQ_LEN,), device);
+    let step_loss = || {
+        let logits = model.forward(&input).unwrap();
+        let logits_flat = logits.reshape(vec![BATCH_SIZE * SEQ_LEN, VOCAB_SIZE]);
+        loss::cross_entropy(&logits_flat, &targets)
+    };
 
     // Warmup
     for _ in 0..WARMUP {
-        let logits = model.forward(&input).unwrap();
-        let logits_flat = logits.reshape(vec![BATCH_SIZE * SEQ_LEN, VOCAB_SIZE]);
-        let l = loss::cross_entropy(&logits_flat, &targets);
+        let l = step_loss();
         let _ = l.backward();
+        device.synchronize();
     }
 
     // Forward only
-    let t0 = Instant::now();
-    for _ in 0..ITERATIONS {
-        let logits = model.forward(&input).unwrap();
-        let logits_flat = logits.reshape(vec![BATCH_SIZE * SEQ_LEN, VOCAB_SIZE]);
-        let _l = loss::cross_entropy(&logits_flat, &targets);
-    }
-    let fwd_us = t0.elapsed().as_micros() as f64 / ITERATIONS as f64;
+    let fwd_us = average_us(ITERATIONS, || {
+        let _ = step_loss();
+        device.synchronize();
+    });
 
     // Forward + backward
-    let t0 = Instant::now();
-    for _ in 0..ITERATIONS {
-        let logits = model.forward(&input).unwrap();
-        let logits_flat = logits.reshape(vec![BATCH_SIZE * SEQ_LEN, VOCAB_SIZE]);
-        let l = loss::cross_entropy(&logits_flat, &targets);
+    let fwd_bwd_us = average_us(ITERATIONS, || {
+        let l = step_loss();
         let _ = l.backward();
-    }
-    let fwd_bwd_us = t0.elapsed().as_micros() as f64 / ITERATIONS as f64;
+        device.synchronize();
+    });
 
-    println!("=== deers cpu ({num_params} params) ===");
+    // Backward only, measured directly after building a fresh graph.
+    let bwd_us = average_sample_us(ITERATIONS, || {
+        let l = step_loss();
+        device.synchronize();
+        let t0 = Instant::now();
+        let _ = l.backward();
+        device.synchronize();
+        t0.elapsed().as_micros() as f64
+    });
+
+    println!("=== deers {device:?} ({num_params} params) ===");
     println!("  forward:          {fwd_us:>10.0} µs");
     println!("  forward+backward: {fwd_bwd_us:>10.0} µs");
-    println!("  backward only:    {:>10.0} µs\n", fwd_bwd_us - fwd_us);
+    println!("  backward only:    {bwd_us:>10.0} µs\n");
+
+    if !profile_enabled {
+        return;
+    }
+
+    let profile_config = ProfilerConfig::default().record_shapes(true).profile_memory(true);
+    let (_, forward_prof) = profile(profile_config, || {
+        let _ = step_loss();
+    });
+
+    let loss = step_loss();
+    let (_, backward_prof) = profile(profile_config, || {
+        let _ = loss.backward();
+    });
+
+    println!("--- deers profile ({device:?}, forward, one step) ---");
+    println!("{}", forward_prof.table());
+    println!();
+    println!("--- deers profile ({device:?}, backward, one step) ---");
+    println!("{}", backward_prof.table());
+    println!();
+}
+
+#[derive(Clone, Copy)]
+struct Options {
+    device: deers::Device,
+    profile: bool,
+}
+
+fn parse_args() -> Options {
+    let mut args = env::args().skip(1);
+    let mut device = deers::Device::Cpu;
+    let mut profile = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--device" => {
+                let value = args.next().unwrap_or_else(|| usage("missing value for --device"));
+                device = match value.as_str() {
+                    "cpu" => deers::Device::Cpu,
+                    "mps" => deers::Device::Mps,
+                    other => usage(&format!("unsupported device: {other}")),
+                };
+            }
+            "--profile" => profile = true,
+            "--help" | "-h" => usage(""),
+            other => usage(&format!("unexpected argument: {other}")),
+        }
+    }
+
+    Options { device, profile }
+}
+
+fn usage(message: &str) -> ! {
+    if !message.is_empty() {
+        eprintln!("{message}");
+        eprintln!();
+    }
+    eprintln!("Usage: cargo run --release --example bench_gpt -- [--device cpu|mps] [--profile]");
+    process::exit(if message.is_empty() { 0 } else { 1 });
 }
 
 // ---------------------------------------------------------------------------
 // candle — same architecture, built from primitives
 // ---------------------------------------------------------------------------
 
-fn bench_candle() {
+fn bench_candle(device: deers::Device) {
     use candle_core::{DType, Device as CDevice, Tensor as CTensor};
     use candle_nn::{VarBuilder, VarMap};
 
-    let device = CDevice::Cpu;
+    let (device, device_name) = match device {
+        deers::Device::Cpu => (CDevice::Cpu, "cpu"),
+        deers::Device::Mps => match CDevice::new_metal(0) {
+            Ok(device) => (device, "metal"),
+            Err(err) => {
+                println!("=== candle skipped ===");
+                println!("  failed to initialize candle metal device: {err}\n");
+                return;
+            }
+        },
+        deers::Device::Cuda => {
+            println!("=== candle skipped ===");
+            println!("  candle cuda benchmark is not wired in this example\n");
+            return;
+        }
+    };
     let dtype = DType::F32;
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, dtype, &device);
@@ -114,38 +224,46 @@ fn bench_candle() {
     let target_ids: Vec<u32> =
         (0..BATCH_SIZE * SEQ_LEN).map(|i| ((i + 1) % VOCAB_SIZE) as u32).collect();
     let targets = CTensor::from_vec(target_ids, BATCH_SIZE * SEQ_LEN, &device).unwrap();
+    let step_loss = || {
+        let logits = model.forward(&input).unwrap();
+        let logits_flat = logits.reshape((BATCH_SIZE * SEQ_LEN, VOCAB_SIZE)).unwrap();
+        candle_nn::loss::cross_entropy(&logits_flat, &targets).unwrap()
+    };
 
     // Warmup
     for _ in 0..WARMUP {
-        let logits = model.forward(&input).unwrap();
-        let logits_flat = logits.reshape((BATCH_SIZE * SEQ_LEN, VOCAB_SIZE)).unwrap();
-        let l = candle_nn::loss::cross_entropy(&logits_flat, &targets).unwrap();
+        let l = step_loss();
         let _ = l.backward();
+        device.synchronize().unwrap();
     }
 
     // Forward only
-    let t0 = Instant::now();
-    for _ in 0..ITERATIONS {
-        let logits = model.forward(&input).unwrap();
-        let logits_flat = logits.reshape((BATCH_SIZE * SEQ_LEN, VOCAB_SIZE)).unwrap();
-        let _l = candle_nn::loss::cross_entropy(&logits_flat, &targets).unwrap();
-    }
-    let fwd_us = t0.elapsed().as_micros() as f64 / ITERATIONS as f64;
+    let fwd_us = average_us(ITERATIONS, || {
+        let _ = step_loss();
+        device.synchronize().unwrap();
+    });
 
     // Forward + backward
-    let t0 = Instant::now();
-    for _ in 0..ITERATIONS {
-        let logits = model.forward(&input).unwrap();
-        let logits_flat = logits.reshape((BATCH_SIZE * SEQ_LEN, VOCAB_SIZE)).unwrap();
-        let l = candle_nn::loss::cross_entropy(&logits_flat, &targets).unwrap();
+    let fwd_bwd_us = average_us(ITERATIONS, || {
+        let l = step_loss();
         let _ = l.backward();
-    }
-    let fwd_bwd_us = t0.elapsed().as_micros() as f64 / ITERATIONS as f64;
+        device.synchronize().unwrap();
+    });
 
-    println!("=== candle cpu ({num_params} params) ===");
+    // Backward only, measured directly after building a fresh graph.
+    let bwd_us = average_sample_us(ITERATIONS, || {
+        let l = step_loss();
+        device.synchronize().unwrap();
+        let t0 = Instant::now();
+        let _ = l.backward();
+        device.synchronize().unwrap();
+        t0.elapsed().as_micros() as f64
+    });
+
+    println!("=== candle {device_name} ({num_params} params) ===");
     println!("  forward:          {fwd_us:>10.0} µs");
     println!("  forward+backward: {fwd_bwd_us:>10.0} µs");
-    println!("  backward only:    {:>10.0} µs\n", fwd_bwd_us - fwd_us);
+    println!("  backward only:    {bwd_us:>10.0} µs\n");
 }
 
 // ---------------------------------------------------------------------------

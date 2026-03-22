@@ -14,6 +14,27 @@ pub enum Device {
 }
 
 impl Device {
+    /// Returns whether this device backend is usable in the current process.
+    pub fn is_available(&self) -> bool {
+        match self {
+            Device::Cpu => true,
+            Device::Cuda => false,
+            #[cfg(target_os = "macos")]
+            Device::Mps => metal::Device::system_default().is_some(),
+            #[cfg(not(target_os = "macos"))]
+            Device::Mps => false,
+        }
+    }
+
+    /// Waits for pending work on this device to finish.
+    pub fn synchronize(&self) {
+        match self {
+            Device::Cpu => {}
+            Device::Cuda => todo!(),
+            Device::Mps => crate::storage::mps::synchronize(),
+        }
+    }
+
     /// Allocates a zero-filled storage buffer of `size` elements.
     pub fn zeros(&self, size: usize, dtype: DType) -> Storage {
         match (self, dtype) {

@@ -29,6 +29,10 @@ fn test_linear_no_bias() {
 
 #[test]
 fn test_linear_to_device() {
+    if !Device::Mps.is_available() {
+        return;
+    }
+
     let linear = nn::Linear::new(4, 3);
     linear.to_device(Device::Mps).unwrap();
 
@@ -64,6 +68,10 @@ fn test_sequential_parameters() {
 
 #[test]
 fn test_sequential_to_device() {
+    if !Device::Mps.is_available() {
+        return;
+    }
+
     let model = nn::seq().add(nn::Linear::new(4, 3)).add(nn::ReLU).add(nn::Linear::new(3, 2));
     model.to_device(Device::Mps).unwrap();
 
@@ -121,6 +129,10 @@ fn test_embedding_selects_correct_rows() {
 
 #[test]
 fn test_embedding_mps() {
+    if !Device::Mps.is_available() {
+        return;
+    }
+
     let emb = nn::Embedding::new(10, 4);
     emb.to_device(Device::Mps).unwrap();
     let indices = Tensor::from_vec(vec![0i64, 3, 7], (3,), Device::Mps);
@@ -201,6 +213,10 @@ fn test_causal_mask_with_offset() {
 
 #[test]
 fn test_causal_mask_mps() {
+    if !Device::Mps.is_available() {
+        return;
+    }
+
     let mask = nn::functional::causal_mask(1, 3, 0, DType::F32, Device::Mps);
 
     assert_eq!(mask.device(), Device::Mps);

@@ -6,8 +6,38 @@ use std::{fmt, iter};
 use crate::backprop::GradientStore;
 use crate::error::{Error, Result};
 use crate::layout::{Layout, Shape};
+use crate::profiler;
 use crate::storage::{self, BackendStorage, MpsStorage, ReduceMax, ReduceSum, Storage};
 use crate::tensor::Tensor;
+
+fn allocated_bytes(elements: usize, dtype: crate::DType) -> usize {
+    elements * dtype.size_in_bytes()
+}
+
+fn profile_output(
+    name: &'static str,
+    inputs: &[&Tensor],
+    elements: usize,
+    dtype: crate::DType,
+) -> Option<profiler::ProfileScope> {
+    profiler::scope(name, inputs, allocated_bytes(elements, dtype))
+}
+
+fn profile_like(name: &'static str, arg: &Tensor) -> Option<profiler::ProfileScope> {
+    profile_output(name, &[arg], arg.layout().size(), arg.dtype())
+}
+
+fn profile_like_binary(
+    name: &'static str,
+    arg1: &Tensor,
+    arg2: &Tensor,
+) -> Option<profiler::ProfileScope> {
+    profile_output(name, &[arg1, arg2], arg1.layout().size(), arg1.dtype())
+}
+
+fn profile_view(name: &'static str, inputs: &[&Tensor]) -> Option<profiler::ProfileScope> {
+    profiler::scope(name, inputs, 0)
+}
 
 /// Computes the output shape for a reduction along the given axes.
 fn reduce_shape(shape: &Shape, axes: &[usize], keep_dims: bool) -> Shape {
@@ -74,6 +104,7 @@ impl Neg {
 
 impl TensorOp for Neg {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("neg", &self.arg);
         let storage =
             Arc::new(RwLock::new(self.arg.storage().unary_op(storage::Neg, self.arg.layout())?));
         let layout = Layout::from(self.arg.layout().shape().clone());
@@ -105,6 +136,7 @@ impl EWiseAdd {
 
 impl TensorOp for EWiseAdd {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like_binary("add", &self.arg1, &self.arg2);
         let storage = Arc::new(RwLock::new(self.arg1.storage().binary_op::<storage::EWiseAdd>(
             self.arg1.layout(),
             &self.arg2.storage(),
@@ -144,6 +176,7 @@ impl EWiseSub {
 
 impl TensorOp for EWiseSub {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like_binary("sub", &self.arg1, &self.arg2);
         let storage = Arc::new(RwLock::new(self.arg1.storage().binary_op::<storage::EWiseSub>(
             self.arg1.layout(),
             &self.arg2.storage(),
@@ -183,6 +216,7 @@ impl EWiseMul {
 
 impl TensorOp for EWiseMul {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like_binary("mul", &self.arg1, &self.arg2);
         let storage = Arc::new(RwLock::new(self.arg1.storage().binary_op::<storage::EWiseMul>(
             self.arg1.layout(),
             &self.arg2.storage(),
@@ -223,6 +257,7 @@ impl EWiseDiv {
 
 impl TensorOp for EWiseDiv {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like_binary("div", &self.arg1, &self.arg2);
         let storage = Arc::new(RwLock::new(self.arg1.storage().binary_op::<storage::EWiseDiv>(
             self.arg1.layout(),
             &self.arg2.storage(),
@@ -262,6 +297,7 @@ impl EWisePowf {
 
 impl TensorOp for EWisePowf {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like_binary("pow", &self.arg, &self.e);
         let storage = Arc::new(RwLock::new(self.arg.storage().binary_op::<storage::EWisePow>(
             self.arg.layout(),
             &self.e.storage(),
@@ -303,6 +339,7 @@ impl EWiseLog {
 
 impl TensorOp for EWiseLog {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("log", &self.arg);
         let storage =
             Arc::new(RwLock::new(self.arg.storage().unary_op(storage::Log, self.arg.layout())?));
         Ok(Tensor::new(
@@ -336,6 +373,7 @@ impl EWiseExp {
 
 impl TensorOp for EWiseExp {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("exp", &self.arg);
         let storage =
             Arc::new(RwLock::new(self.arg.storage().unary_op(storage::Exp, self.arg.layout())?));
         Ok(Tensor::new(
@@ -369,6 +407,7 @@ impl EWiseSin {
 
 impl TensorOp for EWiseSin {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("sin", &self.arg);
         let storage =
             Arc::new(RwLock::new(self.arg.storage().unary_op(storage::Sin, self.arg.layout())?));
         Ok(Tensor::new(
@@ -402,6 +441,7 @@ impl EWiseCos {
 
 impl TensorOp for EWiseCos {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("cos", &self.arg);
         let storage =
             Arc::new(RwLock::new(self.arg.storage().unary_op(storage::Cos, self.arg.layout())?));
         Ok(Tensor::new(
@@ -435,6 +475,7 @@ impl Tanh {
 
 impl TensorOp for Tanh {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("tanh", &self.arg);
         let storage =
             Arc::new(RwLock::new(self.arg.storage().unary_op(storage::Tanh, self.arg.layout())?));
         Ok(Tensor::new(
@@ -470,6 +511,7 @@ impl Relu {
 
 impl TensorOp for Relu {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("relu", &self.arg);
         let storage =
             Arc::new(RwLock::new(self.arg.storage().unary_op(storage::Relu, self.arg.layout())?));
         Ok(Tensor::new(
@@ -510,6 +552,7 @@ impl ScalarAdd {
 
 impl TensorOp for ScalarAdd {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("scalar_add", &self.arg);
         let storage = Arc::new(RwLock::new(
             self.arg.storage().unary_op(storage::ScalarAdd(self.scalar), self.arg.layout())?,
         ));
@@ -545,6 +588,7 @@ impl ScalarMul {
 
 impl TensorOp for ScalarMul {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("scalar_mul", &self.arg);
         let storage = Arc::new(RwLock::new(
             self.arg.storage().unary_op(storage::ScalarMul(self.scalar), self.arg.layout())?,
         ));
@@ -582,6 +626,7 @@ impl ScalarPowf {
 
 impl TensorOp for ScalarPowf {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("scalar_powf", &self.arg);
         let storage =
             Arc::new(RwLock::new(self.arg.storage().ewise_powf(self.e, self.arg.layout())?));
         Ok(Tensor::new(
@@ -624,6 +669,7 @@ impl Permute {
 
 impl TensorOp for Permute {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_view("permute", &[&self.arg]);
         let storage = self.arg.storage_clone();
         let layout = self.arg.layout().permute(&self.axes);
         Ok(Tensor::new(storage, layout, false, Some(Box::new(self))))
@@ -666,6 +712,7 @@ impl Broadcast {
 
 impl TensorOp for Broadcast {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_view("broadcast", &[&self.arg]);
         let shape_diff = self.new_shape.ndim() - self.arg.layout().ndim();
 
         let mut old_shape = Vec::with_capacity(self.new_shape.ndim());
@@ -744,6 +791,7 @@ impl Sum {
 impl TensorOp for Sum {
     fn forward(self) -> Result<Tensor> {
         let new_shape = reduce_shape(self.arg.layout().shape(), &self.axis, self.keep_dims);
+        let _profile = profile_output("sum", &[&self.arg], new_shape.size(), self.arg.dtype());
         let view = reduce_view(&self.arg, &self.axis);
         let mut out_storage = self.arg.device().zeros(new_shape.size(), self.arg.dtype());
         view.storage().reduce::<ReduceSum>(view.layout(), &mut out_storage)?;
@@ -787,6 +835,7 @@ impl Max {
 impl TensorOp for Max {
     fn forward(self) -> Result<Tensor> {
         let new_shape = reduce_shape(self.arg.layout().shape(), &self.axis, self.keep_dims);
+        let _profile = profile_output("max", &[&self.arg], new_shape.size(), self.arg.dtype());
         let view = reduce_view(&self.arg, &self.axis);
         let mut out_storage = self.arg.device().zeros(new_shape.size(), self.arg.dtype());
         view.storage().reduce::<ReduceMax>(view.layout(), &mut out_storage)?;
@@ -832,6 +881,7 @@ impl Reshape {
 
 impl TensorOp for Reshape {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_view("reshape", &[&self.arg]);
         let storage = self.arg.storage_clone();
 
         Ok(Tensor::new(storage, Layout::from(self.new_shape.clone()), false, Some(Box::new(self))))
@@ -882,6 +932,7 @@ impl Narrow {
 
 impl TensorOp for Narrow {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_view("narrow", &[&self.arg]);
         let mut shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
         shape[self.dim] = self.len;
         let stride = self.arg.layout().strides()[self.dim] as usize;
@@ -975,6 +1026,8 @@ impl TensorOp for MatMul {
         out_dims.push(m);
         out_dims.push(n);
         let shape: Shape = out_dims.into();
+        let _profile =
+            profile_output("matmul", &[&self.arg1, &self.arg2], shape.size(), self.arg1.dtype());
         let storage = Arc::new(RwLock::new(self.arg1.storage().matmul(
             self.arg1.layout(),
             &self.arg2.storage(),
@@ -1025,6 +1078,7 @@ impl LogSumExp {
 
 impl TensorOp for LogSumExp {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_view("log_sum_exp", &[&self.arg]);
         // max_z needs recomputing here because it was consumed during new().
         // But since new() already computed exp_z = exp(arg - max) and sum_z = sum(exp_z),
         // we can get logsumexp = log(sum_z) + max_z. Recompute max cheaply.
@@ -1068,6 +1122,7 @@ impl Compact {
 
 impl TensorOp for Compact {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("compact", &self.arg);
         let mut storage = match self.arg.device() {
             crate::Device::Mps => {
                 Storage::Mps(MpsStorage::empty(self.arg.layout().size(), self.arg.dtype()))
@@ -1137,6 +1192,12 @@ impl Gather {
 
 impl TensorOp for Gather {
     fn forward(self) -> Result<Tensor> {
+        let _profile = profile_output(
+            "gather",
+            &[&self.arg, &self.indices],
+            self.indices.layout().size(),
+            self.arg.dtype(),
+        );
         let storage = Arc::new(RwLock::new(self.arg.storage().gather(
             self.arg.layout(),
             self.dim,
@@ -1206,15 +1267,22 @@ impl IndexSelect {
 
 impl TensorOp for IndexSelect {
     fn forward(self) -> Result<Tensor> {
+        let mut shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
+        shape[self.dim] = self.indices.layout().shape()[0];
+        let out_shape = Shape::from(shape.clone());
+        let _profile = profile_output(
+            "index_select",
+            &[&self.arg, &self.indices],
+            out_shape.size(),
+            self.arg.dtype(),
+        );
         let storage = Arc::new(RwLock::new(self.arg.storage().index_select(
             self.arg.layout(),
             self.dim,
             &self.indices.storage(),
             self.indices.layout(),
         )?));
-        let mut shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
-        shape[self.dim] = self.indices.layout().shape()[0];
-        Ok(Tensor::new(storage, Shape::from(shape).into(), false, Some(Box::new(self))))
+        Ok(Tensor::new(storage, out_shape.into(), false, Some(Box::new(self))))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -1294,6 +1362,8 @@ impl TensorOp for Cat {
         let mut out_dims: Vec<usize> = self.args[0].layout().shape().iter().copied().collect();
         out_dims[0] = total_dim0;
         let out_shape: Shape = out_dims.into();
+        let inputs: Vec<&Tensor> = self.args.iter().collect();
+        let _profile = profile_output("cat", &inputs, out_shape.size(), self.args[0].dtype());
 
         let storage = {
             let guards: Vec<_> = self.args.iter().map(|a| a.storage()).collect();

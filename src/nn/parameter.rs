@@ -74,6 +74,10 @@ mod tests {
 
     #[test]
     fn test_to_device() {
+        if !Device::Mps.is_available() {
+            return;
+        }
+
         // Arrange
         let var = Parameter::new(Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu));
 

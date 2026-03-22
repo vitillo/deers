@@ -20,8 +20,8 @@ fn candle_grad(grads: &candle_core::backprop::GradStore, var: &Var) -> Vec<f32> 
     grads.get(var.as_tensor()).unwrap().flatten_all().unwrap().to_vec1().unwrap()
 }
 
-fn devices() -> [Device; 2] {
-    [Device::Cpu, Device::Mps]
+fn devices() -> Vec<Device> {
+    [Device::Cpu, Device::Mps].into_iter().filter(|device| device.is_available()).collect()
 }
 
 #[test]
