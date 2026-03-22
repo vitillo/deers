@@ -1017,46 +1017,100 @@ mod imp {
                 cublasComputeType_t, cublasGemmAlgo_t, cublasOperation_t, cudaDataType_t,
             };
 
-            let lhs = self.compact(layout)?;
-            let rhs = other.compact(layout_other)?;
+            /// Returns `(op, leading_dim, batch_stride)` for a matrix layout if it can be
+            /// passed to cuBLAS without compacting — i.e., it is row-major contiguous or
+            /// has only the last two dims transposed with contiguous batch dims.
+            /// Uses the same convention as candle: the last two strides determine the op.
+            fn try_gemm_params(
+                layout: &Layout,
+                rows: usize,
+                cols: usize,
+            ) -> Option<(cublasOperation_t, i32, i64)> {
+                let ndim = layout.ndim();
+                let strides = layout.strides();
+                let shape = layout.shape();
+                let m1 = strides[ndim - 1] as usize; // last stride
+                let m2 = strides[ndim - 2] as usize; // second-to-last stride
+                // Batch dims must be contiguous.
+                let mut expected = rows * cols;
+                for i in (0..ndim.saturating_sub(2)).rev() {
+                    if strides[i] as usize != expected {
+                        return None;
+                    }
+                    expected *= shape[i];
+                }
+                if (m1 == 1 || cols == 1) && (m2 == cols || rows == 1) {
+                    // Row-major contiguous: CUBLAS_OP_N, leading_dim = cols
+                    Some((cublasOperation_t::CUBLAS_OP_N, cols as i32, (rows * cols) as i64))
+                } else if (m1 == rows || cols == 1) && (m2 == 1 || rows == 1) {
+                    // Transposed contiguous: CUBLAS_OP_T, leading_dim = rows
+                    Some((cublasOperation_t::CUBLAS_OP_T, rows as i32, (rows * cols) as i64))
+                } else {
+                    None
+                }
+            }
+
             let ndim = layout.ndim();
             let m = layout.shape()[ndim - 2];
             let k = layout.shape()[ndim - 1];
             let n = layout_other.shape()[ndim - 1];
             let batch = if ndim > 2 { layout.shape().iter().take(ndim - 2).product() } else { 1 };
 
-            match (&lhs.inner, &rhs.inner) {
+            // Try to use each operand directly (CUBLAS_OP_T for transposed layouts) to avoid
+            // copying. Fall back to compact for layouts with non-standard strides.
+            let lhs_compact: Option<CudaStorage> =
+                if try_gemm_params(layout, m, k).is_none() { Some(self.compact(layout)?) } else { None };
+            let rhs_compact: Option<CudaStorage> =
+                if try_gemm_params(layout_other, k, n).is_none() { Some(other.compact(layout_other)?) } else { None };
+            let lhs_storage: &CudaStorage = lhs_compact.as_ref().unwrap_or(self);
+            let rhs_storage: &CudaStorage = rhs_compact.as_ref().unwrap_or(other);
+            // If we compacted, the result is always normal row-major (CUBLAS_OP_N, offset=0).
+            let (transb, ldb, lhs_bs, lhs_offset) = if lhs_compact.is_some() {
+                (cublasOperation_t::CUBLAS_OP_N, k as i32, (m * k) as i64, 0usize)
+            } else {
+                let (op, ld, bs) = try_gemm_params(layout, m, k).unwrap();
+                (op, ld, bs, layout.offset)
+            };
+            let (transa, lda, rhs_bs, rhs_offset) = if rhs_compact.is_some() {
+                (cublasOperation_t::CUBLAS_OP_N, n as i32, (k * n) as i64, 0usize)
+            } else {
+                let (op, ld, bs) = try_gemm_params(layout_other, k, n).unwrap();
+                (op, ld, bs, layout_other.offset)
+            };
+
+            match (&lhs_storage.inner, &rhs_storage.inner) {
                 (CudaInner::F32(a), CudaInner::F32(b)) => {
                     // cuBLAS with beta=0 overwrites every output element; no zeroing needed.
-                    let mut out = unsafe { alloc_uninit::<f32>(&lhs.runtime, batch * m * n) }?;
+                    let mut out =
+                        unsafe { alloc_uninit::<f32>(&lhs_storage.runtime, batch * m * n) }?;
                     let alpha = 1.0f32;
                     let beta = 0.0f32;
                     let alpha_ptr = &alpha as *const f32 as *const _;
                     let beta_ptr = &beta as *const f32 as *const _;
                     let stream = out.stream().clone();
-                    let b_view = b.slice(..);
-                    let a_view = a.slice(..);
+                    let b_view = b.slice(rhs_offset..);
+                    let a_view = a.slice(lhs_offset..);
                     let (b_ptr, gb) = b_view.device_ptr(&stream);
                     let (a_ptr, ga) = a_view.device_ptr(&stream);
                     let (c_ptr, gc) = out.device_ptr_mut(&stream);
-                    maybe_profile_launch(&lhs.runtime, || {
+                    maybe_profile_launch(&lhs_storage.runtime, || {
                         unsafe {
                             cublas_result::gemm_strided_batched_ex(
-                                *lhs.runtime.blas.handle(),
-                                cublasOperation_t::CUBLAS_OP_N,
-                                cublasOperation_t::CUBLAS_OP_N,
+                                *lhs_storage.runtime.blas.handle(),
+                                transa,
+                                transb,
                                 n as i32,
                                 m as i32,
                                 k as i32,
                                 alpha_ptr,
                                 b_ptr as *const _,
                                 cudaDataType_t::CUDA_R_32F,
-                                n as i32,
-                                (k * n) as i64,
+                                lda,
+                                rhs_bs,
                                 a_ptr as *const _,
                                 cudaDataType_t::CUDA_R_32F,
-                                k as i32,
-                                (m * k) as i64,
+                                ldb,
+                                lhs_bs,
                                 beta_ptr,
                                 c_ptr as *mut _,
                                 cudaDataType_t::CUDA_R_32F,
@@ -1073,42 +1127,39 @@ mod imp {
                     drop(gc);
                     drop(ga);
                     drop(gb);
-                    Ok(Self { inner: CudaInner::F32(out), runtime: lhs.runtime.clone() })
+                    Ok(Self { inner: CudaInner::F32(out), runtime: lhs_storage.runtime.clone() })
                 }
                 (CudaInner::F16(a), CudaInner::F16(b)) => {
-                    let mut out = unsafe { alloc_uninit::<f16>(&lhs.runtime, batch * m * n) }?;
-                    let alpha = f16::from_f32(1.0);
-                    let beta = f16::from_f32(0.0);
+                    let mut out =
+                        unsafe { alloc_uninit::<f16>(&lhs_storage.runtime, batch * m * n) }?;
                     let alpha_f32 = 1.0f32;
                     let beta_f32 = 0.0f32;
                     let alpha_ptr = &alpha_f32 as *const f32 as *const _;
                     let beta_ptr = &beta_f32 as *const f32 as *const _;
-                    let _alpha_half = alpha;
-                    let _beta_half = beta;
                     let stream = out.stream().clone();
-                    let b_view = b.slice(..);
-                    let a_view = a.slice(..);
+                    let b_view = b.slice(rhs_offset..);
+                    let a_view = a.slice(lhs_offset..);
                     let (b_ptr, gb) = b_view.device_ptr(&stream);
                     let (a_ptr, ga) = a_view.device_ptr(&stream);
                     let (c_ptr, gc) = out.device_ptr_mut(&stream);
-                    maybe_profile_launch(&lhs.runtime, || {
+                    maybe_profile_launch(&lhs_storage.runtime, || {
                         unsafe {
                             cublas_result::gemm_strided_batched_ex(
-                                *lhs.runtime.blas.handle(),
-                                cublasOperation_t::CUBLAS_OP_N,
-                                cublasOperation_t::CUBLAS_OP_N,
+                                *lhs_storage.runtime.blas.handle(),
+                                transa,
+                                transb,
                                 n as i32,
                                 m as i32,
                                 k as i32,
                                 alpha_ptr,
                                 b_ptr as *const _,
                                 cudaDataType_t::CUDA_R_16F,
-                                n as i32,
-                                (k * n) as i64,
+                                lda,
+                                rhs_bs,
                                 a_ptr as *const _,
                                 cudaDataType_t::CUDA_R_16F,
-                                k as i32,
-                                (m * k) as i64,
+                                ldb,
+                                lhs_bs,
                                 beta_ptr,
                                 c_ptr as *mut _,
                                 cudaDataType_t::CUDA_R_16F,
@@ -1125,7 +1176,7 @@ mod imp {
                     drop(gc);
                     drop(ga);
                     drop(gb);
-                    Ok(Self { inner: CudaInner::F16(out), runtime: lhs.runtime.clone() })
+                    Ok(Self { inner: CudaInner::F16(out), runtime: lhs_storage.runtime.clone() })
                 }
                 _ => Err(Error::DTypeMismatch("matmul dtype mismatch".into())),
             }
