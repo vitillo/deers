@@ -142,6 +142,7 @@ impl Tensor {
     pub fn device(&self) -> Device {
         match &*self.storage() {
             Storage::Cpu(_) => Device::Cpu,
+            Storage::Cuda(_) => Device::Cuda,
             Storage::Mps(_) => Device::Mps,
         }
     }

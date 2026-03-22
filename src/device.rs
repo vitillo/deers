@@ -2,7 +2,8 @@
 
 use crate::{
     dtype::DType,
-    storage::{CpuStorage, MpsStorage, Storage},
+    error::{Error, Result},
+    storage::{CpuStorage, CudaStorage, MpsStorage, Storage},
 };
 
 /// The compute device where tensor data is stored and operations run.
@@ -21,7 +22,7 @@ impl Device {
     pub fn is_available(&self) -> bool {
         match self {
             Device::Cpu => true,
-            Device::Cuda => false,
+            Device::Cuda => CudaStorage::is_available(),
             #[cfg(target_os = "macos")]
             Device::Mps => metal::Device::system_default().is_some(),
             #[cfg(not(target_os = "macos"))]
@@ -29,11 +30,29 @@ impl Device {
         }
     }
 
+    /// Returns an error describing why this backend is unavailable.
+    pub fn check_available(&self) -> Result<()> {
+        match self {
+            Device::Cpu => Ok(()),
+            Device::Cuda => crate::storage::cuda::availability(),
+            #[cfg(target_os = "macos")]
+            Device::Mps => {
+                if metal::Device::system_default().is_some() {
+                    Ok(())
+                } else {
+                    Err(Error::NotImplemented("mps backend is unavailable"))
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            Device::Mps => Err(Error::NotImplemented("mps backend is unavailable")),
+        }
+    }
+
     /// Waits for pending work on this device to finish.
     pub fn synchronize(&self) {
         match self {
             Device::Cpu => {}
-            Device::Cuda => todo!(),
+            Device::Cuda => crate::storage::cuda::synchronize(),
             Device::Mps => crate::storage::mps::synchronize(),
         }
     }
@@ -49,7 +68,9 @@ impl Device {
             (Device::Mps, DType::F16) => Storage::Mps(MpsStorage::zeros(size, DType::F16)),
             (Device::Mps, DType::F32) => Storage::Mps(MpsStorage::zeros(size, DType::F32)),
             (Device::Mps, DType::I64) => Storage::Mps(MpsStorage::zeros(size, DType::I64)),
-            (Device::Cuda, _) => todo!(),
+            (Device::Cuda, DType::F16) => Storage::Cuda(CudaStorage::zeros(size, DType::F16)),
+            (Device::Cuda, DType::F32) => Storage::Cuda(CudaStorage::zeros(size, DType::F32)),
+            (Device::Cuda, DType::I64) => Storage::Cuda(CudaStorage::zeros(size, DType::I64)),
         }
     }
 
@@ -64,7 +85,9 @@ impl Device {
             (Device::Mps, DType::F16) => Storage::Mps(MpsStorage::ones(size, DType::F16)),
             (Device::Mps, DType::F32) => Storage::Mps(MpsStorage::ones(size, DType::F32)),
             (Device::Mps, DType::I64) => Storage::Mps(MpsStorage::ones(size, DType::I64)),
-            (Device::Cuda, _) => todo!(),
+            (Device::Cuda, DType::F16) => Storage::Cuda(CudaStorage::ones(size, DType::F16)),
+            (Device::Cuda, DType::F32) => Storage::Cuda(CudaStorage::ones(size, DType::F32)),
+            (Device::Cuda, DType::I64) => Storage::Cuda(CudaStorage::ones(size, DType::I64)),
         }
     }
 }

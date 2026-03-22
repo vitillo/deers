@@ -63,8 +63,8 @@ fn main() {
 fn bench_deers(device: deers::Device, profile_enabled: bool) {
     use deers::models::gpt::{GPT, GPTConfig};
 
-    if !device.is_available() {
-        eprintln!("error: device {device:?} is not available on this platform");
+    if let Err(err) = device.check_available() {
+        eprintln!("error: device {device:?} is not available: {err}");
         process::exit(1);
     }
     use deers::{ProfilerConfig, Tensor, loss, profile};
@@ -171,6 +171,7 @@ fn parse_args() -> Options {
                 let value = args.next().unwrap_or_else(|| usage("missing value for --device"));
                 device = match value.as_str() {
                     "cpu" => deers::Device::Cpu,
+                    "cuda" => deers::Device::Cuda,
                     "mps" => deers::Device::Mps,
                     other => usage(&format!("unsupported device: {other}")),
                 };
@@ -189,7 +190,9 @@ fn usage(message: &str) -> ! {
         eprintln!("{message}");
         eprintln!();
     }
-    eprintln!("Usage: cargo run --release --example bench_gpt -- [--device cpu|mps] [--profile]");
+    eprintln!(
+        "Usage: cargo run --release --example bench_gpt -- [--device cpu|cuda|mps] [--profile]"
+    );
     process::exit(if message.is_empty() { 0 } else { 1 });
 }
 
@@ -219,9 +222,21 @@ fn bench_candle(device: deers::Device) {
             }
         }
         deers::Device::Cuda => {
-            println!("=== candle skipped ===");
-            println!("  candle cuda benchmark is not wired in this example\n");
-            return;
+            #[cfg(not(target_os = "linux"))]
+            {
+                println!("=== candle skipped ===");
+                println!("  candle cuda benchmark is only wired on Linux in this example\n");
+                return;
+            }
+            #[cfg(target_os = "linux")]
+            match CDevice::new_cuda(0) {
+                Ok(d) => (d, "cuda"),
+                Err(err) => {
+                    println!("=== candle skipped ===");
+                    println!("  failed to initialize candle cuda device: {err}\n");
+                    return;
+                }
+            }
         }
     };
     let dtype = DType::F32;

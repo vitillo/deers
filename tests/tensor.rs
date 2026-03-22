@@ -21,7 +21,10 @@ fn candle_grad(grads: &candle_core::backprop::GradStore, var: &Var) -> Vec<f32> 
 }
 
 fn devices() -> Vec<Device> {
-    [Device::Cpu, Device::Mps].into_iter().filter(|device| device.is_available()).collect()
+    [Device::Cpu, Device::Cuda, Device::Mps]
+        .into_iter()
+        .filter(|device| device.is_available())
+        .collect()
 }
 
 #[test]

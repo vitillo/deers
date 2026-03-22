@@ -51,11 +51,8 @@ impl Tokenizer {
     /// Decodes token ids back into text, replacing invalid UTF-8 with the
     /// standard replacement character instead of panicking.
     pub fn decode_lossy(&self, tokens: &[u32]) -> String {
-        let bytes = self
-            .bpe
-            ._decode_native_and_split(tokens.to_vec())
-            .flatten()
-            .collect::<Vec<_>>();
+        let bytes =
+            self.bpe._decode_native_and_split(tokens.to_vec()).flatten().collect::<Vec<_>>();
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
@@ -127,11 +124,7 @@ pub fn prepare_text_token_bins(
     Ok(TokenBinPaths { train: train_path, val: val_path })
 }
 
-fn tokenize_text_file_to_bin(
-    path: &Path,
-    tokenizer: &Tokenizer,
-    out_path: &Path,
-) -> Result<usize> {
+fn tokenize_text_file_to_bin(path: &Path, tokenizer: &Tokenizer, out_path: &Path) -> Result<usize> {
     let input = File::open(path)?;
     let mut reader = BufReader::new(input);
     let output = File::create(out_path)?;
@@ -183,11 +176,7 @@ fn tokenize_text_file_to_bin(
     if printed_progress {
         println!();
     }
-    println!(
-        "Finished tokenizing: {} tokens written to {}",
-        total_tokens,
-        out_path.display()
-    );
+    println!("Finished tokenizing: {} tokens written to {}", total_tokens, out_path.display());
     Ok(total_tokens)
 }
 

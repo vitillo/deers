@@ -1,6 +1,6 @@
+use crate::Tensor;
 use crate::error::Result;
 use crate::nn::{Linear, Module, ParamBuilder, Parameter, ReLU};
-use crate::Tensor;
 
 /// A two-layer MLP for MNIST classification.
 pub struct MnistMLP {

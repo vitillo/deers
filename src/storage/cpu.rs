@@ -7,7 +7,7 @@ use crate::{
     dtype::{DType, WithDType},
     error::{Error, Result},
     layout::Layout,
-    storage::{BackendStorage, BinaryOp, MpsStorage, Storage, UnaryOp},
+    storage::{BackendStorage, BinaryOp, CudaStorage, MpsStorage, Storage, UnaryOp},
 };
 
 use super::ReduceOp;
@@ -25,7 +25,7 @@ impl CpuStorage {
         match device {
             Device::Cpu => Storage::Cpu(self),
             Device::Mps => Storage::Mps(MpsStorage::from_cpu_storage(self)),
-            Device::Cuda => todo!(),
+            Device::Cuda => Storage::Cuda(CudaStorage::from_cpu_storage(self)),
         }
     }
 
@@ -773,7 +773,11 @@ impl BackendStorage for CpuStorage {
                     .map(|row| {
                         let start = row * reduce_size;
                         let slice = &data[start..start + reduce_size];
-                        let max = slice.iter().copied().map(|v| v.to_f32()).fold(f32::NEG_INFINITY, f32::max);
+                        let max = slice
+                            .iter()
+                            .copied()
+                            .map(|v| v.to_f32())
+                            .fold(f32::NEG_INFINITY, f32::max);
                         let sum: f32 = slice.iter().map(|v| (v.to_f32() - max).exp()).sum();
                         f16::from_f32(sum.ln() + max)
                     })

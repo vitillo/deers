@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod cpu;
+pub(crate) mod cuda;
 pub(crate) mod mps;
 
 use std::borrow::Borrow;
@@ -14,11 +15,12 @@ use crate::{
 };
 
 pub use cpu::*;
+pub use cuda::*;
 pub use mps::*;
 
 pub(crate) fn synchronize_all() {
     mps::synchronize();
-    // cuda::synchronize() when added
+    cuda::synchronize();
 }
 
 /// An element-wise kernel shared by storage backends.
@@ -288,6 +290,7 @@ pub trait BackendStorage: Sized {
 #[derive(Debug, Clone)]
 pub enum Storage {
     Cpu(CpuStorage),
+    Cuda(CudaStorage),
     Mps(MpsStorage),
 }
 
@@ -295,6 +298,7 @@ impl BackendStorage for Storage {
     fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self> {
         match self {
             Storage::Cpu(storage) => Ok(Self::Cpu(storage.ewise_powf(e, l)?)),
+            Storage::Cuda(storage) => Ok(Self::Cuda(storage.ewise_powf(e, l)?)),
             Storage::Mps(storage) => Ok(Self::Mps(storage.ewise_powf(e, l)?)),
         }
     }
@@ -302,6 +306,7 @@ impl BackendStorage for Storage {
     fn unary_op<O: UnaryOp>(&self, op: O, l: &Layout) -> Result<Self> {
         match self {
             Storage::Cpu(storage) => Ok(Self::Cpu(storage.unary_op(op, l)?)),
+            Storage::Cuda(storage) => Ok(Self::Cuda(storage.unary_op(op, l)?)),
             Storage::Mps(storage) => Ok(Self::Mps(storage.unary_op(op, l)?)),
         }
     }
@@ -316,6 +321,9 @@ impl BackendStorage for Storage {
             (Storage::Cpu(storage), Storage::Cpu(other)) => {
                 Ok(Self::Cpu(storage.binary_op::<O>(layout, other, other_layout)?))
             }
+            (Storage::Cuda(storage), Storage::Cuda(other)) => {
+                Ok(Self::Cuda(storage.binary_op::<O>(layout, other, other_layout)?))
+            }
             (Storage::Mps(storage), Storage::Mps(other)) => {
                 Ok(Self::Mps(storage.binary_op::<O>(layout, other, other_layout)?))
             }
@@ -326,6 +334,7 @@ impl BackendStorage for Storage {
     fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
         match (self, dst) {
             (Storage::Cpu(storage), Storage::Cpu(dst)) => storage.reduce::<O>(layout, dst),
+            (Storage::Cuda(storage), Storage::Cuda(dst)) => storage.reduce::<O>(layout, dst),
             (Storage::Mps(storage), Storage::Mps(dst)) => storage.reduce::<O>(layout, dst),
             _ => Err(Error::DeviceMismatch { op: O::KERNEL }),
         }
@@ -333,14 +342,22 @@ impl BackendStorage for Storage {
 
     fn log_sum_exp(&self, layout: &Layout, outer_size: usize, reduce_size: usize) -> Result<Self> {
         match self {
-            Storage::Cpu(storage) => Ok(Self::Cpu(storage.log_sum_exp(layout, outer_size, reduce_size)?)),
-            Storage::Mps(storage) => Ok(Self::Mps(storage.log_sum_exp(layout, outer_size, reduce_size)?)),
+            Storage::Cpu(storage) => {
+                Ok(Self::Cpu(storage.log_sum_exp(layout, outer_size, reduce_size)?))
+            }
+            Storage::Cuda(storage) => {
+                Ok(Self::Cuda(storage.log_sum_exp(layout, outer_size, reduce_size)?))
+            }
+            Storage::Mps(storage) => {
+                Ok(Self::Mps(storage.log_sum_exp(layout, outer_size, reduce_size)?))
+            }
         }
     }
 
     fn dtype(&self) -> DType {
         match self {
             Storage::Cpu(storage) => storage.dtype(),
+            Storage::Cuda(storage) => storage.dtype(),
             Storage::Mps(storage) => storage.dtype(),
         }
     }
@@ -348,6 +365,7 @@ impl BackendStorage for Storage {
     fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D> {
         match self {
             Storage::Cpu(cpu_storage) => cpu_storage.to_vec(layout),
+            Storage::Cuda(cuda_storage) => cuda_storage.to_vec(layout),
             Storage::Mps(mps_storage) => mps_storage.to_vec(layout),
         }
     }
@@ -355,6 +373,10 @@ impl BackendStorage for Storage {
     fn copy_compact(&self, src_layout: &Layout, dst: &mut Self) -> Result<()> {
         match (self, dst) {
             (Storage::Cpu(src), Storage::Cpu(dst)) => {
+                src.copy_compact(src_layout, dst)?;
+                Ok(())
+            }
+            (Storage::Cuda(src), Storage::Cuda(dst)) => {
                 src.copy_compact(src_layout, dst)?;
                 Ok(())
             }
@@ -370,6 +392,9 @@ impl BackendStorage for Storage {
         match (self, other) {
             (Storage::Cpu(storage), Storage::Cpu(other)) => {
                 Ok(Self::Cpu(storage.matmul(layout, other, layout_other)?))
+            }
+            (Storage::Cuda(storage), Storage::Cuda(other)) => {
+                Ok(Self::Cuda(storage.matmul(layout, other, layout_other)?))
             }
             (Storage::Mps(storage), Storage::Mps(other)) => {
                 Ok(Self::Mps(storage.matmul(layout, other, layout_other)?))
@@ -388,6 +413,9 @@ impl BackendStorage for Storage {
         match (self, indices) {
             (Storage::Cpu(storage), Storage::Cpu(indices)) => {
                 Ok(Self::Cpu(storage.gather(layout, dim, indices, indices_layout)?))
+            }
+            (Storage::Cuda(storage), Storage::Cuda(indices)) => {
+                Ok(Self::Cuda(storage.gather(layout, dim, indices, indices_layout)?))
             }
             (Storage::Mps(storage), Storage::Mps(indices)) => {
                 Ok(Self::Mps(storage.gather(layout, dim, indices, indices_layout)?))
@@ -412,6 +440,9 @@ impl BackendStorage for Storage {
                 indices_layout,
                 dst_shape,
             )?)),
+            (Storage::Cuda(storage), Storage::Cuda(indices)) => Ok(Self::Cuda(
+                storage.scatter_add(layout, dim, indices, indices_layout, dst_shape)?,
+            )),
             (Storage::Mps(storage), Storage::Mps(indices)) => Ok(Self::Mps(storage.scatter_add(
                 layout,
                 dim,
@@ -434,6 +465,9 @@ impl BackendStorage for Storage {
             (Storage::Cpu(storage), Storage::Cpu(indices)) => {
                 Ok(Self::Cpu(storage.index_select(layout, dim, indices, indices_layout)?))
             }
+            (Storage::Cuda(storage), Storage::Cuda(indices)) => {
+                Ok(Self::Cuda(storage.index_select(layout, dim, indices, indices_layout)?))
+            }
             (Storage::Mps(storage), Storage::Mps(indices)) => {
                 Ok(Self::Mps(storage.index_select(layout, dim, indices, indices_layout)?))
             }
@@ -453,6 +487,13 @@ impl BackendStorage for Storage {
             (Storage::Cpu(storage), Storage::Cpu(indices)) => {
                 Ok(Self::Cpu(storage.index_add(layout, dim, indices, indices_layout, dst_shape)?))
             }
+            (Storage::Cuda(storage), Storage::Cuda(indices)) => Ok(Self::Cuda(storage.index_add(
+                layout,
+                dim,
+                indices,
+                indices_layout,
+                dst_shape,
+            )?)),
             (Storage::Mps(storage), Storage::Mps(indices)) => {
                 Ok(Self::Mps(storage.index_add(layout, dim, indices, indices_layout, dst_shape)?))
             }
@@ -477,6 +518,16 @@ impl Storage {
                     })
                     .collect();
                 Ok(Storage::Cpu(CpuStorage::cat(&cpu_parts)?))
+            }
+            Storage::Cuda(_) => {
+                let cuda_parts: Vec<_> = parts
+                    .iter()
+                    .map(|(s, len)| match s {
+                        Storage::Cuda(cuda) => (cuda, *len),
+                        _ => panic!("mixed devices in cat"),
+                    })
+                    .collect();
+                Ok(Storage::Cuda(CudaStorage::cat(&cuda_parts)?))
             }
             Storage::Mps(_) => {
                 let mps_parts: Vec<_> = parts

@@ -74,7 +74,7 @@ See [`examples/mnist_train.rs`](examples/mnist_train.rs) for a simpler MNIST cla
 
 ## What's implemented
 
-**Devices** — CPU and MPS (Metal-backed on macOS)
+**Devices** — CPU, MPS (Metal on macOS), and CUDA (Linux, behind `cuda` feature flag)
 
 **DTypes** — `f16`, `f32`, and `i64` tensors (`i64` is used for integer targets / indices)
 
@@ -105,7 +105,7 @@ See [`examples/mnist_train.rs`](examples/mnist_train.rs) for a simpler MNIST cla
 - Gradients are enabled by calling `.attach()` on tensors or using `Var`, which wraps a trainable tensor.
 - `Tensor::sum`, `Tensor::mean`, and reductions are explicit (e.g. `sum(vec![0, 1], true)`), and there are no hidden defaults.
 - Device movement is explicit and value-oriented through `to_device`.
-- CUDA is not implemented — CPU and MPS only for now.
+- CUDA is available on Linux behind the `cuda` Cargo feature (cuBLAS for matmul, custom kernels for element-wise ops).
 
 ## Design
 
@@ -124,6 +124,13 @@ MPS support is intentionally small and explicit. The backend accelerates the com
 ```
 cargo build
 cargo test
+```
+
+Linux CUDA build:
+
+```
+cargo build --features cuda
+cargo test --features cuda
 ```
 
 ## Development

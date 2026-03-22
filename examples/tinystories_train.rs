@@ -1,8 +1,9 @@
-//! Train a TinyStories GPT on CPU or MPS.
+//! Train a TinyStories GPT on CPU, CUDA, or MPS.
 //!
 //! Run:
 //!   cargo run --release --example tinystories_train -- --device mps
 //!   cargo run --release --example tinystories_train -- --device mps --prepare-only
+//!   cargo run --release --features cuda --example tinystories_train -- --device cuda
 
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
@@ -14,11 +15,11 @@ use std::time::Instant;
 
 use deers::checkpoint;
 use deers::dataset::TokenBinDataset;
-use deers::tokenizer::{TokenBinPaths, prepare_text_token_bins};
 use deers::models::gpt::{GPT, GPTConfig};
 use deers::nn::{ParamStore, Parameter};
 use deers::optim::{AdamW, AdamWConfig, LrSchedule, WarmupWarmdown, clip_grad_norm};
 use deers::tokenizer::Tokenizer;
+use deers::tokenizer::{TokenBinPaths, prepare_text_token_bins};
 use deers::{Device, GradientStore, Tensor, loss};
 
 const DEFAULT_TEXT_PATH: &str = "data/TinyStoriesV2-GPT4-train.txt";
@@ -34,18 +35,21 @@ const OPTIMIZER_FILE: &str = "optimizer.safetensors";
 fn main() {
     let options = parse_args();
     if !options.device.is_available() {
-        panic!("device {:?} is not available in this process", options.device);
+        match options.device {
+            Device::Cuda => {
+                panic!(
+                    "device Cuda is not available in this process. Re-run with `--features cuda`: cargo run --release --features cuda --example tinystories_train -- --device cuda"
+                );
+            }
+            _ => panic!("device {:?} is not available in this process", options.device),
+        }
     }
 
     let tokenizer = Tokenizer::gpt2();
     println!("Tokenizer: gpt2 (vocab_size={})", tokenizer.vocab_size());
 
     let token_paths = resolve_token_bins(&options, &tokenizer);
-    println!(
-        "Token bins: train={} val={}",
-        token_paths.train.display(),
-        token_paths.val.display()
-    );
+    println!("Token bins: train={} val={}", token_paths.train.display(), token_paths.val.display());
 
     if options.prepare_only {
         return;
@@ -103,7 +107,10 @@ fn main() {
 
     if options.eval_every > 0 {
         let val_loss = evaluate(&model, &val_dataset, tokenizer.vocab_size(), &options);
-        println!("step {:>5}/{:>5} | initial val_loss {:.4}", start_step, options.max_steps, val_loss);
+        println!(
+            "step {:>5}/{:>5} | initial val_loss {:.4}",
+            start_step, options.max_steps, val_loss
+        );
     }
 
     if options.sample_every > 0 {
@@ -139,17 +146,12 @@ fn main() {
 
         let step_num = step + 1;
         if step_num.is_multiple_of(options.log_every) || step_num == 1 {
-            let tokens_per_step = options.micro_batch_size * options.seq_len * options.grad_accum_steps;
+            let tokens_per_step =
+                options.micro_batch_size * options.seq_len * options.grad_accum_steps;
             let tokens_per_sec = tokens_per_step as f64 / step_secs.max(1e-9);
             println!(
                 "step {:>5}/{:>5} | train_loss {:.4} | grad_norm {:.3} | lr {:.2e} | {:.3}s | {:.0} tok/s",
-                step_num,
-                options.max_steps,
-                train_loss,
-                grad_norm,
-                lr,
-                step_secs,
-                tokens_per_sec,
+                step_num, options.max_steps, train_loss, grad_norm, lr, step_secs, tokens_per_sec,
             );
         }
 
@@ -197,7 +199,8 @@ fn train_step(
     for _ in 0..options.grad_accum_steps {
         let (inputs, targets) = dataset.sample_batch(options.micro_batch_size, options.device);
         let logits = model.forward(&inputs).unwrap();
-        let logits_flat = logits.reshape(vec![options.micro_batch_size * options.seq_len, vocab_size]);
+        let logits_flat =
+            logits.reshape(vec![options.micro_batch_size * options.seq_len, vocab_size]);
         let targets_flat = targets.reshape(vec![options.micro_batch_size * options.seq_len]);
         let batch_loss = loss::cross_entropy(&logits_flat, &targets_flat);
         total_loss += batch_loss.to_vec::<f32>().unwrap()[0];
@@ -232,7 +235,8 @@ fn evaluate(
     for _ in 0..options.eval_batches {
         let (inputs, targets) = dataset.sample_batch(options.micro_batch_size, options.device);
         let logits = model.forward(&inputs).unwrap();
-        let logits_flat = logits.reshape(vec![options.micro_batch_size * options.seq_len, vocab_size]);
+        let logits_flat =
+            logits.reshape(vec![options.micro_batch_size * options.seq_len, vocab_size]);
         let targets_flat = targets.reshape(vec![options.micro_batch_size * options.seq_len]);
         let batch_loss = loss::cross_entropy(&logits_flat, &targets_flat);
         total += batch_loss.to_vec::<f32>().unwrap()[0];
@@ -299,16 +303,25 @@ fn sample_token(logits: &[f32], temperature: f32, top_k: usize) -> usize {
 }
 
 fn resolve_token_bins(options: &TrainOptions, tokenizer: &Tokenizer) -> TokenBinPaths {
-    let train = options
-        .train_bin
-        .clone()
-        .unwrap_or_else(|| options.bin_dir.join("train.bin"));
+    let train = options.train_bin.clone().unwrap_or_else(|| options.bin_dir.join("train.bin"));
     let val = options.val_bin.clone().unwrap_or_else(|| options.bin_dir.join("val.bin"));
 
     if options.train_bin.is_none()
         && options.val_bin.is_none()
         && (options.prepare || !train.exists() || !val.exists())
     {
+        if !options.text_path.exists() {
+            eprintln!("error: text file not found: {}", options.text_path.display());
+            eprintln!();
+            eprintln!("Download the TinyStories dataset from:");
+            eprintln!(
+                "  https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt"
+            );
+            eprintln!();
+            eprintln!("and place it at {}", options.text_path.display());
+            eprintln!("or pass --text-path <path> to use a different location.");
+            process::exit(1);
+        }
         println!(
             "Preparing token bins from {} into {}...",
             options.text_path.display(),
@@ -320,7 +333,10 @@ fn resolve_token_bins(options: &TrainOptions, tokenizer: &Tokenizer) -> TokenBin
             &options.bin_dir,
             options.val_ratio,
         )
-        .unwrap();
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to prepare token bins: {e}");
+            process::exit(1);
+        });
     }
 
     assert!(train.exists(), "missing train bin: {}", train.display());
@@ -344,7 +360,12 @@ fn should_save_checkpoint(step_num: usize, start_step: usize, save_every: usize)
     step_num >= start_step + save_every && (step_num - start_step).is_multiple_of(save_every)
 }
 
-fn write_run_config(options: &TrainOptions, config: &GPTConfig, vocab_size: usize, num_params: usize) {
+fn write_run_config(
+    options: &TrainOptions,
+    config: &GPTConfig,
+    vocab_size: usize,
+    num_params: usize,
+) {
     let metadata = RunMetadata {
         preset: options.preset.name().to_owned(),
         device: format!("{:?}", options.device),
@@ -421,7 +442,8 @@ fn save_checkpoint(
     };
     let json = serde_json::to_string_pretty(&checkpoint).unwrap();
     std::fs::write(dir.join("metadata.json"), json).unwrap();
-    std::fs::write(options.out_dir.join("latest-checkpoint.txt"), format!("step-{step:05}\n")).unwrap();
+    std::fs::write(options.out_dir.join("latest-checkpoint.txt"), format!("step-{step:05}\n"))
+        .unwrap();
 }
 
 fn load_checkpoint(
@@ -432,9 +454,10 @@ fn load_checkpoint(
     checkpoint_dir: &Path,
 ) -> usize {
     let checkpoint_dir = resolve_resume_dir(checkpoint_dir);
-    let metadata: CheckpointMetadata =
-        serde_json::from_str(&std::fs::read_to_string(checkpoint_dir.join("metadata.json")).unwrap())
-            .unwrap();
+    let metadata: CheckpointMetadata = serde_json::from_str(
+        &std::fs::read_to_string(checkpoint_dir.join("metadata.json")).unwrap(),
+    )
+    .unwrap();
 
     assert_eq!(metadata.sequence_len, config.sequence_len, "checkpoint seq_len mismatch");
     assert_eq!(metadata.n_layer, config.n_layer, "checkpoint n_layer mismatch");
@@ -446,7 +469,8 @@ fn load_checkpoint(
     );
     let named_parameters = store.named_parameters();
     assert_eq!(
-        metadata.tensor_count, named_parameters.len(),
+        metadata.tensor_count,
+        named_parameters.len(),
         "checkpoint parameter count mismatch"
     );
 
@@ -457,8 +481,8 @@ fn load_checkpoint(
         named_parameters.len() * 2,
         "checkpoint optimizer state count mismatch"
     );
-    let optimizer_state = checkpoint::load_tensors(&checkpoint_dir.join(&metadata.optimizer.file), device)
-        .unwrap();
+    let optimizer_state =
+        checkpoint::load_tensors(&checkpoint_dir.join(&metadata.optimizer.file), device).unwrap();
     opt.load_state_dict(&named_parameters, &optimizer_state, metadata.optimizer.step).unwrap();
     metadata.step
 }
@@ -478,7 +502,6 @@ fn resolve_resume_dir(path: &Path) -> PathBuf {
 
     panic!("resume checkpoint must be a directory: {}", path.display());
 }
-
 
 #[derive(Clone, Copy)]
 enum Preset {
@@ -653,17 +676,27 @@ fn parse_args() -> TrainOptions {
                 options.prepare = true;
                 options.prepare_only = true;
             }
-            "--text-path" => options.text_path = PathBuf::from(next_arg(&args, &mut index, "--text-path")),
-            "--bin-dir" => options.bin_dir = PathBuf::from(next_arg(&args, &mut index, "--bin-dir")),
+            "--text-path" => {
+                options.text_path = PathBuf::from(next_arg(&args, &mut index, "--text-path"))
+            }
+            "--bin-dir" => {
+                options.bin_dir = PathBuf::from(next_arg(&args, &mut index, "--bin-dir"))
+            }
             "--train-bin" => {
                 options.train_bin = Some(PathBuf::from(next_arg(&args, &mut index, "--train-bin")))
             }
             "--val-bin" => {
                 options.val_bin = Some(PathBuf::from(next_arg(&args, &mut index, "--val-bin")))
             }
-            "--resume" => options.resume = Some(PathBuf::from(next_arg(&args, &mut index, "--resume"))),
-            "--out-dir" => options.out_dir = PathBuf::from(next_arg(&args, &mut index, "--out-dir")),
-            "--val-ratio" => options.val_ratio = parse_f32(&next_arg(&args, &mut index, "--val-ratio")),
+            "--resume" => {
+                options.resume = Some(PathBuf::from(next_arg(&args, &mut index, "--resume")))
+            }
+            "--out-dir" => {
+                options.out_dir = PathBuf::from(next_arg(&args, &mut index, "--out-dir"))
+            }
+            "--val-ratio" => {
+                options.val_ratio = parse_f32(&next_arg(&args, &mut index, "--val-ratio"))
+            }
             "--seq-len" => options.seq_len = parse_usize(&next_arg(&args, &mut index, "--seq-len")),
             "--n-layer" => options.n_layer = parse_usize(&next_arg(&args, &mut index, "--n-layer")),
             "--n-head" => options.n_head = parse_usize(&next_arg(&args, &mut index, "--n-head")),
@@ -682,7 +715,9 @@ fn parse_args() -> TrainOptions {
                 options.grad_accum_steps =
                     parse_usize(&next_arg(&args, &mut index, "--grad-accum-steps"));
             }
-            "--max-steps" => options.max_steps = parse_usize(&next_arg(&args, &mut index, "--max-steps")),
+            "--max-steps" => {
+                options.max_steps = parse_usize(&next_arg(&args, &mut index, "--max-steps"))
+            }
             "--eval-every" => {
                 options.eval_every = parse_usize(&next_arg(&args, &mut index, "--eval-every"));
             }
@@ -713,8 +748,7 @@ fn parse_args() -> TrainOptions {
                     parse_f32(&next_arg(&args, &mut index, "--sample-temperature"));
             }
             "--sample-top-k" => {
-                options.sample_top_k =
-                    parse_usize(&next_arg(&args, &mut index, "--sample-top-k"));
+                options.sample_top_k = parse_usize(&next_arg(&args, &mut index, "--sample-top-k"));
             }
             "--prompt" => options.prompt = next_arg(&args, &mut index, "--prompt"),
             "--help" | "-h" => usage(""),
@@ -755,6 +789,7 @@ fn next_arg(args: &[String], index: &mut usize, flag: &str) -> String {
 fn parse_device(value: &str) -> Device {
     match value {
         "cpu" => Device::Cpu,
+        "cuda" => Device::Cuda,
         "mps" => Device::Mps,
         other => usage(&format!("unsupported device: {other}")),
     }
@@ -779,7 +814,13 @@ fn usage(message: &str) -> ! {
     }
 
     eprintln!("Usage: cargo run --release --example tinystories_train -- [options]");
-    eprintln!("  --device cpu|mps");
+    eprintln!("  --device cpu|cuda|mps");
+    eprintln!(
+        "  note: CUDA builds require `--features cuda`, for example:"
+    );
+    eprintln!(
+        "        cargo run --release --features cuda --example tinystories_train -- --device cuda"
+    );
     eprintln!("  --preset air16-fast|air16-overnight");
     eprintln!("  --prepare");
     eprintln!("  --prepare-only");

@@ -1087,9 +1087,7 @@ impl TensorOp for LogSumExp {
             let reduce_size = self.arg.layout().shape()[axis];
             let outer_size = self.arg.layout().size() / reduce_size;
             let out_storage =
-                self.arg
-                    .storage()
-                    .log_sum_exp(self.arg.layout(), outer_size, reduce_size)?;
+                self.arg.storage().log_sum_exp(self.arg.layout(), outer_size, reduce_size)?;
             let out_shape = reduce_shape(self.arg.layout().shape(), &self.axes, false);
             let storage = Arc::new(RwLock::new(out_storage));
             Tensor::new(storage, Layout::from(out_shape), false, None)

@@ -212,7 +212,7 @@ mod imp {
                 let gpu_delta = end - begin;
                 let elapsed_ns =
                     ((gpu_delta as f64 / gpu_span as f64) * cpu_span as f64).round() as u64;
-                profiler::record_mps_time(sample.event_id, elapsed_ns);
+                profiler::record_device_time(sample.event_id, elapsed_ns);
             }
         }
     }
@@ -802,16 +802,10 @@ mod imp {
         fn matmul_config(batch: usize, m: usize, n: usize, suffix: &str) -> (&'static str, u64) {
             let output_size = batch * m * n;
             if output_size >= (1 << 20) || (m >= 64 && n >= 64) {
-                return (
-                    if suffix == "f32" { "matmul_xl_f32" } else { "matmul_xl_f16" },
-                    64,
-                );
+                return (if suffix == "f32" { "matmul_xl_f32" } else { "matmul_xl_f16" }, 64);
             }
             if output_size >= (1 << 15) {
-                return (
-                    if suffix == "f32" { "matmul_big_f32" } else { "matmul_big_f16" },
-                    32,
-                );
+                return (if suffix == "f32" { "matmul_big_f32" } else { "matmul_big_f16" }, 32);
             }
             (if suffix == "f32" { "matmul_f32" } else { "matmul_f16" }, 16)
         }
@@ -1595,11 +1589,17 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
-        fn log_sum_exp(&self, layout: &Layout, outer_size: usize, reduce_size: usize) -> Result<Self> {
+        fn log_sum_exp(
+            &self,
+            layout: &Layout,
+            outer_size: usize,
+            reduce_size: usize,
+        ) -> Result<Self> {
             if let Some((ctx, input, _)) = self.accelerated(DType::F16) {
                 assert!(layout.is_compact());
                 let out = ctx.empty_f16_buffer(outer_size);
-                let meta = ReduceMeta { outer_size: outer_size as u32, reduce_size: reduce_size as u32 };
+                let meta =
+                    ReduceMeta { outer_size: outer_size as u32, reduce_size: reduce_size as u32 };
                 ctx.dispatch_reduce("log_sum_exp_f16", outer_size, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(&out), 0);
@@ -1618,7 +1618,8 @@ mod imp {
             if let Some((ctx, input, _)) = self.accelerated(DType::F32) {
                 assert!(layout.is_compact());
                 let out = ctx.empty_f32_buffer(outer_size);
-                let meta = ReduceMeta { outer_size: outer_size as u32, reduce_size: reduce_size as u32 };
+                let meta =
+                    ReduceMeta { outer_size: outer_size as u32, reduce_size: reduce_size as u32 };
                 ctx.dispatch_reduce("log_sum_exp_f32", outer_size, |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(&out), 0);

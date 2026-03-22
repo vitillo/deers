@@ -9,6 +9,16 @@ use deers::{Device, Tensor, loss};
 
 fn main() {
     let device = parse_device_arg();
+    if !device.is_available() {
+        match device {
+            Device::Cuda => {
+                panic!(
+                    "device Cuda is not available in this process. Re-run with `--features cuda`: cargo run --release --features cuda --example mnist_train -- --device cuda"
+                );
+            }
+            _ => panic!("device {:?} is not available in this process", device),
+        }
+    }
 
     println!("Loading MNIST...");
     let t0 = Instant::now();
@@ -80,6 +90,7 @@ fn parse_device_arg() -> Device {
                 let value = args.next().unwrap_or_else(|| usage("missing value for --device"));
                 device = match value.as_str() {
                     "cpu" => Device::Cpu,
+                    "cuda" => Device::Cuda,
                     "mps" => Device::Mps,
                     other => usage(&format!("unsupported device: {other}")),
                 };
@@ -97,7 +108,13 @@ fn usage(message: &str) -> ! {
         eprintln!("{message}");
         eprintln!();
     }
-    eprintln!("Usage: cargo run --example mnist_train -- [--device cpu|mps]");
+    eprintln!("Usage: cargo run --example mnist_train -- [--device cpu|cuda|mps]");
+    eprintln!(
+        "  note: CUDA builds require `--features cuda`, for example:"
+    );
+    eprintln!(
+        "        cargo run --release --features cuda --example mnist_train -- --device cuda"
+    );
     process::exit(if message.is_empty() { 0 } else { 1 });
 }
 

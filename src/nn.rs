@@ -116,11 +116,7 @@ impl ParamBuilder {
 
     fn full_name(&self, name: &str) -> String {
         assert!(!name.is_empty(), "parameter name must not be empty");
-        if self.prefix.is_empty() {
-            name.to_owned()
-        } else {
-            format!("{}.{}", self.prefix, name)
-        }
+        if self.prefix.is_empty() { name.to_owned() } else { format!("{}.{}", self.prefix, name) }
     }
 }
 
@@ -151,20 +147,12 @@ pub struct Linear {
 
 impl Linear {
     /// Creates a Linear layer with uniform [-k, k] initialization (k = 1/sqrt(in)).
-    pub fn new(
-        builder: ParamBuilder,
-        in_features: usize,
-        out_features: usize,
-    ) -> Self {
+    pub fn new(builder: ParamBuilder, in_features: usize, out_features: usize) -> Self {
         Self::new_inner(builder, in_features, out_features, true)
     }
 
     /// Creates a Linear layer without bias.
-    pub fn no_bias(
-        builder: ParamBuilder,
-        in_features: usize,
-        out_features: usize,
-    ) -> Self {
+    pub fn no_bias(builder: ParamBuilder, in_features: usize, out_features: usize) -> Self {
         Self::new_inner(builder, in_features, out_features, false)
     }
 
@@ -217,8 +205,8 @@ pub struct Embedding {
 impl Embedding {
     /// Creates an embedding table with standard normal initialization.
     pub fn new(builder: ParamBuilder, vocab_size: usize, hidden_size: usize) -> Self {
-        let weight =
-            builder.param("weight", Tensor::randn((vocab_size, hidden_size), DType::F32, Device::Cpu));
+        let weight = builder
+            .param("weight", Tensor::randn((vocab_size, hidden_size), DType::F32, Device::Cpu));
         Self { weight }
     }
 }

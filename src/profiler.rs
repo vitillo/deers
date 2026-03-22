@@ -45,8 +45,8 @@ pub struct ProfileRow {
     pub calls: u64,
     /// Total CPU-side time in nanoseconds across all calls.
     pub cpu_time_ns: u64,
-    /// Total MPS GPU time in nanoseconds across all calls; zero on non-MPS backends.
-    pub mps_time_ns: u64,
+    /// Total device execution time in nanoseconds across all calls; zero when backend timings are unavailable.
+    pub device_time_ns: u64,
     /// Total bytes allocated across all calls; zero unless `ProfilerConfig::profile_memory` is set.
     pub alloc_bytes: u64,
 }
@@ -60,14 +60,14 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// Returns per-operation rows sorted by total time (MPS first, then CPU).
+    /// Returns per-operation rows sorted by total time (device first, then CPU).
     pub fn rows(&self) -> &[ProfileRow] {
         &self.rows
     }
 
     /// Renders a human-readable summary table as a string.
     pub fn table(&self) -> String {
-        let has_mps = self.rows.iter().any(|row| row.mps_time_ns > 0);
+        let has_device = self.rows.iter().any(|row| row.device_time_ns > 0);
         let has_shapes =
             self.record_shapes && self.rows.iter().any(|row| row.input_shapes.is_some());
         let has_memory = self.profile_memory;
@@ -75,9 +75,9 @@ impl Profile {
         let mut lines = Vec::new();
         let mut header = format!(
             "{:<24}  {:>12}  {:>12}  {:>12}  {:>12}  {:>7}",
-            "Name", "CPU total", "CPU avg", "MPS total", "MPS avg", "Calls"
+            "Name", "CPU total", "CPU avg", "Device total", "Device avg", "Calls"
         );
-        if !has_mps {
+        if !has_device {
             header =
                 format!("{:<24}  {:>12}  {:>12}  {:>7}", "Name", "CPU total", "CPU avg", "Calls");
         }
@@ -91,14 +91,14 @@ impl Profile {
         lines.push("-".repeat(header.len()));
 
         for row in &self.rows {
-            let mut line = if has_mps {
+            let mut line = if has_device {
                 format!(
                     "{:<24}  {:>12}  {:>12}  {:>12}  {:>12}  {:>7}",
                     row.name,
                     format_duration(row.cpu_time_ns),
                     format_duration(avg_time(row.cpu_time_ns, row.calls)),
-                    format_duration(row.mps_time_ns),
-                    format_duration(avg_time(row.mps_time_ns, row.calls)),
+                    format_duration(row.device_time_ns),
+                    format_duration(avg_time(row.device_time_ns, row.calls)),
                     row.calls
                 )
             } else {
@@ -132,10 +132,10 @@ impl Profile {
             "CPU total: {}",
             format_duration(self.rows.iter().map(|row| row.cpu_time_ns).sum())
         ));
-        if has_mps {
+        if has_device {
             lines.push(format!(
-                "MPS total: {}",
-                format_duration(self.rows.iter().map(|row| row.mps_time_ns).sum())
+                "Device total: {}",
+                format_duration(self.rows.iter().map(|row| row.device_time_ns).sum())
             ));
         }
         if has_memory {
@@ -224,7 +224,7 @@ struct EventKey {
 struct EventStat {
     calls: u64,
     cpu_time_ns: u64,
-    mps_time_ns: u64,
+    device_time_ns: u64,
     alloc_bytes: u64,
 }
 
@@ -274,8 +274,9 @@ impl ProfilerSession {
         stat.alloc_bytes += alloc_bytes;
     }
 
-    fn record_mps_time(&self, event_id: usize, elapsed_ns: u64) {
-        self.inner.borrow_mut().stats[event_id].mps_time_ns += elapsed_ns;
+    #[allow(dead_code)]
+    fn record_device_time(&self, event_id: usize, elapsed_ns: u64) {
+        self.inner.borrow_mut().stats[event_id].device_time_ns += elapsed_ns;
     }
 
     fn snapshot(&self) -> Profile {
@@ -289,13 +290,13 @@ impl ProfilerSession {
                 input_shapes: key.input_shapes.clone(),
                 calls: stat.calls,
                 cpu_time_ns: stat.cpu_time_ns,
-                mps_time_ns: stat.mps_time_ns,
+                device_time_ns: stat.device_time_ns,
                 alloc_bytes: stat.alloc_bytes,
             })
             .collect();
         rows.sort_by(|a, b| {
-            b.mps_time_ns
-                .cmp(&a.mps_time_ns)
+            b.device_time_ns
+                .cmp(&a.device_time_ns)
                 .then_with(|| b.cpu_time_ns.cmp(&a.cpu_time_ns))
                 .then_with(|| a.name.cmp(&b.name))
         });
@@ -337,18 +338,21 @@ pub(crate) fn scope(
     Some(ProfileScope { session, event_id, alloc_bytes, start: Instant::now() })
 }
 
+#[allow(dead_code)]
 pub(crate) fn current_scope_id() -> Option<usize> {
     ACTIVE_SCOPE_STACK.with(|stack| stack.borrow().last().copied())
 }
 
+#[allow(dead_code)]
 pub(crate) fn is_active() -> bool {
     ACTIVE_PROFILER.with(|slot| slot.borrow().is_some())
 }
 
-pub(crate) fn record_mps_time(event_id: usize, elapsed_ns: u64) {
+#[allow(dead_code)]
+pub(crate) fn record_device_time(event_id: usize, elapsed_ns: u64) {
     ACTIVE_PROFILER.with(|slot| {
         if let Some(session) = slot.borrow().as_ref() {
-            session.record_mps_time(event_id, elapsed_ns);
+            session.record_device_time(event_id, elapsed_ns);
         }
     });
 }

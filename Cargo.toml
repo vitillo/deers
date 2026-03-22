@@ -7,6 +7,10 @@ license = "MIT"
 repository = "https://github.com/vitillo/deers"
 authors = ["Roberto Vitillo <ra.vitillo@gmail.com>"]
 
+[features]
+default = []
+cuda = ["dep:cudarc"]
+
 [dependencies]
 thiserror = "2.0.18"
 rand = "0.10"
@@ -19,6 +23,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 safetensors = "0.7"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+cudarc = { version = "0.19.0", optional = true, default-features = false, features = ["std", "cublas", "curand", "driver", "nvrtc", "f16", "cuda-version-from-build-system", "dynamic-linking"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.33.0"
 
@@ -27,8 +34,8 @@ candle-core = { version = "0.9.2", features = ["metal"] }
 candle-nn = { version = "0.9.2", features = ["metal"] }
 
 [target.'cfg(not(target_os = "macos"))'.dev-dependencies]
-candle-core = { version = "0.9.2" }
-candle-nn = { version = "0.9.2" }
+candle-core = { version = "0.9.2", features = ["cuda"] }
+candle-nn = { version = "0.9.2", features = ["cuda"] }
 
 [profile.release]
 debug = true

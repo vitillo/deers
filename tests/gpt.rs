@@ -22,7 +22,10 @@ fn assert_close(actual: &[f32], expected: &[f32], tol: f32, label: &str) {
 }
 
 fn devices() -> Vec<Device> {
-    [Device::Cpu, Device::Mps].into_iter().filter(|device| device.is_available()).collect()
+    [Device::Cpu, Device::Cuda, Device::Mps]
+        .into_iter()
+        .filter(|device| device.is_available())
+        .collect()
 }
 
 fn tol_for(device: Device) -> f32 {
@@ -267,7 +270,7 @@ impl CandleGptRef {
 }
 
 #[test]
-fn test_gpt_forward_conforms_with_candle_on_cpu_and_mps() {
+fn test_gpt_forward_conforms_with_candle_on_cpu_and_accelerators() {
     // Arrange
     let mut model = gpt::GPT::new(test_config(), ParamStore::new().root());
     let candle = CandleGptRef::from_model(test_config(), &model);
@@ -277,7 +280,7 @@ fn test_gpt_forward_conforms_with_candle_on_cpu_and_mps() {
 
     // Act
     for device in devices() {
-        if device == Device::Mps {
+        if device != Device::Cpu {
             model.to_device(device).unwrap();
         }
 
@@ -290,7 +293,7 @@ fn test_gpt_forward_conforms_with_candle_on_cpu_and_mps() {
 }
 
 #[test]
-fn test_gpt_backward_conforms_with_candle_on_cpu_and_mps() {
+fn test_gpt_backward_conforms_with_candle_on_cpu_and_accelerators() {
     // Arrange
     let config = test_config();
     let mut model = gpt::GPT::new(test_config(), ParamStore::new().root());
@@ -302,7 +305,7 @@ fn test_gpt_backward_conforms_with_candle_on_cpu_and_mps() {
 
     // Act
     for device in devices() {
-        if device == Device::Mps {
+        if device != Device::Cpu {
             model.to_device(device).unwrap();
         }
 
