@@ -523,9 +523,38 @@ mod imp {
         }
     }
 
+    /// Allocates an uninitialised device buffer on the given stream.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure every element is written before it is read.
+    unsafe fn alloc_uninit<T: DeviceRepr>(
+        runtime: &CudaRuntime,
+        len: usize,
+    ) -> Result<CudaSlice<T>> {
+        // SAFETY: the caller is responsible for writing every element before reading.
+        unsafe { runtime.stream.alloc::<T>(len) }
+            .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))
+    }
+
     impl CudaStorage {
         pub fn is_available() -> bool {
             runtime().is_ok()
+        }
+
+        /// Creates a storage with uninitialised device memory of `size` elements.
+        ///
+        /// # Safety
+        ///
+        /// The caller must write every element before reading.
+        fn uninit(size: usize, dtype: DType) -> Result<Self> {
+            let runtime = runtime()?;
+            let inner = match dtype {
+                DType::F16 => CudaInner::F16(unsafe { alloc_uninit::<f16>(&runtime, size) }?),
+                DType::F32 => CudaInner::F32(unsafe { alloc_uninit::<f32>(&runtime, size) }?),
+                DType::I64 => CudaInner::I64(unsafe { alloc_uninit::<i64>(&runtime, size) }?),
+            };
+            Ok(Self { inner, runtime })
         }
 
         pub fn zeros(size: usize, dtype: DType) -> Self {
@@ -576,7 +605,8 @@ mod imp {
             }
             let dtype = parts[0].0.dtype();
             let total_len: usize = parts.iter().map(|(_, len)| *len).sum();
-            let mut out = Self::zeros(total_len, dtype);
+            // memcpy_dtod fills every element, so no zeroing needed.
+            let mut out = Self::uninit(total_len, dtype)?;
             let mut offset = 0usize;
             match (&parts[0].0.inner, &mut out.inner) {
                 (CudaInner::F16(_), CudaInner::F16(dst)) => {
@@ -641,28 +671,21 @@ mod imp {
             if layout.is_compact() && layout.offset == 0 && layout.size() == self.len() {
                 return Ok(self.clone());
             }
-            let mut out = Self::zeros(layout.size(), self.dtype());
+            // copy_compact writes every element, so no zeroing needed.
+            let mut out = Self::uninit(layout.size(), self.dtype())?;
             self.copy_compact(layout, &mut out)?;
             Ok(out)
         }
 
         fn launch_unary_f16(&self, kernel: &str, src: &CudaSlice<f16>) -> Result<Self> {
-            let out = self
-                .runtime
-                .stream
-                .alloc_zeros::<f16>(src.len())
-                .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+            let out = unsafe { alloc_uninit::<f16>(&self.runtime, src.len()) }?;
             let len = src.len() as u32;
             launch_1d!(&self.runtime, kernel, src.len(), src, &out, &len);
             Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
         }
 
         fn launch_unary_f32(&self, kernel: &str, src: &CudaSlice<f32>) -> Result<Self> {
-            let out = self
-                .runtime
-                .stream
-                .alloc_zeros::<f32>(src.len())
-                .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+            let out = unsafe { alloc_uninit::<f32>(&self.runtime, src.len()) }?;
             let len = src.len() as u32;
             launch_1d!(&self.runtime, kernel, src.len(), src, &out, &len);
             Ok(Self { inner: CudaInner::F32(out), runtime: self.runtime.clone() })
@@ -674,11 +697,7 @@ mod imp {
             src: &CudaSlice<f16>,
             scalar: f32,
         ) -> Result<Self> {
-            let out = self
-                .runtime
-                .stream
-                .alloc_zeros::<f16>(src.len())
-                .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+            let out = unsafe { alloc_uninit::<f16>(&self.runtime, src.len()) }?;
             let len = src.len() as u32;
             let meta = ScalarMeta { scalar };
             launch_1d!(&self.runtime, kernel, src.len(), src, &out, &len, &meta);
@@ -691,11 +710,7 @@ mod imp {
             src: &CudaSlice<f32>,
             scalar: f32,
         ) -> Result<Self> {
-            let out = self
-                .runtime
-                .stream
-                .alloc_zeros::<f32>(src.len())
-                .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+            let out = unsafe { alloc_uninit::<f32>(&self.runtime, src.len()) }?;
             let len = src.len() as u32;
             let meta = ScalarMeta { scalar };
             launch_1d!(&self.runtime, kernel, src.len(), src, &out, &len, &meta);
@@ -708,11 +723,7 @@ mod imp {
             lhs: &CudaSlice<f16>,
             rhs: &CudaSlice<f16>,
         ) -> Result<Self> {
-            let out = self
-                .runtime
-                .stream
-                .alloc_zeros::<f16>(lhs.len())
-                .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+            let out = unsafe { alloc_uninit::<f16>(&self.runtime, lhs.len()) }?;
             let len = lhs.len() as u32;
             launch_1d!(&self.runtime, kernel, lhs.len(), lhs, rhs, &out, &len);
             Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
@@ -724,11 +735,7 @@ mod imp {
             lhs: &CudaSlice<f32>,
             rhs: &CudaSlice<f32>,
         ) -> Result<Self> {
-            let out = self
-                .runtime
-                .stream
-                .alloc_zeros::<f32>(lhs.len())
-                .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+            let out = unsafe { alloc_uninit::<f32>(&self.runtime, lhs.len()) }?;
             let len = lhs.len() as u32;
             launch_1d!(&self.runtime, kernel, lhs.len(), lhs, rhs, &out, &len);
             Ok(Self { inner: CudaInner::F32(out), runtime: self.runtime.clone() })
@@ -737,22 +744,14 @@ mod imp {
         fn reduce_impl(&self, kernel: &str, outer_size: usize, reduce_size: usize) -> Result<Self> {
             match &self.inner {
                 CudaInner::F16(src) => {
-                    let out = self
-                        .runtime
-                        .stream
-                        .alloc_zeros::<f16>(outer_size)
-                        .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = unsafe { alloc_uninit::<f16>(&self.runtime, outer_size) }?;
                     let outer = outer_size as u32;
                     let reduce = reduce_size as u32;
                     launch_reduce!(&self.runtime, kernel, outer_size, src, &out, &outer, &reduce);
                     Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
                 }
                 CudaInner::F32(src) => {
-                    let out = self
-                        .runtime
-                        .stream
-                        .alloc_zeros::<f32>(outer_size)
-                        .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = unsafe { alloc_uninit::<f32>(&self.runtime, outer_size) }?;
                     let outer = outer_size as u32;
                     let reduce = reduce_size as u32;
                     launch_reduce!(&self.runtime, kernel, outer_size, src, &out, &outer, &reduce);
@@ -924,11 +923,8 @@ mod imp {
 
             match (&lhs.inner, &rhs.inner) {
                 (CudaInner::F32(a), CudaInner::F32(b)) => {
-                    let mut out = lhs
-                        .runtime
-                        .stream
-                        .alloc_zeros::<f32>(batch * m * n)
-                        .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    // cuBLAS with beta=0 overwrites every output element; no zeroing needed.
+                    let mut out = unsafe { alloc_uninit::<f32>(&lhs.runtime, batch * m * n) }?;
                     let alpha = 1.0f32;
                     let beta = 0.0f32;
                     let alpha_ptr = &alpha as *const f32 as *const _;
@@ -976,11 +972,7 @@ mod imp {
                     Ok(Self { inner: CudaInner::F32(out), runtime: lhs.runtime.clone() })
                 }
                 (CudaInner::F16(a), CudaInner::F16(b)) => {
-                    let mut out = lhs
-                        .runtime
-                        .stream
-                        .alloc_zeros::<f16>(batch * m * n)
-                        .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let mut out = unsafe { alloc_uninit::<f16>(&lhs.runtime, batch * m * n) }?;
                     let alpha = f16::from_f32(1.0);
                     let beta = f16::from_f32(0.0);
                     let alpha_f32 = 1.0f32;
@@ -1050,10 +1042,7 @@ mod imp {
             let right_len: usize = layout.shape().iter().skip(dim + 1).product();
             match (&src.inner, &indices.inner) {
                 (CudaInner::F16(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
-                        .alloc_zeros::<f16>(indices_layout.size())
-                        .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = unsafe { alloc_uninit::<f16>(&self.runtime, indices_layout.size()) }?;
                     let left = left_len as u32;
                     let src_dim_u32 = src_dim as u32;
                     let dst_dim_u32 = dst_dim as u32;
@@ -1074,10 +1063,7 @@ mod imp {
                     Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
                 }
                 (CudaInner::F32(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
-                        .alloc_zeros::<f32>(indices_layout.size())
-                        .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = unsafe { alloc_uninit::<f32>(&self.runtime, indices_layout.size()) }?;
                     let left = left_len as u32;
                     let src_dim_u32 = src_dim as u32;
                     let dst_dim_u32 = dst_dim as u32;
@@ -1187,10 +1173,7 @@ mod imp {
             let right_len: usize = layout.shape().iter().skip(dim + 1).product();
             match (&src.inner, &indices.inner) {
                 (CudaInner::F16(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
-                        .alloc_zeros::<f16>(left_len * index_len * right_len)
-                        .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = unsafe { alloc_uninit::<f16>(&self.runtime, left_len * index_len * right_len) }?;
                     let left = left_len as u32;
                     let index_len_u32 = index_len as u32;
                     let src_dim_u32 = src_dim as u32;
@@ -1211,10 +1194,7 @@ mod imp {
                     Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
                 }
                 (CudaInner::F32(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
-                        .alloc_zeros::<f32>(left_len * index_len * right_len)
-                        .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = unsafe { alloc_uninit::<f32>(&self.runtime, left_len * index_len * right_len) }?;
                     let left = left_len as u32;
                     let index_len_u32 = index_len as u32;
                     let src_dim_u32 = src_dim as u32;
