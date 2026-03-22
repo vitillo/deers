@@ -321,6 +321,8 @@ mod imp {
         "reduce_sum_par_f32",
         "reduce_max_par_f16",
         "reduce_max_par_f32",
+        "matmul_big_f16",
+        "matmul_big_f32",
     ];
 
     #[derive(Debug)]
@@ -1127,6 +1129,9 @@ mod imp {
         }
 
         fn matmul(&self, layout: &Layout, other: &Self, layout_other: &Layout) -> Result<Self> {
+            // Use 32×32 tiled kernel for large matmuls, 16×16 for small ones.
+            const BIG_MATMUL_THRESHOLD: usize = 1 << 20; // 1M output elements
+
             if let (Some((ctx, lhs, _)), Some((_, rhs, _))) =
                 (self.accelerated(DType::F16), other.accelerated(DType::F16))
             {
@@ -1140,7 +1145,14 @@ mod imp {
                 let out = ctx.empty_f16_buffer(total);
                 let meta =
                     MatmulMeta { m: m as u32, k: k as u32, n: n as u32, batch: batch as u32 };
-                let pipeline = ctx.pipeline("matmul_f16");
+                let use_big = batch * m * n >= BIG_MATMUL_THRESHOLD;
+                let (pipeline_name, tile): (&str, u64) = if use_big {
+                    ("matmul_big_f16", 32)
+                } else {
+                    ("matmul_f16", 16)
+                };
+                let pipeline = ctx.pipeline(pipeline_name);
+                let tg_threads = if use_big { 16u64 } else { tile };
                 ctx.with_command_buffer(|active| {
                     let encoder = active.new_compute_encoder();
                     encoder.set_compute_pipeline_state(&pipeline);
@@ -1148,13 +1160,12 @@ mod imp {
                     encoder.set_buffer(1, Some(rhs), 0);
                     encoder.set_buffer(2, Some(&out), 0);
                     MpsContext::set_params(&encoder, 3, &meta);
-                    let tile = 16u64;
                     let groups = MTLSize::new(
                         (n as u64 + tile - 1) / tile,
                         (m as u64 + tile - 1) / tile,
                         batch as u64,
                     );
-                    let tg_size = MTLSize::new(tile, tile, 1);
+                    let tg_size = MTLSize::new(tg_threads, tg_threads, 1);
                     encoder.dispatch_thread_groups(groups, tg_size);
                     encoder.end_encoding();
                 });
@@ -1181,9 +1192,14 @@ mod imp {
                 let out = ctx.empty_f32_buffer(total);
                 let meta =
                     MatmulMeta { m: m as u32, k: k as u32, n: n as u32, batch: batch as u32 };
-                // Matmul uses tiled algorithm — must dispatch full threadgroups
-                // so all 16x16 threads cooperate on tile loading.
-                let pipeline = ctx.pipeline("matmul_f32");
+                let use_big = batch * m * n >= BIG_MATMUL_THRESHOLD;
+                let (pipeline_name, tile): (&str, u64) = if use_big {
+                    ("matmul_big_f32", 32)
+                } else {
+                    ("matmul_f32", 16)
+                };
+                let pipeline = ctx.pipeline(pipeline_name);
+                let tg_threads = if use_big { 16u64 } else { tile };
                 ctx.with_command_buffer(|active| {
                     let encoder = active.new_compute_encoder();
                     encoder.set_compute_pipeline_state(&pipeline);
@@ -1191,13 +1207,12 @@ mod imp {
                     encoder.set_buffer(1, Some(rhs), 0);
                     encoder.set_buffer(2, Some(&out), 0);
                     MpsContext::set_params(&encoder, 3, &meta);
-                    let tile = 16u64;
                     let groups = MTLSize::new(
                         (n as u64 + tile - 1) / tile,
                         (m as u64 + tile - 1) / tile,
                         batch as u64,
                     );
-                    let tg_size = MTLSize::new(tile, tile, 1);
+                    let tg_size = MTLSize::new(tg_threads, tg_threads, 1);
                     encoder.dispatch_thread_groups(groups, tg_size);
                     encoder.end_encoding();
                 });
