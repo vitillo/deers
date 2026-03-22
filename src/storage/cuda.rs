@@ -177,22 +177,43 @@ mod imp {
     DEFINE_BINARY_F32(eq, x == y ? 1.0f : 0.0f)
     DEFINE_BINARY_F16(eq, x == y ? 1.0f : 0.0f)
 
+    // Warp-shuffle sum of 32 floats within a single warp — no __syncthreads needed.
+    __device__ __forceinline__ float warp_reduce_sum(float v) {
+        #pragma unroll
+        for (int mask = 16; mask > 0; mask >>= 1)
+            v += __shfl_xor_sync(0xffffffff, v, mask);
+        return v;
+    }
+
+    // Warp-shuffle max of 32 floats within a single warp — no __syncthreads needed.
+    __device__ __forceinline__ float warp_reduce_max(float v) {
+        #pragma unroll
+        for (int mask = 16; mask > 0; mask >>= 1)
+            v = fmaxf(v, __shfl_xor_sync(0xffffffff, v, mask));
+        return v;
+    }
+
+    // Each block handles one output row. Shared memory tree reduction drives the
+    // count down to 32, then the final warp finishes with shuffle (faster, avoids
+    // __syncthreads for those last 5 steps).
     template <typename T>
     __global__ void reduce_sum_kernel(const T* src, T* dst, unsigned int outer_size, unsigned int reduce_size) {
         unsigned int row = blockIdx.x;
         if (row >= outer_size) return;
         __shared__ float smem[REDUCE_THREADS];
         float acc = 0.0f;
-        for (unsigned int col = threadIdx.x; col < reduce_size; col += blockDim.x) {
+        for (unsigned int col = threadIdx.x; col < reduce_size; col += blockDim.x)
             acc += to_float(src[row * reduce_size + col]);
-        }
         smem[threadIdx.x] = acc;
         __syncthreads();
-        for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        for (unsigned int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
             if (threadIdx.x < stride) smem[threadIdx.x] += smem[threadIdx.x + stride];
             __syncthreads();
         }
-        if (threadIdx.x == 0) dst[row] = from_float<T>(smem[0]);
+        if (threadIdx.x < 32) {
+            float val = warp_reduce_sum(smem[threadIdx.x]);
+            if (threadIdx.x == 0) dst[row] = from_float<T>(val);
+        }
     }
 
     template <typename T>
@@ -201,16 +222,18 @@ mod imp {
         if (row >= outer_size) return;
         __shared__ float smem[REDUCE_THREADS];
         float acc = -1.0f / 0.0f;
-        for (unsigned int col = threadIdx.x; col < reduce_size; col += blockDim.x) {
+        for (unsigned int col = threadIdx.x; col < reduce_size; col += blockDim.x)
             acc = fmaxf(acc, to_float(src[row * reduce_size + col]));
-        }
         smem[threadIdx.x] = acc;
         __syncthreads();
-        for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        for (unsigned int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
             if (threadIdx.x < stride) smem[threadIdx.x] = fmaxf(smem[threadIdx.x], smem[threadIdx.x + stride]);
             __syncthreads();
         }
-        if (threadIdx.x == 0) dst[row] = from_float<T>(smem[0]);
+        if (threadIdx.x < 32) {
+            float val = warp_reduce_max(smem[threadIdx.x]);
+            if (threadIdx.x == 0) dst[row] = from_float<T>(val);
+        }
     }
 
     template <typename T>
@@ -218,29 +241,35 @@ mod imp {
         unsigned int row = blockIdx.x;
         if (row >= outer_size) return;
         __shared__ float smem[REDUCE_THREADS];
+
+        // Pass 1: find row max.
         float row_max = -1.0f / 0.0f;
-        for (unsigned int col = threadIdx.x; col < reduce_size; col += blockDim.x) {
+        for (unsigned int col = threadIdx.x; col < reduce_size; col += blockDim.x)
             row_max = fmaxf(row_max, to_float(src[row * reduce_size + col]));
-        }
         smem[threadIdx.x] = row_max;
         __syncthreads();
-        for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        for (unsigned int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
             if (threadIdx.x < stride) smem[threadIdx.x] = fmaxf(smem[threadIdx.x], smem[threadIdx.x + stride]);
             __syncthreads();
         }
+        if (threadIdx.x < 32) smem[threadIdx.x] = warp_reduce_max(smem[threadIdx.x]);
+        __syncthreads();
         row_max = smem[0];
 
+        // Pass 2: sum exp(x - max).
         float acc = 0.0f;
-        for (unsigned int col = threadIdx.x; col < reduce_size; col += blockDim.x) {
+        for (unsigned int col = threadIdx.x; col < reduce_size; col += blockDim.x)
             acc += expf(to_float(src[row * reduce_size + col]) - row_max);
-        }
         smem[threadIdx.x] = acc;
         __syncthreads();
-        for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        for (unsigned int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
             if (threadIdx.x < stride) smem[threadIdx.x] += smem[threadIdx.x + stride];
             __syncthreads();
         }
-        if (threadIdx.x == 0) dst[row] = from_float<T>(logf(smem[0]) + row_max);
+        if (threadIdx.x < 32) {
+            float val = warp_reduce_sum(smem[threadIdx.x]);
+            if (threadIdx.x == 0) dst[row] = from_float<T>(logf(val) + row_max);
+        }
     }
 
     extern "C" __global__ void reduce_sum_f32(const float* src, float* dst, unsigned int outer_size, unsigned int reduce_size) { reduce_sum_kernel(src, dst, outer_size, reduce_size); }
