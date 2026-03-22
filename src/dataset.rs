@@ -1,12 +1,11 @@
 #![allow(dead_code)]
 
 use rand::RngExt;
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::path::Path;
 use std::{fs, fs::File};
 
 use crate::error::Result;
-use crate::tokenizer::Tokenizer;
 use crate::{Device, Tensor};
 
 /// The MNIST handwritten digit dataset (60k train + 10k test images).
@@ -90,10 +89,10 @@ impl MNISTDataset {
 
 /// A text dataset for language modelling (nanoGPT-style).
 ///
-/// Loads a text file, tokenizes it, then packs the token stream into
-/// fixed-length rows of `seq_len + 1`. Each row yields an input window
-/// `row[..seq_len]` and a target window `row[1..]`, so the model learns
-/// to predict the next token at every position.
+/// Packs a pre-tokenized stream into fixed-length rows of `seq_len + 1`.
+/// Each row yields an input window `row[..seq_len]` and a target window
+/// `row[1..]`, so the model learns to predict the next token at every
+/// position.
 ///
 /// This is the simplest approach: concatenate all tokens and chunk.
 /// Tail tokens that don't fill a complete row are discarded.
@@ -102,67 +101,29 @@ pub struct TextDataset {
     pub data: Tensor,
     /// Context length used to form input/target windows.
     pub seq_len: usize,
-    /// Vocabulary size of the tokenizer used to create the dataset.
+    /// Vocabulary size reported by the tokenizer that produced these tokens.
     pub vocab_size: usize,
 }
 
 impl TextDataset {
-    /// Loads and tokenizes a plain-text file.
+    /// Creates a dataset from a pre-tokenized stream.
     ///
+    /// `tokens` is the flat token stream (e.g. from [`Tokenizer::encode`]).
+    /// `vocab_size` should match the tokenizer that produced the tokens.
     /// `seq_len` is the context window the model sees (e.g. 256 or 1024).
-    /// The file is read in full, tokenized with the provided [`Tokenizer`],
-    /// then chunked into rows of `seq_len + 1` tokens.
-    pub fn load(path: &Path, tokenizer: &Tokenizer, seq_len: usize) -> Result<Self> {
-        let text = std::fs::read_to_string(path)?;
-
-        // Tokenize in ~1MB chunks instead of the whole file at once.
-        // tiktoken is very slow on multi-GB strings; chunking avoids that.
-        // We split on newline boundaries so BPE results are identical.
-        const CHUNK_SIZE: usize = 1 << 20; // 1 MB
-        let mut tokens = Vec::new();
-        let bytes = text.as_bytes();
-        let mut start = 0;
-        while start < bytes.len() {
-            let mut end = (start + CHUNK_SIZE).min(bytes.len());
-            // Extend to the next newline to avoid splitting mid-line.
-            if end < bytes.len() {
-                if let Some(nl) = bytes[end..].iter().position(|&b| b == b'\n') {
-                    end += nl + 1;
-                } else {
-                    end = bytes.len();
-                }
-            }
-            tokens.extend(tokenizer.encode(&text[start..end]));
-            start = end;
-        }
-
+    ///
+    /// The tokens are packed into rows of `seq_len + 1`; any remainder is
+    /// discarded.
+    pub fn from_tokens(tokens: &[u32], vocab_size: usize, seq_len: usize) -> Self {
         let row_len = seq_len + 1;
         let num_sequences = tokens.len() / row_len;
-        assert!(num_sequences > 0, "text file too short for seq_len={seq_len}");
+        assert!(num_sequences > 0, "token stream too short for seq_len={seq_len}");
 
-        // Truncate to an exact multiple of row_len and cast to i64.
         let tokens: Vec<i64> =
             tokens[..num_sequences * row_len].iter().map(|&t| t as i64).collect();
-
         let data = Tensor::from_vec(tokens, (num_sequences, row_len), Device::Cpu);
 
-        Ok(Self { data, seq_len, vocab_size: tokenizer.vocab_size() })
-    }
-
-    /// Downloads a text file from `url` (caching in `cache_dir`), then loads it.
-    ///
-    /// The filename is derived from the URL. If the file already exists in
-    /// `cache_dir` it is reused without re-downloading.
-    pub fn from_url(
-        url: &str,
-        cache_dir: &Path,
-        tokenizer: &Tokenizer,
-        seq_len: usize,
-    ) -> Result<Self> {
-        let filename = url.rsplit('/').next().expect("url has no path component");
-        let path: PathBuf = cache_dir.join(filename);
-        download_if_missing(url, &path);
-        Self::load(&path, tokenizer, seq_len)
+        Self { data, seq_len, vocab_size }
     }
 
     /// Number of sequences (rows) in the dataset.
@@ -184,14 +145,6 @@ impl TextDataset {
     pub fn targets(&self) -> Tensor {
         self.data.narrow(1, 1, self.seq_len)
     }
-}
-
-/// Paths for a prepared token-bin dataset.
-pub struct TokenBinPaths {
-    /// Path to the training token bin.
-    pub train: PathBuf,
-    /// Path to the validation token bin.
-    pub val: PathBuf,
 }
 
 /// A flat token dataset stored as raw little-endian `u16` token ids.
@@ -248,123 +201,6 @@ impl TokenBinDataset {
     }
 }
 
-/// Tokenizes a text corpus into flat binary token bins.
-///
-/// The full token stream is first written to a temporary `all.bin`, then split
-/// contiguously into `train.bin` and `val.bin`, preserving the "last chunk is
-/// validation" behavior common in language-model examples.
-pub fn prepare_text_token_bins(
-    text_path: &Path,
-    tokenizer: &Tokenizer,
-    out_dir: &Path,
-    val_ratio: f32,
-) -> Result<TokenBinPaths> {
-    assert!((0.0..1.0).contains(&val_ratio), "val_ratio must be in [0, 1)");
-
-    fs::create_dir_all(out_dir)?;
-
-    let all_path = out_dir.join("all.bin");
-    let train_path = out_dir.join("train.bin");
-    let val_path = out_dir.join("val.bin");
-
-    let total_tokens = tokenize_text_file_to_bin(text_path, tokenizer, &all_path)?;
-    let val_tokens = ((total_tokens as f32) * val_ratio).round() as usize;
-    let val_tokens = val_tokens.max(1).min(total_tokens.saturating_sub(1));
-    let train_tokens = total_tokens - val_tokens;
-
-    println!(
-        "Splitting token bins: train={} tokens, val={} tokens ({:.1}%)",
-        train_tokens,
-        val_tokens,
-        val_ratio * 100.0
-    );
-    split_token_bin(&all_path, &train_path, train_tokens, &val_path)?;
-    fs::remove_file(&all_path)?;
-
-    Ok(TokenBinPaths { train: train_path, val: val_path })
-}
-
-fn tokenize_text_file_to_bin(path: &Path, tokenizer: &Tokenizer, out_path: &Path) -> Result<usize> {
-    let input = File::open(path)?;
-    let mut reader = BufReader::new(input);
-    let output = File::create(out_path)?;
-    let mut writer = BufWriter::new(output);
-    let total_bytes = std::fs::metadata(path)?.len() as usize;
-    let report_bytes = (64 * 1024 * 1024).min(total_bytes.max(1));
-    let mut next_report = report_bytes;
-    let mut processed_bytes = 0usize;
-    let mut total_tokens = 0usize;
-    let mut line = String::new();
-    let mut printed_progress = false;
-
-    println!(
-        "Tokenizing {} ({:.1} MiB) into {}...",
-        path.display(),
-        format_mib(total_bytes),
-        out_path.display()
-    );
-
-    loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line)?;
-        if bytes_read == 0 {
-            break;
-        }
-        processed_bytes += bytes_read;
-
-        for token in tokenizer.encode(&line) {
-            let token = u16::try_from(token).expect("token id must fit in u16");
-            writer.write_all(&token.to_le_bytes())?;
-            total_tokens += 1;
-        }
-
-        if processed_bytes >= next_report || processed_bytes == total_bytes {
-            print!(
-                "\r  prepared {:.1}% | {:.1}/{:.1} MiB | {} tokens",
-                progress_pct(processed_bytes, total_bytes),
-                format_mib(processed_bytes),
-                format_mib(total_bytes),
-                total_tokens
-            );
-            std::io::stdout().flush().unwrap();
-            printed_progress = true;
-            next_report = next_report.saturating_add(report_bytes);
-        }
-    }
-
-    writer.flush()?;
-    if printed_progress {
-        println!();
-    }
-    println!(
-        "Finished tokenizing: {} tokens written to {}",
-        total_tokens,
-        out_path.display()
-    );
-    Ok(total_tokens)
-}
-
-fn format_mib(bytes: usize) -> f64 {
-    bytes as f64 / (1024.0 * 1024.0)
-}
-
-fn progress_pct(processed_bytes: usize, total_bytes: usize) -> f64 {
-    100.0 * processed_bytes as f64 / total_bytes.max(1) as f64
-}
-
-fn split_token_bin(
-    all_path: &Path,
-    train_path: &Path,
-    train_tokens: usize,
-    val_path: &Path,
-) -> Result<()> {
-    let bytes = std::fs::read(all_path)?;
-    let split_at = train_tokens * 2;
-    std::fs::write(train_path, &bytes[..split_at])?;
-    std::fs::write(val_path, &bytes[split_at..])?;
-    Ok(())
-}
-
 /// Downloads `url` to `path` if the file doesn't already exist.
 ///
 /// Creates parent directories as needed. Uses a `.part` suffix during
@@ -407,20 +243,14 @@ mod tests {
     use crate::layout::Shape;
 
     #[test]
-    fn test_text_dataset() {
-        // Arrange — write a small text file with enough tokens.
-        let dir = std::env::temp_dir().join("deers_text_dataset_test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tiny.txt");
-        // Repeat a sentence so we get plenty of tokens.
-        let text = "Once upon a time there was a little cat. ".repeat(200);
-        std::fs::write(&path, &text).unwrap();
-
-        let tokenizer = Tokenizer::cl100k_base();
+    fn test_text_dataset_from_tokens() {
+        // Arrange — a synthetic token stream.
         let seq_len = 16;
+        let vocab_size = 100;
+        let tokens: Vec<u32> = (0..200).map(|i| i % vocab_size).collect();
 
         // Act
-        let dataset = TextDataset::load(&path, &tokenizer, seq_len).unwrap();
+        let dataset = TextDataset::from_tokens(&tokens, vocab_size as usize, seq_len);
 
         // Assert
         let num_seq = dataset.len();
@@ -430,37 +260,8 @@ mod tests {
 
         // Verify the shift: for the first row, target[i] == data[0][i+1].
         let row: Vec<i64> = dataset.data.narrow(0, 0, 1).to_vec().unwrap();
-        // row has seq_len+1 elements; inputs = row[0..seq_len], targets = row[1..seq_len+1]
         assert_eq!(row.len(), seq_len + 1);
-        // Targets are just the inputs shifted by one position.
         assert_eq!(&row[1..], &row[1..seq_len + 1]);
-
-        // Cleanup
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn test_prepare_text_token_bins_roundtrips() {
-        // Arrange
-        let dir = std::env::temp_dir().join("deers_prepare_token_bins_test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let text_path = dir.join("tiny.txt");
-        std::fs::write(&text_path, "Once upon a time.\nThere was a cat.\n".repeat(32)).unwrap();
-        let tokenizer = Tokenizer::gpt2();
-
-        // Act
-        let paths = prepare_text_token_bins(&text_path, &tokenizer, &dir, 0.25).unwrap();
-        let train = TokenBinDataset::load(&paths.train, 8).unwrap();
-        let val = TokenBinDataset::load(&paths.val, 8).unwrap();
-
-        // Assert
-        assert!(paths.train.exists());
-        assert!(paths.val.exists());
-        assert!(train.num_tokens() > val.num_tokens());
-        assert!(val.num_tokens() > 0);
-
-        // Cleanup
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

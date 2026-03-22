@@ -8,7 +8,7 @@
 mod backprop;
 /// Checkpoint save/load helpers built on safetensors.
 pub mod checkpoint;
-/// Dataset loaders and corpus preparation helpers.
+/// Dataset loaders for training.
 pub mod dataset;
 mod device;
 mod dtype;
@@ -27,6 +27,7 @@ pub mod optim;
 pub mod profiler;
 mod storage;
 mod tensor;
+/// BPE tokenizer and corpus tokenization pipelines.
 pub mod tokenizer;
 pub use backprop::GradientStore;
 /// The supported tensor device backends.

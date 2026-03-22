@@ -4,6 +4,7 @@
 //!   cargo run --release --example tinystories_train -- --device mps
 //!   cargo run --release --example tinystories_train -- --device mps --prepare-only
 
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -12,7 +13,8 @@ use std::process;
 use std::time::Instant;
 
 use deers::checkpoint;
-use deers::dataset::{TokenBinDataset, TokenBinPaths, prepare_text_token_bins};
+use deers::dataset::TokenBinDataset;
+use deers::tokenizer::{TokenBinPaths, prepare_text_token_bins};
 use deers::models::gpt::{GPT, GPTConfig};
 use deers::nn::{ParamStore, Parameter};
 use deers::optim::{AdamW, AdamWConfig, LrSchedule, WarmupWarmdown, clip_grad_norm};
@@ -24,6 +26,8 @@ const DEFAULT_BIN_DIR: &str = "data/tinystories_gpt2";
 const DEFAULT_OUT_DIR: &str = "out/tinystories";
 const DEFAULT_PROMPT: &str = "Once upon a time";
 const DEFAULT_VAL_RATIO: f32 = 0.01;
+const DEFAULT_SAMPLE_TEMPERATURE: f32 = 0.8;
+const DEFAULT_SAMPLE_TOP_K: usize = 50;
 const MODEL_FILE: &str = "model.safetensors";
 const OPTIMIZER_FILE: &str = "optimizer.safetensors";
 
@@ -103,7 +107,16 @@ fn main() {
     }
 
     if options.sample_every > 0 {
-        let sample = generate(&model, &tokenizer, &options.prompt, 64, options.device, options.seq_len);
+        let sample = generate(
+            &model,
+            &tokenizer,
+            &options.prompt,
+            64,
+            options.device,
+            options.seq_len,
+            options.sample_temperature,
+            options.sample_top_k,
+        );
         println!("step {:>5}/{:>5} | initial sample: {sample}", start_step, options.max_steps);
     }
 
@@ -153,7 +166,16 @@ fn main() {
         }
 
         if options.sample_every > 0 && step_num.is_multiple_of(options.sample_every) {
-            let sample = generate(&model, &tokenizer, &options.prompt, 64, options.device, options.seq_len);
+            let sample = generate(
+                &model,
+                &tokenizer,
+                &options.prompt,
+                64,
+                options.device,
+                options.seq_len,
+                options.sample_temperature,
+                options.sample_top_k,
+            );
             println!("  sample: {sample}");
         }
     }
@@ -226,6 +248,8 @@ fn generate(
     max_new_tokens: usize,
     device: Device,
     sequence_len: usize,
+    temperature: f32,
+    top_k: usize,
 ) -> String {
     let mut tokens: Vec<i64> = tokenizer.encode(prompt).into_iter().map(i64::from).collect();
 
@@ -236,14 +260,42 @@ fn generate(
         let logits = model.forward(&input).unwrap();
         let last_logits = logits.narrow(1, input.layout().shape()[1] - 1, 1);
         let last_logits = last_logits.reshape(vec![logits.layout().shape()[2]]);
-        let probs: Vec<f32> = last_logits.to_vec().unwrap();
-        let next_token =
-            probs.iter().enumerate().max_by(|(_, a), (_, b)| a.total_cmp(b)).unwrap().0;
+        let logits: Vec<f32> = last_logits.to_vec().unwrap();
+        let next_token = sample_token(&logits, temperature, top_k);
         tokens.push(next_token as i64);
     }
 
     let decoded = tokens.into_iter().map(|token| token as u32).collect::<Vec<_>>();
     tokenizer.decode_lossy(&decoded)
+}
+
+fn sample_token(logits: &[f32], temperature: f32, top_k: usize) -> usize {
+    assert!(temperature > 0.0, "sample_temperature must be positive");
+    assert!(top_k > 0, "sample_top_k must be positive");
+
+    let mut candidates = logits.iter().copied().enumerate().collect::<Vec<_>>();
+    candidates.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+    candidates.truncate(top_k.min(candidates.len()));
+
+    let scaled_max = candidates[0].1 / temperature;
+    let weights = candidates
+        .iter()
+        .map(|(_, logit)| ((*logit / temperature) - scaled_max).exp())
+        .collect::<Vec<_>>();
+    let total_weight = weights.iter().sum::<f32>();
+    if !total_weight.is_finite() || total_weight <= 0.0 {
+        return candidates[0].0;
+    }
+
+    let mut draw = rand::rng().random::<f32>() * total_weight;
+    for ((token, _), weight) in candidates.iter().zip(weights.iter()) {
+        draw -= *weight;
+        if draw <= 0.0 {
+            return *token;
+        }
+    }
+
+    candidates.last().unwrap().0
 }
 
 fn resolve_token_bins(options: &TrainOptions, tokenizer: &Tokenizer) -> TokenBinPaths {
@@ -318,6 +370,8 @@ fn write_run_config(options: &TrainOptions, config: &GPTConfig, vocab_size: usiz
         weight_decay: options.weight_decay,
         betas: options.betas,
         max_grad_norm: options.max_grad_norm,
+        sample_temperature: options.sample_temperature,
+        sample_top_k: options.sample_top_k,
         text_path: options.text_path.display().to_string(),
         bin_dir: options.bin_dir.display().to_string(),
         out_dir: options.out_dir.display().to_string(),
@@ -482,6 +536,8 @@ struct TrainOptions {
     weight_decay: f64,
     betas: (f64, f64),
     max_grad_norm: f64,
+    sample_temperature: f32,
+    sample_top_k: usize,
     prompt: String,
 }
 
@@ -520,6 +576,8 @@ impl TrainOptions {
                 weight_decay: 0.1,
                 betas: (0.9, 0.95),
                 max_grad_norm: 1.0,
+                sample_temperature: DEFAULT_SAMPLE_TEMPERATURE,
+                sample_top_k: DEFAULT_SAMPLE_TOP_K,
                 prompt: DEFAULT_PROMPT.to_owned(),
             },
             Preset::Air16Overnight => Self {
@@ -554,6 +612,8 @@ impl TrainOptions {
                 weight_decay: 0.1,
                 betas: (0.9, 0.95),
                 max_grad_norm: 1.0,
+                sample_temperature: DEFAULT_SAMPLE_TEMPERATURE,
+                sample_top_k: DEFAULT_SAMPLE_TOP_K,
                 prompt: DEFAULT_PROMPT.to_owned(),
             },
         }
@@ -648,6 +708,14 @@ fn parse_args() -> TrainOptions {
             "--max-grad-norm" => {
                 options.max_grad_norm = parse_f64(&next_arg(&args, &mut index, "--max-grad-norm"));
             }
+            "--sample-temperature" => {
+                options.sample_temperature =
+                    parse_f32(&next_arg(&args, &mut index, "--sample-temperature"));
+            }
+            "--sample-top-k" => {
+                options.sample_top_k =
+                    parse_usize(&next_arg(&args, &mut index, "--sample-top-k"));
+            }
             "--prompt" => options.prompt = next_arg(&args, &mut index, "--prompt"),
             "--help" | "-h" => usage(""),
             other => usage(&format!("unexpected argument: {other}")),
@@ -661,6 +729,8 @@ fn parse_args() -> TrainOptions {
     assert!(options.grad_accum_steps > 0, "grad_accum_steps must be positive");
     assert!(options.micro_batch_size > 0, "micro_batch_size must be positive");
     assert!(options.eval_batches > 0, "eval_batches must be positive");
+    assert!(options.sample_temperature > 0.0, "sample_temperature must be positive");
+    assert!(options.sample_top_k > 0, "sample_top_k must be positive");
     options
 }
 
@@ -736,6 +806,8 @@ fn usage(message: &str) -> ! {
     eprintln!("  --warmup-steps <usize>");
     eprintln!("  --weight-decay <float>");
     eprintln!("  --max-grad-norm <float>");
+    eprintln!("  --sample-temperature <float>");
+    eprintln!("  --sample-top-k <usize>");
     eprintln!("  --prompt <text>");
     process::exit(if message.is_empty() { 0 } else { 1 });
 }
@@ -766,6 +838,8 @@ struct RunMetadata {
     weight_decay: f64,
     betas: (f64, f64),
     max_grad_norm: f64,
+    sample_temperature: f32,
+    sample_top_k: usize,
     text_path: String,
     bin_dir: String,
     out_dir: String,
