@@ -3,3 +3,6 @@
 /out/
 /data/TinyStoriesV2-GPT4-train.txt
 /data/tinystories_gpt2/
+/bench.log
+/results.tsv
+/.vscode
