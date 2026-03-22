@@ -112,6 +112,10 @@ impl GradientStore {
     pub fn len(&self) -> usize {
         self.store.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.store.is_empty()
+    }
 }
 
 impl Default for GradientStore {

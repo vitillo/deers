@@ -97,6 +97,7 @@ impl Tensor {
                     .as_ref()
                     .map(|o| o.dependencies().iter().any(|dep| dep.requires_grad()))
                     .unwrap_or(false);
+            let op = if requires_grad { op } else { None };
             (requires_grad, op)
         };
 
@@ -679,8 +680,22 @@ mod tests {
         // Act
         let c = &a + &b;
 
-        // Assert
+        // Assert — tensors that do not require grad should not retain op history.
         assert!(a.op().is_none());
+        assert!(c.op().is_none());
+    }
+
+    #[test]
+    fn test_attached_tensor_keeps_op_history() {
+        // Arrange
+        let a = Tensor::ones((2,), DType::F32, Device::Cpu).attach();
+        let b = Tensor::ones((2,), DType::F32, Device::Cpu);
+
+        // Act
+        let c = &a + &b;
+
+        // Assert
+        assert!(c.requires_grad());
         assert!(c.op().is_some());
     }
 

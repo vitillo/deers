@@ -40,6 +40,17 @@ impl Tokenizer {
     pub fn decode(&self, tokens: &[u32]) -> String {
         self.bpe.decode(tokens.to_vec()).expect("failed to decode tokens")
     }
+
+    /// Decodes token ids back into text, replacing invalid UTF-8 with the
+    /// standard replacement character instead of panicking.
+    pub fn decode_lossy(&self, tokens: &[u32]) -> String {
+        let bytes = self
+            .bpe
+            ._decode_native_and_split(tokens.to_vec())
+            .flatten()
+            .collect::<Vec<_>>();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
 }
 
 #[cfg(test)]

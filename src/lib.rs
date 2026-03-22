@@ -19,6 +19,7 @@ pub mod profiler;
 mod storage;
 mod tensor;
 pub mod tokenizer;
+pub use backprop::GradientStore;
 pub use device::Device;
 pub use dtype::DType;
 pub use profiler::{Profile, ProfileRow, Profiler, ProfilerConfig, profile};

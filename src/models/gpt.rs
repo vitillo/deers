@@ -235,6 +235,7 @@ impl Block {
 }
 
 /// Minimal GPT configuration for the nanochat-style decoder stack.
+#[derive(Clone)]
 pub struct GPTConfig {
     pub vocab_size: usize,
     pub sequence_len: usize,
