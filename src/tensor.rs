@@ -498,7 +498,12 @@ fn broadcast_pair(a: &Tensor, b: &Tensor) -> (Tensor, Tensor) {
         return (a.clone(), b.clone());
     }
     let out_shape = broadcast_shape(a.layout().shape(), b.layout().shape());
-    (a.broadcast(out_shape.clone()), b.broadcast(out_shape))
+    // Only create Broadcast nodes for tensors that don't already have the target shape.
+    // This avoids trivial Broadcast nodes (shape already matches) whose backward would
+    // call sum([]) — launching a CUDA reduce kernel for every no-op broadcast.
+    let a_out = if a.layout().shape() == &out_shape { a.clone() } else { a.broadcast(out_shape.clone()) };
+    let b_out = if b.layout().shape() == &out_shape { b.clone() } else { b.broadcast(out_shape) };
+    (a_out, b_out)
 }
 
 impl PartialEq for Tensor {
