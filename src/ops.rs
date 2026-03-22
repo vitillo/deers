@@ -1060,30 +1060,49 @@ impl TensorOp for MatMul {
 pub struct LogSumExp {
     arg: Tensor,
     axes: Vec<usize>,
-    /// Cached from forward: exp(arg - max) and sum(exp(arg - max)).
-    exp_z: Tensor,
-    sum_z: Tensor,
+    /// Cached forward result for use in backward.
+    lse: Option<Tensor>,
 }
 
 impl LogSumExp {
     pub fn new(arg: Tensor, axes: Vec<usize>) -> Result<Self> {
-        // Compute forward intermediates and cache them for backward.
-        let max_z = arg.max(axes.clone(), true);
-        let broadcast_max_z = max_z.broadcast(arg.layout().shape().clone());
-        let exp_z = (&arg - &broadcast_max_z).exp();
-        let sum_z = exp_z.sum(axes.clone(), false);
-        Ok(Self { arg, axes, exp_z, sum_z })
+        Ok(Self { arg, axes, lse: None })
+    }
+
+    /// Whether the fused kernel path can be used: single last-axis reduce on a compact layout.
+    fn can_fuse(&self) -> bool {
+        self.axes.len() == 1
+            && self.axes[0] == self.arg.layout().ndim() - 1
+            && self.arg.layout().is_compact()
     }
 }
 
 impl TensorOp for LogSumExp {
-    fn forward(self) -> Result<Tensor> {
+    fn forward(mut self) -> Result<Tensor> {
         let _profile = profile_view("log_sum_exp", &[&self.arg]);
-        // max_z needs recomputing here because it was consumed during new().
-        // But since new() already computed exp_z = exp(arg - max) and sum_z = sum(exp_z),
-        // we can get logsumexp = log(sum_z) + max_z. Recompute max cheaply.
-        let max_z = self.arg.max(self.axes.clone(), true);
-        let logsumexp = max_z.reshape(self.sum_z.layout().shape.clone()) + self.sum_z.log();
+
+        let logsumexp = if self.can_fuse() {
+            // Fused single-kernel path: reduces last axis in one pass.
+            let axis = self.axes[0];
+            let reduce_size = self.arg.layout().shape()[axis];
+            let outer_size = self.arg.layout().size() / reduce_size;
+            let out_storage =
+                self.arg
+                    .storage()
+                    .log_sum_exp(self.arg.layout(), outer_size, reduce_size)?;
+            let out_shape = reduce_shape(self.arg.layout().shape(), &self.axes, false);
+            let storage = Arc::new(RwLock::new(out_storage));
+            Tensor::new(storage, Layout::from(out_shape), false, None)
+        } else {
+            // Decomposed fallback: max, sub, exp, sum, log, add.
+            let max_z = self.arg.max(self.axes.clone(), true);
+            let broadcast_max = max_z.broadcast(self.arg.layout().shape().clone());
+            let exp_z = (&self.arg - &broadcast_max).exp();
+            let sum_z = exp_z.sum(self.axes.clone(), false);
+            &max_z.reshape(sum_z.layout().shape.clone()) + &sum_z.log()
+        };
+
+        self.lse = Some(logsumexp.clone());
 
         Ok(Tensor::new(
             logsumexp.storage_clone(),
@@ -1094,11 +1113,15 @@ impl TensorOp for LogSumExp {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        // d/dx logsumexp = exp(x - logsumexp) = softmax(x)
+        let lse = self.lse.as_ref().expect("forward must run before backward");
         let expand_shape = reduce_shape(self.arg.layout().shape(), &self.axes, true);
-        let grad_sum_z = (out_grad / &self.sum_z)
-            .reshape(expand_shape)
+        let lse_broadcast = lse.reshape(expand_shape).broadcast(self.arg.layout().shape().clone());
+        let softmax = (&self.arg - &lse_broadcast).exp();
+        let out_grad_broadcast = out_grad
+            .reshape(reduce_shape(self.arg.layout().shape(), &self.axes, true))
             .broadcast(self.arg.layout().shape().clone());
-        let arg_grad = grad_sum_z * &self.exp_z;
+        let arg_grad = &softmax * &out_grad_broadcast;
 
         grads.accumulate(&self.arg, arg_grad);
         Ok(())

@@ -325,6 +325,8 @@ mod imp {
         "matmul_big_f32",
         "matmul_xl_f16",
         "matmul_xl_f32",
+        "log_sum_exp_f16",
+        "log_sum_exp_f32",
     ];
 
     #[derive(Debug)]
@@ -1593,6 +1595,49 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
+        fn log_sum_exp(&self, layout: &Layout, outer_size: usize, reduce_size: usize) -> Result<Self> {
+            if let Some((ctx, input, _)) = self.accelerated(DType::F16) {
+                assert!(layout.is_compact());
+                let out = ctx.empty_f16_buffer(outer_size);
+                let meta = ReduceMeta { outer_size: outer_size as u32, reduce_size: reduce_size as u32 };
+                ctx.dispatch_reduce("log_sum_exp_f16", outer_size, |encoder| {
+                    encoder.set_buffer(0, Some(input), 0);
+                    encoder.set_buffer(1, Some(&out), 0);
+                    MpsContext::set_params(encoder, 2, &meta);
+                });
+                return Ok(Self {
+                    inner: MpsInner::Accelerated {
+                        ctx: ctx.clone(),
+                        buffer: out,
+                        len: outer_size,
+                        dtype: DType::F16,
+                    },
+                });
+            }
+
+            if let Some((ctx, input, _)) = self.accelerated(DType::F32) {
+                assert!(layout.is_compact());
+                let out = ctx.empty_f32_buffer(outer_size);
+                let meta = ReduceMeta { outer_size: outer_size as u32, reduce_size: reduce_size as u32 };
+                ctx.dispatch_reduce("log_sum_exp_f32", outer_size, |encoder| {
+                    encoder.set_buffer(0, Some(input), 0);
+                    encoder.set_buffer(1, Some(&out), 0);
+                    MpsContext::set_params(encoder, 2, &meta);
+                });
+                return Ok(Self {
+                    inner: MpsInner::Accelerated {
+                        ctx: ctx.clone(),
+                        buffer: out,
+                        len: outer_size,
+                        dtype: DType::F32,
+                    },
+                });
+            }
+
+            let inner = self.as_cpu_storage().log_sum_exp(layout, outer_size, reduce_size)?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
         fn dtype(&self) -> DType {
             match &self.inner {
                 MpsInner::Accelerated { dtype, .. } => *dtype,
@@ -1870,6 +1915,9 @@ mod imp {
             _: &Layout,
             _: &[usize],
         ) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn log_sum_exp(&self, _: &Layout, _: usize, _: usize) -> Result<Self> {
             Self::unavailable()
         }
         fn dtype(&self) -> DType {

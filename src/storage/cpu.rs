@@ -749,6 +749,40 @@ impl BackendStorage for CpuStorage {
             }
         }
     }
+
+    fn log_sum_exp(&self, layout: &Layout, outer_size: usize, reduce_size: usize) -> Result<Self> {
+        assert!(layout.is_compact());
+        assert_eq!(layout.size(), outer_size * reduce_size);
+        match self {
+            CpuStorage::F32(data) => {
+                let data = &data[layout.offset..];
+                let out: Vec<f32> = (0..outer_size)
+                    .map(|row| {
+                        let start = row * reduce_size;
+                        let slice = &data[start..start + reduce_size];
+                        let max = slice.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                        let sum: f32 = slice.iter().map(|&x| (x - max).exp()).sum();
+                        sum.ln() + max
+                    })
+                    .collect();
+                Ok(CpuStorage::F32(out))
+            }
+            CpuStorage::F16(data) => {
+                let data = &data[layout.offset..];
+                let out: Vec<f16> = (0..outer_size)
+                    .map(|row| {
+                        let start = row * reduce_size;
+                        let slice = &data[start..start + reduce_size];
+                        let max = slice.iter().copied().map(|v| v.to_f32()).fold(f32::NEG_INFINITY, f32::max);
+                        let sum: f32 = slice.iter().map(|v| (v.to_f32() - max).exp()).sum();
+                        f16::from_f32(sum.ln() + max)
+                    })
+                    .collect();
+                Ok(CpuStorage::F16(out))
+            }
+            _ => Err(Error::DTypeMismatch("log_sum_exp: unsupported dtype".into())),
+        }
+    }
 }
 
 fn gather_into<T: Copy>(

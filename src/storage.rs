@@ -272,6 +272,10 @@ pub trait BackendStorage: Sized {
         indices_layout: &Layout,
         dst_shape: &[usize],
     ) -> Result<Self>;
+    /// Fused log-sum-exp: log(sum(exp(x - max(x)))) + max(x) per row.
+    /// `layout` must be compact. Reduces `reduce_size` elements per row
+    /// into `outer_size` output elements, where `outer_size * reduce_size == layout.size()`.
+    fn log_sum_exp(&self, layout: &Layout, outer_size: usize, reduce_size: usize) -> Result<Self>;
     fn dtype(&self) -> DType;
     fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D>;
     fn copy_compact(&self, src_layout: &Layout, dst: &mut Self) -> Result<()>;
@@ -324,6 +328,13 @@ impl BackendStorage for Storage {
             (Storage::Cpu(storage), Storage::Cpu(dst)) => storage.reduce::<O>(layout, dst),
             (Storage::Mps(storage), Storage::Mps(dst)) => storage.reduce::<O>(layout, dst),
             _ => Err(Error::DeviceMismatch { op: O::KERNEL }),
+        }
+    }
+
+    fn log_sum_exp(&self, layout: &Layout, outer_size: usize, reduce_size: usize) -> Result<Self> {
+        match self {
+            Storage::Cpu(storage) => Ok(Self::Cpu(storage.log_sum_exp(layout, outer_size, reduce_size)?)),
+            Storage::Mps(storage) => Ok(Self::Mps(storage.log_sum_exp(layout, outer_size, reduce_size)?)),
         }
     }
 
