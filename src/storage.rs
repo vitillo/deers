@@ -278,6 +278,25 @@ pub trait BackendStorage: Sized {
     /// `layout` must be compact. Reduces `reduce_size` elements per row
     /// into `outer_size` output elements, where `outer_size * reduce_size == layout.size()`.
     fn log_sum_exp(&self, layout: &Layout, outer_size: usize, reduce_size: usize) -> Result<Self>;
+    /// Fused log-softmax forward: `dst[i] = src[i] - log(sum_j exp(src[j]))` per row.
+    ///
+    /// `outer_size * inner_size` must equal `layout.size()`. The layout must be compact.
+    fn log_softmax_fwd(
+        &self,
+        layout: &Layout,
+        outer_size: usize,
+        inner_size: usize,
+    ) -> Result<Self>;
+    /// Fused log-softmax backward: `grad_input[i] = grad[i] - exp(lsm[i]) * sum_j grad[j]`
+    /// per row, where `lsm` is the saved log-softmax output from the forward pass.
+    fn log_softmax_bwd(
+        &self,
+        grad_layout: &Layout,
+        lsm: &Self,
+        lsm_layout: &Layout,
+        outer_size: usize,
+        inner_size: usize,
+    ) -> Result<Self>;
     fn dtype(&self) -> DType;
     fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D>;
     fn copy_compact(&self, src_layout: &Layout, dst: &mut Self) -> Result<()>;
@@ -351,6 +370,47 @@ impl BackendStorage for Storage {
             Storage::Mps(storage) => {
                 Ok(Self::Mps(storage.log_sum_exp(layout, outer_size, reduce_size)?))
             }
+        }
+    }
+
+    fn log_softmax_fwd(
+        &self,
+        layout: &Layout,
+        outer_size: usize,
+        inner_size: usize,
+    ) -> Result<Self> {
+        match self {
+            Storage::Cpu(storage) => {
+                Ok(Self::Cpu(storage.log_softmax_fwd(layout, outer_size, inner_size)?))
+            }
+            Storage::Cuda(storage) => {
+                Ok(Self::Cuda(storage.log_softmax_fwd(layout, outer_size, inner_size)?))
+            }
+            Storage::Mps(storage) => {
+                Ok(Self::Mps(storage.log_softmax_fwd(layout, outer_size, inner_size)?))
+            }
+        }
+    }
+
+    fn log_softmax_bwd(
+        &self,
+        grad_layout: &Layout,
+        lsm: &Self,
+        lsm_layout: &Layout,
+        outer_size: usize,
+        inner_size: usize,
+    ) -> Result<Self> {
+        match (self, lsm) {
+            (Storage::Cpu(grad), Storage::Cpu(lsm)) => Ok(Self::Cpu(
+                grad.log_softmax_bwd(grad_layout, lsm, lsm_layout, outer_size, inner_size)?,
+            )),
+            (Storage::Cuda(grad), Storage::Cuda(lsm)) => Ok(Self::Cuda(
+                grad.log_softmax_bwd(grad_layout, lsm, lsm_layout, outer_size, inner_size)?,
+            )),
+            (Storage::Mps(grad), Storage::Mps(lsm)) => Ok(Self::Mps(
+                grad.log_softmax_bwd(grad_layout, lsm, lsm_layout, outer_size, inner_size)?,
+            )),
+            _ => Err(Error::DeviceMismatch { op: "log_softmax_bwd" }),
         }
     }
 

@@ -399,11 +399,21 @@ impl Tensor {
 
     /// Numerically stable log-softmax along the given axis.
     ///
-    /// Computes `x - logsumexp(x, axis)` with the logsumexp result
-    /// broadcast back to the original shape.
+    /// On CUDA with a compact last-axis layout this uses a fused single-kernel path
+    /// that avoids materialising the broadcast LSE intermediate. All other cases fall
+    /// back to the primitive decomposition (log_sum_exp → reshape → broadcast → sub).
     pub fn log_softmax(&self, axis: usize) -> Tensor {
+        // Fused CUDA path: single kernel reads x twice and writes output once,
+        // skipping the separate log_sum_exp + broadcast + sub chain.
+        let last_axis = self.layout().ndim() - 1;
+        if axis == last_axis
+            && self.device() == crate::device::Device::Cuda
+            && self.is_compact()
+        {
+            return ops::FusedLogSoftmax::new(self.clone(), axis).unwrap().forward().unwrap();
+        }
+        // Primitive fallback.
         let lse = self.log_sum_exp(vec![axis]);
-        // Reshape lse to have size 1 in the reduced axis so we can broadcast
         let mut shape: Vec<usize> = self.layout().shape().iter().copied().collect();
         shape[axis] = 1;
         let lse = lse.reshape(shape);

@@ -787,6 +787,103 @@ impl BackendStorage for CpuStorage {
             _ => Err(Error::DTypeMismatch("log_sum_exp: unsupported dtype".into())),
         }
     }
+
+    fn log_softmax_fwd(
+        &self,
+        layout: &Layout,
+        outer_size: usize,
+        inner_size: usize,
+    ) -> crate::error::Result<Self> {
+        assert!(layout.is_compact());
+        assert_eq!(layout.size(), outer_size * inner_size);
+        match self {
+            CpuStorage::F32(data) => {
+                let data = &data[layout.offset..];
+                let out: Vec<f32> = (0..outer_size)
+                    .flat_map(|row| {
+                        let start = row * inner_size;
+                        let slice = &data[start..start + inner_size];
+                        let max = slice.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                        let sum: f32 = slice.iter().map(|&x| (x - max).exp()).sum();
+                        let lse = sum.ln() + max;
+                        slice.iter().map(move |&x| x - lse)
+                    })
+                    .collect();
+                Ok(CpuStorage::F32(out))
+            }
+            CpuStorage::F16(data) => {
+                use half::f16;
+                let data = &data[layout.offset..];
+                let out: Vec<f16> = (0..outer_size)
+                    .flat_map(|row| {
+                        let start = row * inner_size;
+                        let slice = &data[start..start + inner_size];
+                        let max = slice.iter().map(|v| v.to_f32()).fold(f32::NEG_INFINITY, f32::max);
+                        let sum: f32 = slice.iter().map(|v| (v.to_f32() - max).exp()).sum();
+                        let lse = sum.ln() + max;
+                        slice.iter().map(move |v| f16::from_f32(v.to_f32() - lse))
+                    })
+                    .collect();
+                Ok(CpuStorage::F16(out))
+            }
+            _ => Err(crate::error::Error::DTypeMismatch("log_softmax_fwd: unsupported dtype".into())),
+        }
+    }
+
+    fn log_softmax_bwd(
+        &self,
+        grad_layout: &Layout,
+        lsm: &Self,
+        lsm_layout: &Layout,
+        outer_size: usize,
+        inner_size: usize,
+    ) -> crate::error::Result<Self> {
+        assert!(grad_layout.is_compact());
+        assert!(lsm_layout.is_compact());
+        assert_eq!(grad_layout.size(), outer_size * inner_size);
+        match (self, lsm) {
+            (CpuStorage::F32(grad), CpuStorage::F32(lsm_data)) => {
+                let grad = &grad[grad_layout.offset..];
+                let lsm_data = &lsm_data[lsm_layout.offset..];
+                let out: Vec<f32> = (0..outer_size)
+                    .flat_map(|row| {
+                        let start = row * inner_size;
+                        let g_row = &grad[start..start + inner_size];
+                        let l_row = &lsm_data[start..start + inner_size];
+                        let sum_grad: f32 = g_row.iter().sum();
+                        g_row
+                            .iter()
+                            .zip(l_row.iter())
+                            .map(move |(&g, &l)| g - l.exp() * sum_grad)
+                    })
+                    .collect();
+                Ok(CpuStorage::F32(out))
+            }
+            (CpuStorage::F16(grad), CpuStorage::F16(lsm_data)) => {
+                use half::f16;
+                let grad = &grad[grad_layout.offset..];
+                let lsm_data = &lsm_data[lsm_layout.offset..];
+                let out: Vec<f16> = (0..outer_size)
+                    .flat_map(|row| {
+                        let start = row * inner_size;
+                        let g_row = &grad[start..start + inner_size];
+                        let l_row = &lsm_data[start..start + inner_size];
+                        let sum_grad: f32 = g_row.iter().map(|v| v.to_f32()).sum();
+                        g_row
+                            .iter()
+                            .zip(l_row.iter())
+                            .map(move |(&g, &l)| {
+                                f16::from_f32(g.to_f32() - l.to_f32().exp() * sum_grad)
+                            })
+                    })
+                    .collect();
+                Ok(CpuStorage::F16(out))
+            }
+            _ => Err(crate::error::Error::DTypeMismatch(
+                "log_softmax_bwd: dtype mismatch".into(),
+            )),
+        }
+    }
 }
 
 fn gather_into<T: Copy>(

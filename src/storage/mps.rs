@@ -1639,6 +1639,34 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
+        fn log_softmax_fwd(
+            &self,
+            layout: &Layout,
+            outer_size: usize,
+            inner_size: usize,
+        ) -> Result<Self> {
+            let inner = self.as_cpu_storage().log_softmax_fwd(layout, outer_size, inner_size)?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
+        fn log_softmax_bwd(
+            &self,
+            grad_layout: &Layout,
+            lsm: &Self,
+            lsm_layout: &Layout,
+            outer_size: usize,
+            inner_size: usize,
+        ) -> Result<Self> {
+            let inner = self.as_cpu_storage().log_softmax_bwd(
+                grad_layout,
+                &lsm.as_cpu_storage(),
+                lsm_layout,
+                outer_size,
+                inner_size,
+            )?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
         fn dtype(&self) -> DType {
             match &self.inner {
                 MpsInner::Accelerated { dtype, .. } => *dtype,
@@ -1919,6 +1947,12 @@ mod imp {
             Self::unavailable()
         }
         fn log_sum_exp(&self, _: &Layout, _: usize, _: usize) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn log_softmax_fwd(&self, _: &Layout, _: usize, _: usize) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn log_softmax_bwd(&self, _: &Layout, _: &Self, _: &Layout, _: usize, _: usize) -> Result<Self> {
             Self::unavailable()
         }
         fn dtype(&self) -> DType {

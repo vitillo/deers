@@ -279,6 +279,81 @@ mod imp {
     extern "C" __global__ void log_sum_exp_f32(const float* src, float* dst, unsigned int outer_size, unsigned int reduce_size) { log_sum_exp_kernel(src, dst, outer_size, reduce_size); }
     extern "C" __global__ void log_sum_exp_f16(const half* src, half* dst, unsigned int outer_size, unsigned int reduce_size) { log_sum_exp_kernel(src, dst, outer_size, reduce_size); }
 
+    // Fused log-softmax forward: computes x[i] - log(sum_j exp(x[j] - max)) - max for each row.
+    // Avoids materialising the broadcast LSE tensor and the separate subtraction kernel.
+    template <typename T>
+    __global__ void log_softmax_fwd_kernel(const T* src, T* dst, unsigned int outer_size, unsigned int inner_size) {
+        unsigned int row = blockIdx.x;
+        if (row >= outer_size) return;
+        __shared__ float smem[REDUCE_THREADS];
+
+        // Pass 1: row max.
+        float row_max = -1.0f / 0.0f;
+        for (unsigned int col = threadIdx.x; col < inner_size; col += blockDim.x)
+            row_max = fmaxf(row_max, to_float(src[row * inner_size + col]));
+        smem[threadIdx.x] = row_max;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+            if (threadIdx.x < stride) smem[threadIdx.x] = fmaxf(smem[threadIdx.x], smem[threadIdx.x + stride]);
+            __syncthreads();
+        }
+        if (threadIdx.x < 32) smem[threadIdx.x] = warp_reduce_max(smem[threadIdx.x]);
+        __syncthreads();
+        row_max = smem[0];
+
+        // Pass 2: sum(exp(x - max)).
+        float acc = 0.0f;
+        for (unsigned int col = threadIdx.x; col < inner_size; col += blockDim.x)
+            acc += expf(to_float(src[row * inner_size + col]) - row_max);
+        smem[threadIdx.x] = acc;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+            if (threadIdx.x < stride) smem[threadIdx.x] += smem[threadIdx.x + stride];
+            __syncthreads();
+        }
+        if (threadIdx.x < 32) smem[threadIdx.x] = warp_reduce_sum(smem[threadIdx.x]);
+        __syncthreads();
+        float lse = logf(smem[0]) + row_max;
+
+        // Pass 3: write x[i] - lse.
+        for (unsigned int col = threadIdx.x; col < inner_size; col += blockDim.x)
+            dst[row * inner_size + col] = from_float<T>(to_float(src[row * inner_size + col]) - lse);
+    }
+
+    // Fused log-softmax backward: grad_input[i] = grad[i] - exp(lsm_out[i]) * sum_j grad[j].
+    // exp(lsm_out[i]) = softmax(x)[i], so this is the standard log-softmax gradient.
+    template <typename T>
+    __global__ void log_softmax_bwd_kernel(const T* grad, const T* lsm_out, T* grad_input, unsigned int outer_size, unsigned int inner_size) {
+        unsigned int row = blockIdx.x;
+        if (row >= outer_size) return;
+        __shared__ float smem[REDUCE_THREADS];
+
+        // Pass 1: sum(grad) per row.
+        float sum_grad = 0.0f;
+        for (unsigned int col = threadIdx.x; col < inner_size; col += blockDim.x)
+            sum_grad += to_float(grad[row * inner_size + col]);
+        smem[threadIdx.x] = sum_grad;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+            if (threadIdx.x < stride) smem[threadIdx.x] += smem[threadIdx.x + stride];
+            __syncthreads();
+        }
+        if (threadIdx.x < 32) smem[threadIdx.x] = warp_reduce_sum(smem[threadIdx.x]);
+        __syncthreads();
+        sum_grad = smem[0];
+
+        // Pass 2: grad_input[i] = grad[i] - softmax(x)[i] * sum_grad.
+        for (unsigned int col = threadIdx.x; col < inner_size; col += blockDim.x) {
+            unsigned int i = row * inner_size + col;
+            grad_input[i] = from_float<T>(to_float(grad[i]) - expf(to_float(lsm_out[i])) * sum_grad);
+        }
+    }
+
+    extern "C" __global__ void log_softmax_fwd_f32(const float* src, float* dst, unsigned int outer_size, unsigned int inner_size) { log_softmax_fwd_kernel(src, dst, outer_size, inner_size); }
+    extern "C" __global__ void log_softmax_fwd_f16(const half* src, half* dst, unsigned int outer_size, unsigned int inner_size) { log_softmax_fwd_kernel(src, dst, outer_size, inner_size); }
+    extern "C" __global__ void log_softmax_bwd_f32(const float* grad, const float* lsm_out, float* grad_input, unsigned int outer_size, unsigned int inner_size) { log_softmax_bwd_kernel(grad, lsm_out, grad_input, outer_size, inner_size); }
+    extern "C" __global__ void log_softmax_bwd_f16(const half* grad, const half* lsm_out, half* grad_input, unsigned int outer_size, unsigned int inner_size) { log_softmax_bwd_kernel(grad, lsm_out, grad_input, outer_size, inner_size); }
+
     template <typename T>
     __global__ void gather_kernel(const T* src, const index_t* indices, T* dst, unsigned int left_len, unsigned int src_dim, unsigned int dst_dim, unsigned int right_len) {
         unsigned int right = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1339,6 +1414,69 @@ mod imp {
             )
         }
 
+        /// Fused log-softmax forward: `dst[i] = src[i] - log(sum_j exp(src[j]))` per row.
+        ///
+        /// `outer_size * inner_size` must equal `layout.size()`. The input must be compact.
+        fn log_softmax_fwd(
+            &self,
+            layout: &Layout,
+            outer_size: usize,
+            inner_size: usize,
+        ) -> Result<Self> {
+            let src = self.compact(layout)?;
+            match &src.inner {
+                CudaInner::F16(s) => {
+                    let out = unsafe { alloc_uninit::<f16>(&src.runtime, outer_size * inner_size) }?;
+                    let outer = outer_size as u32;
+                    let inner = inner_size as u32;
+                    launch_reduce!(&src.runtime, "log_softmax_fwd_f16", outer_size, s, &out, &outer, &inner);
+                    Ok(Self { inner: CudaInner::F16(out), runtime: src.runtime.clone() })
+                }
+                CudaInner::F32(s) => {
+                    let out = unsafe { alloc_uninit::<f32>(&src.runtime, outer_size * inner_size) }?;
+                    let outer = outer_size as u32;
+                    let inner = inner_size as u32;
+                    launch_reduce!(&src.runtime, "log_softmax_fwd_f32", outer_size, s, &out, &outer, &inner);
+                    Ok(Self { inner: CudaInner::F32(out), runtime: src.runtime.clone() })
+                }
+                CudaInner::I64(_) => {
+                    Err(Error::NotImplemented("cuda log_softmax_fwd for i64 is not implemented"))
+                }
+            }
+        }
+
+        /// Fused log-softmax backward: `grad_input[i] = grad[i] - exp(lsm[i]) * sum_j grad[j]` per row.
+        ///
+        /// `lsm` is the saved log-softmax output from the forward pass.
+        fn log_softmax_bwd(
+            &self,
+            grad_layout: &Layout,
+            lsm: &Self,
+            lsm_layout: &Layout,
+            outer_size: usize,
+            inner_size: usize,
+        ) -> Result<Self> {
+            let grad = self.compact(grad_layout)?;
+            let lsm = lsm.compact(lsm_layout)?;
+            match (&grad.inner, &lsm.inner) {
+                (CudaInner::F16(g), CudaInner::F16(l)) => {
+                    let out = unsafe { alloc_uninit::<f16>(&grad.runtime, outer_size * inner_size) }?;
+                    let outer = outer_size as u32;
+                    let inner = inner_size as u32;
+                    launch_reduce!(&grad.runtime, "log_softmax_bwd_f16", outer_size, g, l, &out, &outer, &inner);
+                    Ok(Self { inner: CudaInner::F16(out), runtime: grad.runtime.clone() })
+                }
+                (CudaInner::F32(g), CudaInner::F32(l)) => {
+                    let out = unsafe { alloc_uninit::<f32>(&grad.runtime, outer_size * inner_size) }?;
+                    let outer = outer_size as u32;
+                    let inner = inner_size as u32;
+                    launch_reduce!(&grad.runtime, "log_softmax_bwd_f32", outer_size, g, l, &out, &outer, &inner);
+                    Ok(Self { inner: CudaInner::F32(out), runtime: grad.runtime.clone() })
+                }
+                _ => Err(Error::DTypeMismatch("log_softmax_bwd: dtype mismatch between grad and lsm".into())),
+            }
+        }
+
         fn dtype(&self) -> DType {
             match &self.inner {
                 CudaInner::F16(_) => DType::F16,
@@ -1487,6 +1625,12 @@ mod imp {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn log_sum_exp(&self, _: &Layout, _: usize, _: usize) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn log_softmax_fwd(&self, _: &Layout, _: usize, _: usize) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn log_softmax_bwd(&self, _: &Layout, _: &Self, _: &Layout, _: usize, _: usize) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn dtype(&self) -> DType {

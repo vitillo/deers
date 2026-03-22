@@ -1130,6 +1130,77 @@ impl TensorOp for LogSumExp {
     }
 }
 
+/// Fused log-softmax: `x[i] - log(sum_j exp(x[j]))` per row, single kernel on CUDA.
+///
+/// The forward saves the output for use in the backward pass to avoid recomputing softmax.
+#[derive(Debug)]
+pub struct FusedLogSoftmax {
+    arg: Tensor,
+    axis: usize,
+    /// Saved output (log-softmax result) for backward.
+    lsm_output: Option<Tensor>,
+}
+
+impl FusedLogSoftmax {
+    pub fn new(arg: Tensor, axis: usize) -> Result<Self> {
+        Ok(Self { arg, axis, lsm_output: None })
+    }
+}
+
+impl TensorOp for FusedLogSoftmax {
+    fn forward(mut self) -> Result<Tensor> {
+        let _profile = profile_like("log_softmax", &self.arg);
+        let axis = self.axis;
+        let inner_size = self.arg.layout().shape()[axis];
+        let outer_size = self.arg.layout().size() / inner_size;
+        let compact = self.arg.compact();
+        let out_storage =
+            compact.storage().log_softmax_fwd(compact.layout(), outer_size, inner_size)?;
+        let output = Tensor::new(
+            Arc::new(RwLock::new(out_storage)),
+            self.arg.layout().clone(),
+            false,
+            None,
+        );
+        self.lsm_output = Some(output.clone());
+        Ok(Tensor::new(
+            output.storage_clone(),
+            output.layout().clone(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let lsm = self.lsm_output.as_ref().expect("forward must run before backward");
+        let axis = self.axis;
+        let inner_size = self.arg.layout().shape()[axis];
+        let outer_size = self.arg.layout().size() / inner_size;
+        // Compact both inputs so the fused backward kernel sees contiguous layouts.
+        let grad_c = out_grad.compact();
+        let lsm_c = lsm.compact();
+        let grad_storage = grad_c.storage().log_softmax_bwd(
+            grad_c.layout(),
+            &lsm_c.storage(),
+            lsm_c.layout(),
+            outer_size,
+            inner_size,
+        )?;
+        let arg_grad = Tensor::new(
+            Arc::new(RwLock::new(grad_storage)),
+            self.arg.layout().clone(),
+            false,
+            None,
+        );
+        grads.accumulate(&self.arg, arg_grad);
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
 #[derive(Debug)]
 pub struct Compact {
     arg: Tensor,
