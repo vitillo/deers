@@ -317,6 +317,10 @@ mod imp {
         "index_select_f32",
         "index_add_f16",
         "index_add_f32",
+        "reduce_sum_par_f16",
+        "reduce_sum_par_f32",
+        "reduce_max_par_f16",
+        "reduce_max_par_f32",
     ];
 
     #[derive(Debug)]
@@ -1047,6 +1051,10 @@ mod imp {
         }
 
         fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
+            // Use parallel threadgroup reduce for large reduce dimensions,
+            // serial for small ones where threadgroup overhead dominates.
+            const PARALLEL_THRESHOLD: usize = 1024;
+
             if let (Some((ctx, input, _)), Some((_, output, out_len))) =
                 (self.accelerated(DType::F16), dst.accelerated(DType::F16))
             {
@@ -1054,16 +1062,29 @@ mod imp {
                 let reduce_size = layout.size() / out_len;
                 let meta =
                     ReduceMeta { outer_size: out_len as u32, reduce_size: reduce_size as u32 };
-                let kernel = match O::KERNEL {
-                    "reduce_sum" => "reduce_sum_f16",
-                    "reduce_max" => "reduce_max_f16",
-                    _ => unreachable!(),
-                };
-                ctx.dispatch_reduce(kernel, out_len, |encoder| {
-                    encoder.set_buffer(0, Some(input), 0);
-                    encoder.set_buffer(1, Some(output), 0);
-                    MpsContext::set_params(encoder, 2, &meta);
-                });
+                if reduce_size >= PARALLEL_THRESHOLD {
+                    let kernel = match O::KERNEL {
+                        "reduce_sum" => "reduce_sum_par_f16",
+                        "reduce_max" => "reduce_max_par_f16",
+                        _ => unreachable!(),
+                    };
+                    ctx.dispatch_reduce(kernel, out_len, |encoder| {
+                        encoder.set_buffer(0, Some(input), 0);
+                        encoder.set_buffer(1, Some(output), 0);
+                        MpsContext::set_params(encoder, 2, &meta);
+                    });
+                } else {
+                    let kernel = match O::KERNEL {
+                        "reduce_sum" => "reduce_sum_f16",
+                        "reduce_max" => "reduce_max_f16",
+                        _ => unreachable!(),
+                    };
+                    ctx.dispatch_1d(kernel, out_len, |encoder| {
+                        encoder.set_buffer(0, Some(input), 0);
+                        encoder.set_buffer(1, Some(output), 0);
+                        MpsContext::set_params(encoder, 2, &meta);
+                    });
+                }
                 return Ok(());
             }
 
@@ -1074,16 +1095,29 @@ mod imp {
                 let reduce_size = layout.size() / out_len;
                 let meta =
                     ReduceMeta { outer_size: out_len as u32, reduce_size: reduce_size as u32 };
-                let kernel = match O::KERNEL {
-                    "reduce_sum" => "reduce_sum_f32",
-                    "reduce_max" => "reduce_max_f32",
-                    _ => unreachable!(),
-                };
-                ctx.dispatch_reduce(kernel, out_len, |encoder| {
-                    encoder.set_buffer(0, Some(input), 0);
-                    encoder.set_buffer(1, Some(output), 0);
-                    MpsContext::set_params(encoder, 2, &meta);
-                });
+                if reduce_size >= PARALLEL_THRESHOLD {
+                    let kernel = match O::KERNEL {
+                        "reduce_sum" => "reduce_sum_par_f32",
+                        "reduce_max" => "reduce_max_par_f32",
+                        _ => unreachable!(),
+                    };
+                    ctx.dispatch_reduce(kernel, out_len, |encoder| {
+                        encoder.set_buffer(0, Some(input), 0);
+                        encoder.set_buffer(1, Some(output), 0);
+                        MpsContext::set_params(encoder, 2, &meta);
+                    });
+                } else {
+                    let kernel = match O::KERNEL {
+                        "reduce_sum" => "reduce_sum_f32",
+                        "reduce_max" => "reduce_max_f32",
+                        _ => unreachable!(),
+                    };
+                    ctx.dispatch_1d(kernel, out_len, |encoder| {
+                        encoder.set_buffer(0, Some(input), 0);
+                        encoder.set_buffer(1, Some(output), 0);
+                        MpsContext::set_params(encoder, 2, &meta);
+                    });
+                }
                 return Ok(());
             }
 
