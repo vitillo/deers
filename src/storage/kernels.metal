@@ -861,6 +861,158 @@ kernel void matmul_big_f16(
     if (row0 + 1 < meta.m && col0 + 1 < meta.n) c[(row0 + 1) * meta.n + col0 + 1] = half(acc11);
 }
 
+// --- Extra-large tile matrix multiply (64×64 output tile, 16×16 threads, 4×4 per thread) ---
+
+constant uint TILE_XL = 64;
+
+kernel void matmul_xl_f32(
+    device const float* lhs [[buffer(0)]],
+    device const float* rhs [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant MatmulMeta& meta [[buffer(3)]],
+    uint3 tid [[thread_position_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint batch_idx = gid.z;
+    if (batch_idx >= meta.batch) return;
+
+    device const float* a = lhs + batch_idx * meta.m * meta.k;
+    device const float* b = rhs + batch_idx * meta.k * meta.n;
+    device float* c = output + batch_idx * meta.m * meta.n;
+
+    // Each thread computes a 4×4 block
+    uint row0 = tgid.y * TILE_XL + tid.y * 4;
+    uint col0 = tgid.x * TILE_XL + tid.x * 4;
+
+    float acc[4][4] = {{0}};
+
+    // Use 64×16 tiles for A and 16×64 tiles for B to keep shared memory reasonable
+    const uint BK = 16;
+    threadgroup float tileA[TILE_XL][BK];
+    threadgroup float tileB[BK][TILE_XL];
+
+    uint num_tiles = (meta.k + BK - 1) / BK;
+    for (uint t = 0; t < num_tiles; t++) {
+        uint base_k = t * BK;
+
+        // Load A tile: 64 rows × 16 cols, 256 threads loading one element each
+        // Thread (tx, ty) loads element at (ty*4 + load_idx/16, load_idx%16) ...
+        // Simpler: each thread loads one element in the BK dimension
+        for (uint di = 0; di < 4; di++) {
+            uint ar = tgid.y * TILE_XL + tid.y * 4 + di;
+            uint ak = base_k + tid.x;
+            tileA[tid.y * 4 + di][tid.x] = (ar < meta.m && ak < meta.k) ? a[ar * meta.k + ak] : 0.0f;
+        }
+
+        // Load B tile: 16 rows × 64 cols
+        for (uint dj = 0; dj < 4; dj++) {
+            uint br = base_k + tid.y;
+            uint bc = tgid.x * TILE_XL + tid.x * 4 + dj;
+            tileB[tid.y][tid.x * 4 + dj] = (br < meta.k && bc < meta.n) ? b[br * meta.n + bc] : 0.0f;
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint kk = 0; kk < BK; kk++) {
+            float a0 = tileA[tid.y * 4][kk];
+            float a1 = tileA[tid.y * 4 + 1][kk];
+            float a2 = tileA[tid.y * 4 + 2][kk];
+            float a3 = tileA[tid.y * 4 + 3][kk];
+            float b0 = tileB[kk][tid.x * 4];
+            float b1 = tileB[kk][tid.x * 4 + 1];
+            float b2 = tileB[kk][tid.x * 4 + 2];
+            float b3 = tileB[kk][tid.x * 4 + 3];
+            acc[0][0] += a0 * b0; acc[0][1] += a0 * b1; acc[0][2] += a0 * b2; acc[0][3] += a0 * b3;
+            acc[1][0] += a1 * b0; acc[1][1] += a1 * b1; acc[1][2] += a1 * b2; acc[1][3] += a1 * b3;
+            acc[2][0] += a2 * b0; acc[2][1] += a2 * b1; acc[2][2] += a2 * b2; acc[2][3] += a2 * b3;
+            acc[3][0] += a3 * b0; acc[3][1] += a3 * b1; acc[3][2] += a3 * b2; acc[3][3] += a3 * b3;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    for (uint di = 0; di < 4; di++) {
+        for (uint dj = 0; dj < 4; dj++) {
+            uint r = row0 + di;
+            uint cl = col0 + dj;
+            if (r < meta.m && cl < meta.n) {
+                c[r * meta.n + cl] = acc[di][dj];
+            }
+        }
+    }
+}
+
+kernel void matmul_xl_f16(
+    device const half* lhs [[buffer(0)]],
+    device const half* rhs [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant MatmulMeta& meta [[buffer(3)]],
+    uint3 tid [[thread_position_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    uint batch_idx = gid.z;
+    if (batch_idx >= meta.batch) return;
+
+    device const half* a = lhs + batch_idx * meta.m * meta.k;
+    device const half* b = rhs + batch_idx * meta.k * meta.n;
+    device half* c = output + batch_idx * meta.m * meta.n;
+
+    uint row0 = tgid.y * TILE_XL + tid.y * 4;
+    uint col0 = tgid.x * TILE_XL + tid.x * 4;
+
+    float acc[4][4] = {{0}};
+
+    const uint BK = 16;
+    threadgroup half tileA[TILE_XL][BK];
+    threadgroup half tileB[BK][TILE_XL];
+
+    uint num_tiles = (meta.k + BK - 1) / BK;
+    for (uint t = 0; t < num_tiles; t++) {
+        uint base_k = t * BK;
+
+        for (uint di = 0; di < 4; di++) {
+            uint ar = tgid.y * TILE_XL + tid.y * 4 + di;
+            uint ak = base_k + tid.x;
+            tileA[tid.y * 4 + di][tid.x] = (ar < meta.m && ak < meta.k) ? a[ar * meta.k + ak] : half(0.0h);
+        }
+
+        for (uint dj = 0; dj < 4; dj++) {
+            uint br = base_k + tid.y;
+            uint bc = tgid.x * TILE_XL + tid.x * 4 + dj;
+            tileB[tid.y][tid.x * 4 + dj] = (br < meta.k && bc < meta.n) ? b[br * meta.n + bc] : half(0.0h);
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint kk = 0; kk < BK; kk++) {
+            float a0 = float(tileA[tid.y * 4][kk]);
+            float a1 = float(tileA[tid.y * 4 + 1][kk]);
+            float a2 = float(tileA[tid.y * 4 + 2][kk]);
+            float a3 = float(tileA[tid.y * 4 + 3][kk]);
+            float b0 = float(tileB[kk][tid.x * 4]);
+            float b1 = float(tileB[kk][tid.x * 4 + 1]);
+            float b2 = float(tileB[kk][tid.x * 4 + 2]);
+            float b3 = float(tileB[kk][tid.x * 4 + 3]);
+            acc[0][0] += a0 * b0; acc[0][1] += a0 * b1; acc[0][2] += a0 * b2; acc[0][3] += a0 * b3;
+            acc[1][0] += a1 * b0; acc[1][1] += a1 * b1; acc[1][2] += a1 * b2; acc[1][3] += a1 * b3;
+            acc[2][0] += a2 * b0; acc[2][1] += a2 * b1; acc[2][2] += a2 * b2; acc[2][3] += a2 * b3;
+            acc[3][0] += a3 * b0; acc[3][1] += a3 * b1; acc[3][2] += a3 * b2; acc[3][3] += a3 * b3;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    for (uint di = 0; di < 4; di++) {
+        for (uint dj = 0; dj < 4; dj++) {
+            uint r = row0 + di;
+            uint cl = col0 + dj;
+            if (r < meta.m && cl < meta.n) {
+                c[r * meta.n + cl] = half(acc[di][dj]);
+            }
+        }
+    }
+}
+
 // --- Gather/scatter ---
 
 kernel void gather_f16(
