@@ -189,11 +189,9 @@ impl Module for Linear {
     }
 
     fn parameters(&self) -> Vec<Parameter> {
-        let mut parameters = vec![self.weight.clone()];
-        if let Some(bias) = &self.bias {
-            parameters.push(bias.clone());
-        }
-        parameters
+        std::iter::once(self.weight.clone())
+            .chain(self.bias.iter().cloned())
+            .collect()
     }
 }
 
