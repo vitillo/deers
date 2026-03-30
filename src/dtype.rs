@@ -5,7 +5,7 @@
 
 use half::f16;
 
-use crate::storage::CpuStorage;
+use crate::storage::{BackendStorage, CpuStorage};
 
 /// Supported tensor element types.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -39,14 +39,14 @@ impl WithDType for f16 {
     fn to_vec(storage: &CpuStorage) -> Vec<Self> {
         match storage {
             CpuStorage::F16(vec) => vec.clone(),
-            _ => todo!(), // type mismatch error
+            other => panic!("expected F16 storage but got {:?}", other.dtype()),
         }
     }
 
     fn as_slice(storage: &CpuStorage) -> &[Self] {
         match storage {
             CpuStorage::F16(vec) => vec.as_slice(),
-            _ => todo!(), // type mismatch error
+            other => panic!("expected F16 storage but got {:?}", other.dtype()),
         }
     }
 }
@@ -55,14 +55,14 @@ impl WithDType for f32 {
     fn to_vec(storage: &CpuStorage) -> Vec<Self> {
         match storage {
             CpuStorage::F32(vec) => vec.clone(),
-            _ => todo!(), // type mismatch error
+            other => panic!("expected F32 storage but got {:?}", other.dtype()),
         }
     }
 
     fn as_slice(storage: &CpuStorage) -> &[Self] {
         match storage {
             CpuStorage::F32(vec) => vec.as_slice(),
-            _ => todo!(), // type mismatch error
+            other => panic!("expected F32 storage but got {:?}", other.dtype()),
         }
     }
 }
@@ -71,14 +71,14 @@ impl WithDType for i64 {
     fn to_vec(storage: &CpuStorage) -> Vec<Self> {
         match storage {
             CpuStorage::I64(vec) => vec.clone(),
-            _ => todo!(),
+            other => panic!("expected I64 storage but got {:?}", other.dtype()),
         }
     }
 
     fn as_slice(storage: &CpuStorage) -> &[Self] {
         match storage {
             CpuStorage::I64(vec) => vec.as_slice(),
-            _ => todo!(),
+            other => panic!("expected I64 storage but got {:?}", other.dtype()),
         }
     }
 }
