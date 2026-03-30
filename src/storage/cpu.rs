@@ -747,7 +747,7 @@ impl BackendStorage for CpuStorage {
                 Ok(CpuStorage::F32(out))
             }
             (a, b) => {
-                Err(Error::DTypeMismatch(format!("matmul: {:?} vs {:?}", a.dtype(), b.dtype())))
+                Err(Error::DTypeMismatch(format!("matmul: {} vs {}", a.dtype(), b.dtype())))
             }
         }
     }
