@@ -313,16 +313,27 @@ fn resolve_token_bins(options: &TrainOptions, tokenizer: &Tokenizer) -> TokenBin
         && (options.prepare || !train.exists() || !val.exists())
     {
         if !options.text_path.exists() {
-            eprintln!("error: text file not found: {}", options.text_path.display());
-            eprintln!();
-            eprintln!("Download the TinyStories dataset from:");
-            eprintln!(
-                "  https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt"
-            );
-            eprintln!();
-            eprintln!("and place it at {}", options.text_path.display());
-            eprintln!("or pass --text-path <path> to use a different location.");
-            process::exit(1);
+            let url = "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt";
+            println!("Dataset not found at {}. Downloading from Hugging Face...", options.text_path.display());
+            if let Some(parent) = options.text_path.parent() {
+                fs::create_dir_all(parent).unwrap_or_else(|e| {
+                    eprintln!("error: failed to create directory {}: {e}", parent.display());
+                    process::exit(1);
+                });
+            }
+            let response = ureq::get(url).call().unwrap_or_else(|e| {
+                eprintln!("error: failed to download dataset: {e}");
+                process::exit(1);
+            });
+            let mut dest = fs::File::create(&options.text_path).unwrap_or_else(|e| {
+                eprintln!("error: failed to create {}: {e}", options.text_path.display());
+                process::exit(1);
+            });
+            std::io::copy(&mut response.into_body().into_reader(), &mut dest).unwrap_or_else(|e| {
+                eprintln!("error: failed to write dataset: {e}");
+                process::exit(1);
+            });
+            println!("Downloaded to {}", options.text_path.display());
         }
         println!(
             "Preparing token bins from {} into {}...",
