@@ -1,8 +1,4 @@
-# DEERS
-
-## Purpose
-
-DEERS is a minimal PyTorch clone in Rust for learning. Optimize for readability and understanding over production-level performance or abstraction.
+# Contributing to DEERS
 
 ## Design principles
 
@@ -11,7 +7,6 @@ DEERS is a minimal PyTorch clone in Rust for learning. Optimize for readability 
 - Compose from existing primitives unless a lower-level implementation avoids a real backend cost.
 - Be reasonably efficient on every backend. Avoid unnecessary CPU <-> accelerator copies or materialization roundtrips when work can stay on-device.
 - Follow PyTorch and candle conventions for API shape and placement when they fit the project goals.
-- Work backwards from `nanochat`: only implement what the target model actually needs.
 - Build incrementally: one small piece at a time.
 - Prioritize correctness, with tests for new behavior and gradients where applicable.
 
@@ -27,14 +22,6 @@ DEERS is a minimal PyTorch clone in Rust for learning. Optimize for readability 
 - Keep `Tensor` focused on general tensor operations.
 - Keep `nn` focused on modules.
 - Put stateless model-building helpers in `nn::functional`.
-
-## Process
-
-- Explain the reasoning behind design choices, not just the diff.
-- When multiple valid approaches exist, present the options and tradeoffs.
-- Don’t preserve awkward code just to preserve old tests; update tests when the design improves.
-- Document every public struct and public method with a Rust doc comment.
-- Before adding a tensor/autograd fallback, check whether it forces CPU <-> accelerator copies on MPS. If the op already lives at storage level, prefer keeping the fallback there or explicitly call out the backend cost.
 
 ## Testing
 

@@ -2,6 +2,10 @@
 name = "deers"
 version = "0.1.0"
 edition = "2024"
+description = "A minimal deep learning framework in Rust, built for understanding"
+license = "MIT"
+repository = "https://github.com/vitillo/deers"
+authors = ["Roberto Vitillo <ra.vitillo@gmail.com>"]
 
 [dependencies]
 thiserror = "2.0.18"
