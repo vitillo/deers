@@ -5,6 +5,7 @@ use crate::error::Result;
 use crate::nn::{Linear, Module, ParamBuilder, Parameter, ReLU};
 
 /// A two-layer MLP for MNIST classification.
+#[derive(Debug)]
 pub struct MnistMLP {
     fc1: Linear,
     relu: ReLU,

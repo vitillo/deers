@@ -11,7 +11,7 @@ use crate::tensor::Tensor;
 ///
 /// Derefs to `Tensor`, so all tensor methods work directly on a `Parameter`.
 /// Clone is cheap (shares the underlying Arc storage).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Parameter(Tensor);
 
 impl Parameter {

@@ -73,6 +73,7 @@ pub fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
 }
 
 /// Minimal causal self-attention with bias-free projections and RoPE on queries/keys.
+#[derive(Debug)]
 pub struct CausalSelfAttention {
     n_head: usize,
     head_dim: usize,
@@ -165,6 +166,7 @@ impl CausalSelfAttention {
 }
 
 /// Minimal transformer MLP with bias-free projections and a `relu^2` activation.
+#[derive(Debug)]
 pub struct MLP {
     up_proj: Linear,
     down_proj: Linear,
@@ -205,6 +207,7 @@ impl Module for MLP {
 }
 
 /// Pre-norm residual GPT block.
+#[derive(Debug)]
 pub struct Block {
     norm1: RMSNorm,
     attn: CausalSelfAttention,
@@ -281,6 +284,7 @@ impl GPTConfig {
 }
 
 /// Minimal GPT model: token embedding, decoder blocks, final norm, and LM head.
+#[derive(Debug)]
 pub struct GPT {
     vocab_size: usize,
     wte: Embedding,

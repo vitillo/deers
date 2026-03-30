@@ -17,6 +17,7 @@ use crate::{Device, Tensor};
 ///
 /// Images are `(N, 28, 28)` tensors with pixel values normalized to `[0, 1]`.
 /// Labels are `(N,)` tensors with integer class values `0..=9` stored as i64.
+#[derive(Debug)]
 pub struct MNISTDataset {
     /// Training images shaped `(60000, 28, 28)`.
     pub train_images: Tensor,
@@ -101,6 +102,7 @@ impl MNISTDataset {
 ///
 /// This is the simplest approach: concatenate all tokens and chunk.
 /// Tail tokens that don't fill a complete row are discarded.
+#[derive(Debug)]
 pub struct TextDataset {
     /// All rows packed into a single `(num_sequences, seq_len + 1)` i64 tensor.
     pub data: Tensor,
@@ -160,6 +162,15 @@ impl TextDataset {
 pub struct TokenBinDataset {
     tokens: Vec<u16>,
     seq_len: usize,
+}
+
+impl std::fmt::Debug for TokenBinDataset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenBinDataset")
+            .field("num_tokens", &self.tokens.len())
+            .field("seq_len", &self.seq_len)
+            .finish()
+    }
 }
 
 impl TokenBinDataset {

@@ -8,6 +8,7 @@ use crate::nn::Parameter;
 use crate::tensor::{Tensor, TensorId};
 
 /// Stochastic gradient descent optimizer.
+#[derive(Debug)]
 pub struct SGD {
     parameters: Vec<Parameter>,
     lr: f64,
@@ -46,6 +47,7 @@ impl SGD {
 }
 
 /// Configuration for the AdamW optimizer, separate from its runtime state.
+#[derive(Debug)]
 pub struct AdamWConfig {
     lr: f64,
     betas: (f64, f64),
@@ -110,6 +112,7 @@ impl AdamWConfig {
 ///     .weight_decay(0.01)
 ///     .build(model.parameters());
 /// ```
+#[derive(Debug)]
 pub struct AdamW {
     parameters: Vec<Parameter>,
     lr: f64,
@@ -315,6 +318,7 @@ pub trait LrSchedule {
 /// 0.0 +------------------------
 ///     0  warmup        total
 /// ```
+#[derive(Debug)]
 pub struct WarmupWarmdown {
     warmup_steps: usize,
     total_steps: usize,
