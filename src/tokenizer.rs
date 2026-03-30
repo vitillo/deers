@@ -166,7 +166,7 @@ fn tokenize_text_file_to_bin(path: &Path, tokenizer: &Tokenizer, out_path: &Path
                 format_mib(total_bytes),
                 total_tokens
             );
-            std::io::stdout().flush().unwrap();
+            std::io::stdout().flush().expect("failed to flush stdout");
             printed_progress = true;
             next_report = next_report.saturating_add(report_bytes);
         }

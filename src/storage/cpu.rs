@@ -336,12 +336,12 @@ impl BackendStorage for CpuStorage {
         match (self, dst) {
             (CpuStorage::F16(src), CpuStorage::F16(dst)) => {
                 for (i, chunk) in src.chunks(reduce_size).enumerate() {
-                    dst[i] = chunk.iter().copied().reduce(O::f16).unwrap();
+                    dst[i] = chunk.iter().copied().reduce(O::f16).expect("empty reduce chunk");
                 }
             }
             (CpuStorage::F32(src), CpuStorage::F32(dst)) => {
                 for (i, chunk) in src.chunks(reduce_size).enumerate() {
-                    dst[i] = chunk.iter().copied().reduce(O::f32).unwrap();
+                    dst[i] = chunk.iter().copied().reduce(O::f32).expect("empty reduce chunk");
                 }
             }
             (src, dst) => {
