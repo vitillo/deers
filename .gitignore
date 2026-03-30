@@ -1,8 +1,7 @@
 /target
 /logs
 /out/
-/data/TinyStoriesV2-GPT4-train.txt
-/data/tinystories_gpt2/
+/data/
 /bench.log
 /results.tsv
 /.vscode

@@ -1,4 +1,4 @@
-# Deers
+# deers
 
 A minimal deep learning framework in Rust inspired by PyTorch and candle. Built for understanding, not production: think "PyTorch from scratch" in a small codebase you can actually read.
 
@@ -66,7 +66,7 @@ The trainer auto-downloads and tokenizes the dataset on first run, then periodic
 step    50/12000 | train_loss 9.2451 | lr 5.00e-05 | 1.204s | 4267 tok/s
   sample: Once upon a time the the of a...
 step   500/12000 | train_loss 4.8320 | lr 5.00e-04 | 1.156s | 4441 tok/s
-  sample: Once upon a time there was a boy named Carl. He liked to play in the park...
+  sample: Once upon a time there was a dragon named Carl...
 ```
 
 See [`examples/mnist_train.rs`](examples/mnist_train.rs) for a simpler MNIST classifier starting point.
