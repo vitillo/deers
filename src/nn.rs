@@ -257,6 +257,7 @@ impl Module for ReLU {
 }
 
 /// A sequence of modules applied in order.
+#[derive(Default)]
 pub struct Sequential {
     layers: Vec<Box<dyn Module>>,
 }
@@ -286,7 +287,7 @@ impl Module for Sequential {
 
 /// Creates an empty Sequential to build with `.add()`.
 pub fn seq() -> Sequential {
-    Sequential { layers: vec![] }
+    Sequential::default()
 }
 
 #[cfg(test)]

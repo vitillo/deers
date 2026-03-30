@@ -46,6 +46,7 @@ impl SGD {
 }
 
 /// Configuration for the AdamW optimizer, separate from its runtime state.
+#[derive(Clone, Debug)]
 pub struct AdamWConfig {
     lr: f64,
     betas: (f64, f64),
