@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use std::fmt;
 use std::ops::{Index, IndexMut};
 
 /// The dimensions of a tensor (e.g. `[2, 3, 4]` for a 3-D tensor).
@@ -10,6 +11,19 @@ use std::ops::{Index, IndexMut};
 #[derive(Debug, PartialEq, PartialOrd, Clone)]
 pub struct Shape {
     shape: Vec<usize>,
+}
+
+impl fmt::Display for Shape {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[")?;
+        for (i, dim) in self.shape.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", dim)?;
+        }
+        write!(f, "]")
+    }
 }
 
 impl Shape {

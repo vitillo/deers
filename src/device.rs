@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+use std::fmt;
+
 use crate::{
     dtype::DType,
     error::{Error, Result},
@@ -17,6 +19,16 @@ pub enum Device {
     Cuda,
     /// Apple Metal Performance Shaders backend.
     Mps,
+}
+
+impl fmt::Display for Device {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Device::Cpu => write!(f, "cpu"),
+            Device::Cuda => write!(f, "cuda"),
+            Device::Mps => write!(f, "mps"),
+        }
+    }
 }
 
 impl Device {
