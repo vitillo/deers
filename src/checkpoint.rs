@@ -37,10 +37,10 @@ impl View for &TensorBlob {
 
 /// Saves a named tensor map to a safetensors file at `path`.
 pub fn save_tensors(path: &Path, tensors: &BTreeMap<String, Tensor>) -> Result<()> {
-    let mut blobs = Vec::with_capacity(tensors.len());
-    for (name, tensor) in tensors {
-        blobs.push((name.clone(), tensor_blob(tensor)?));
-    }
+    let blobs: Vec<_> = tensors
+        .iter()
+        .map(|(name, tensor)| Ok((name.clone(), tensor_blob(tensor)?)))
+        .collect::<Result<_>>()?;
     let views = blobs.iter().map(|(name, tensor)| (name.as_str(), tensor)).collect::<Vec<_>>();
     serialize_to_file(views, None, path)?;
     Ok(())
@@ -106,24 +106,27 @@ fn tensor_blob(tensor: &Tensor) -> Result<TensorBlob> {
     let shape = tensor.layout().shape().iter().copied().collect::<Vec<_>>();
     let blob = match tensor.dtype() {
         DType::F16 => {
-            let mut data = Vec::with_capacity(tensor.layout().size() * 2);
-            for value in tensor.to_vec::<f16>()? {
-                data.extend_from_slice(&value.to_bits().to_le_bytes());
-            }
+            let data = tensor
+                .to_vec::<f16>()?
+                .iter()
+                .flat_map(|v| v.to_bits().to_le_bytes())
+                .collect();
             TensorBlob { dtype: SafeDtype::F16, shape, data }
         }
         DType::F32 => {
-            let mut data = Vec::with_capacity(tensor.layout().size() * 4);
-            for value in tensor.to_vec::<f32>()? {
-                data.extend_from_slice(&value.to_le_bytes());
-            }
+            let data = tensor
+                .to_vec::<f32>()?
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
             TensorBlob { dtype: SafeDtype::F32, shape, data }
         }
         DType::I64 => {
-            let mut data = Vec::with_capacity(tensor.layout().size() * 8);
-            for value in tensor.to_vec::<i64>()? {
-                data.extend_from_slice(&value.to_le_bytes());
-            }
+            let data = tensor
+                .to_vec::<i64>()?
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
             TensorBlob { dtype: SafeDtype::I64, shape, data }
         }
     };
