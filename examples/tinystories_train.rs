@@ -211,7 +211,9 @@ fn train_step(
     }
 
     let grad_norm = clip_grad_norm(parameters, &mut accumulated, options.max_grad_norm).unwrap();
-    opt.step_with_grads(&accumulated).unwrap();
+    if grad_norm.is_finite() {
+        opt.step_with_grads(&accumulated).unwrap();
+    }
     (total_loss / options.grad_accum_steps as f32, grad_norm)
 }
 

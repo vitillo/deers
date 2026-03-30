@@ -275,6 +275,9 @@ pub fn clip_grad_norm(
 
     let total_norm = total.sqrt();
     let total_norm_value = total_norm.to_vec::<f32>()?[0];
+    if !total_norm_value.is_finite() {
+        return Ok(total_norm_value);
+    }
     if total_norm_value <= max_norm as f32 {
         return Ok(total_norm_value);
     }
