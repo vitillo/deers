@@ -3,12 +3,14 @@
 
 #![allow(dead_code)]
 
+use std::fmt;
+
 use half::f16;
 
 use crate::storage::CpuStorage;
 
 /// Supported tensor element types.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DType {
     /// IEEE half-precision floating point.
     F16,
@@ -16,6 +18,16 @@ pub enum DType {
     F32,
     /// 64-bit signed integer.
     I64,
+}
+
+impl fmt::Display for DType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DType::F16 => write!(f, "f16"),
+            DType::F32 => write!(f, "f32"),
+            DType::I64 => write!(f, "i64"),
+        }
+    }
 }
 
 impl DType {
