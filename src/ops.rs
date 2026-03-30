@@ -1,3 +1,8 @@
+//! Differentiable tensor operations and the [`TensorOp`] trait.
+//!
+//! Each operation implements `forward`, `backward`, and `dependencies` so the
+//! autograd engine can build and traverse the computation graph.
+
 #![allow(dead_code)]
 
 use std::sync::{Arc, RwLock};

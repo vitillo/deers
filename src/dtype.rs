@@ -1,3 +1,6 @@
+//! Element types (`F16`, `F32`, `I64`) and the [`WithDType`] trait for
+//! projecting Rust scalars into and out of tensor storage.
+
 #![allow(dead_code)]
 
 use half::f16;

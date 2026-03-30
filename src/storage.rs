@@ -1,3 +1,6 @@
+//! Backend storage dispatch (CPU, CUDA, MPS) and the [`BackendStorage`] trait
+//! that each backend implements.
+
 #![allow(dead_code)]
 
 mod cpu;

@@ -1,3 +1,6 @@
+//! Trainable parameters with gradient tracking, in-place update, and
+//! hierarchical naming via [`ParamStore`] and [`ParamBuilder`].
+
 use std::ops::Deref;
 
 use crate::Device;

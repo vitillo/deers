@@ -1,3 +1,5 @@
+//! Tensor shape, strides, and memory layout metadata.
+
 #![allow(dead_code)]
 
 use std::ops::{Index, IndexMut};

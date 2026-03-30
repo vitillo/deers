@@ -1,3 +1,8 @@
+//! Dataset loaders for training and evaluation.
+//!
+//! Includes MNIST (auto-downloaded IDX files), a text dataset for
+//! next-token prediction, and a flat token-bin format for large corpora.
+
 #![allow(dead_code)]
 
 use rand::RngExt;

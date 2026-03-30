@@ -1,3 +1,6 @@
+//! Thread-local operation profiler for recording per-op call counts, wall
+//! time, device execution time, and allocation sizes.
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;

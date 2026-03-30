@@ -1,3 +1,6 @@
+//! Apple Metal (MPS) tensor storage with pre-compiled shaders and tiled
+//! matmul kernels.
+
 use std::borrow::Borrow;
 
 use half::f16;

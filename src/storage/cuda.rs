@@ -1,3 +1,5 @@
+//! CUDA tensor storage with JIT-compiled PTX kernels and cuBLAS matmul.
+
 use std::borrow::Borrow;
 
 use crate::{

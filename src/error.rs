@@ -1,3 +1,5 @@
+//! Library-wide error types and the [`Result`] alias.
+
 use core::fmt;
 use std::io;
 

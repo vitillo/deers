@@ -1,3 +1,5 @@
+//! Safetensors-based checkpoint serialization for model and optimizer state.
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;

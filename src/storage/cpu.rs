@@ -1,3 +1,5 @@
+//! CPU tensor storage backed by typed `Vec` buffers with strided kernels.
+
 use std::borrow::Borrow;
 
 use half::f16;

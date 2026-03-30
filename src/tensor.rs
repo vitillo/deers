@@ -1,3 +1,6 @@
+//! The central [`Tensor`] type: a reference-counted, multi-dimensional array
+//! with lazy autograd graph construction and operator overloading.
+
 #![allow(dead_code)]
 
 use std::borrow::Borrow;

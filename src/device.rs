@@ -1,3 +1,5 @@
+//! Compute devices (CPU, CUDA, MPS) and backend availability checks.
+
 #![allow(dead_code)]
 
 use crate::{

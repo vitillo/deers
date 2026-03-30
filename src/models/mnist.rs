@@ -1,3 +1,5 @@
+//! Two-layer MLP for MNIST digit classification.
+
 use crate::Tensor;
 use crate::error::Result;
 use crate::nn::{Linear, Module, ParamBuilder, Parameter, ReLU};

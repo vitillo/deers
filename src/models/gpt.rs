@@ -1,3 +1,6 @@
+//! Decoder-only GPT language model with multi-head self-attention, RoPE
+//! positional embeddings, RMSNorm, and a feed-forward MLP block.
+
 use half::f16;
 
 use crate::error::Result;

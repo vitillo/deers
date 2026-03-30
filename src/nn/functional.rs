@@ -1,3 +1,6 @@
+//! Stateless helper functions for building neural networks (causal masks,
+//! composable primitives).
+
 use half::f16;
 
 use crate::{DType, Device, Tensor};

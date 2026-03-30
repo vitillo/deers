@@ -1,3 +1,8 @@
+//! Reverse-mode automatic differentiation.
+//!
+//! [`Tensor::backward`] walks the computation graph in reverse topological
+//! order and accumulates gradients into a [`GradientStore`].
+
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
