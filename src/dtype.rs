@@ -8,7 +8,7 @@ use half::f16;
 use crate::storage::CpuStorage;
 
 /// Supported tensor element types.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DType {
     /// IEEE half-precision floating point.
     F16,
