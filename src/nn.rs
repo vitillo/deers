@@ -17,7 +17,7 @@ use crate::{DType, Device};
 pub use parameter::Parameter;
 
 /// A named registry of parameters for checkpoint save/load.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ParamStore {
     params: Rc<RefCell<BTreeMap<String, Parameter>>>,
 }
@@ -89,7 +89,7 @@ impl ParamStore {
 }
 
 /// A lightweight builder that prefixes parameter names during construction.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ParamBuilder {
     store: ParamStore,
     prefix: String,
@@ -140,6 +140,7 @@ pub trait Module {
 }
 
 /// Fully connected layer: `y = x @ weight` (+ optional bias).
+#[derive(Debug)]
 pub struct Linear {
     weight: Parameter,
     bias: Option<Parameter>,
@@ -198,6 +199,7 @@ impl Module for Linear {
 }
 
 /// Embedding lookup table: maps integer indices to dense vectors.
+#[derive(Debug)]
 pub struct Embedding {
     weight: Parameter,
 }
@@ -227,6 +229,7 @@ impl Module for Embedding {
 }
 
 /// RMSNorm: `x / sqrt(mean(x²) + eps)`.
+#[derive(Debug)]
 pub struct RMSNorm {
     eps: f64,
 }
@@ -248,6 +251,7 @@ impl Module for RMSNorm {
 }
 
 /// Element-wise ReLU activation.
+#[derive(Debug)]
 pub struct ReLU;
 
 impl Module for ReLU {
@@ -259,6 +263,12 @@ impl Module for ReLU {
 /// A sequence of modules applied in order.
 pub struct Sequential {
     layers: Vec<Box<dyn Module>>,
+}
+
+impl std::fmt::Debug for Sequential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Sequential({} layers)", self.layers.len())
+    }
 }
 
 impl Sequential {
