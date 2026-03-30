@@ -30,9 +30,7 @@ impl Module for MnistMLP {
     }
 
     fn parameters(&self) -> Vec<Parameter> {
-        let mut parameters = self.fc1.parameters();
-        parameters.extend(self.fc2.parameters());
-        parameters
+        self.fc1.parameters().into_iter().chain(self.fc2.parameters()).collect()
     }
 }
 

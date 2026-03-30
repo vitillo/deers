@@ -44,7 +44,7 @@ impl ParamStore {
 
     /// Returns every registered parameter without its names.
     pub fn parameters(&self) -> Vec<Parameter> {
-        self.named_parameters().into_iter().map(|(_, parameter)| parameter).collect()
+        self.params.borrow().values().cloned().collect()
     }
 
     /// Saves the current parameter values as a safetensors checkpoint.
@@ -189,11 +189,9 @@ impl Module for Linear {
     }
 
     fn parameters(&self) -> Vec<Parameter> {
-        let mut parameters = vec![self.weight.clone()];
-        if let Some(bias) = &self.bias {
-            parameters.push(bias.clone());
-        }
-        parameters
+        std::iter::once(self.weight.clone())
+            .chain(self.bias.iter().cloned())
+            .collect()
     }
 }
 

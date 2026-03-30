@@ -148,11 +148,10 @@ impl CausalSelfAttention {
 
     /// Returns the trainable parameters owned by the attention module.
     pub fn parameters(&self) -> Vec<Parameter> {
-        let mut parameters = self.q_proj.parameters();
-        parameters.extend(self.k_proj.parameters());
-        parameters.extend(self.v_proj.parameters());
-        parameters.extend(self.out_proj.parameters());
-        parameters
+        [&self.q_proj, &self.k_proj, &self.v_proj, &self.out_proj]
+            .iter()
+            .flat_map(|proj| proj.parameters())
+            .collect()
     }
 
     /// Moves the attention parameters to `device`.
@@ -198,9 +197,7 @@ impl Module for MLP {
     }
 
     fn parameters(&self) -> Vec<Parameter> {
-        let mut parameters = self.up_proj.parameters();
-        parameters.extend(self.down_proj.parameters());
-        parameters
+        self.up_proj.parameters().into_iter().chain(self.down_proj.parameters()).collect()
     }
 }
 
@@ -238,9 +235,7 @@ impl Block {
 
     /// Returns the trainable parameters owned by the block.
     pub fn parameters(&self) -> Vec<Parameter> {
-        let mut parameters = self.attn.parameters();
-        parameters.extend(self.mlp.parameters());
-        parameters
+        self.attn.parameters().into_iter().chain(self.mlp.parameters()).collect()
     }
 
     /// Moves the block parameters to `device`.
@@ -352,12 +347,12 @@ impl GPT {
 
     /// Returns the trainable parameters owned by the model.
     pub fn parameters(&self) -> Vec<Parameter> {
-        let mut parameters = self.wte.parameters();
-        for block in &self.blocks {
-            parameters.extend(block.parameters());
-        }
-        parameters.extend(self.lm_head.parameters());
-        parameters
+        self.wte
+            .parameters()
+            .into_iter()
+            .chain(self.blocks.iter().flat_map(|b| b.parameters()))
+            .chain(self.lm_head.parameters())
+            .collect()
     }
 
     /// Moves the model parameters and rotary caches to `device`.
