@@ -119,7 +119,7 @@ impl Tensor {
 
     /// Returns a read guard to the underlying storage.
     pub fn storage(&self) -> RwLockReadGuard<'_, Storage> {
-        self.0.storage.read().unwrap()
+        self.0.storage.read().expect("storage RwLock poisoned")
     }
 
     pub(crate) fn storage_clone(&self) -> Arc<RwLock<Storage>> {
@@ -128,7 +128,7 @@ impl Tensor {
 
     /// Returns a write guard to the underlying storage.
     pub(crate) fn storage_mut(&self) -> RwLockWriteGuard<'_, Storage> {
-        self.0.storage.write().unwrap()
+        self.0.storage.write().expect("storage RwLock poisoned")
     }
 
     /// Returns the layout (shape, strides, offset) of this tensor.

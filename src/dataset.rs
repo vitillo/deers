@@ -32,7 +32,7 @@ pub struct MNISTDataset {
 
 impl MNISTDataset {
     fn parse_images(image_path: &Path) -> Result<Tensor> {
-        let mut file = File::open(image_path).unwrap();
+        let mut file = File::open(image_path)?;
         let magic = read_u32(&mut file)?;
         assert_eq!(magic, 2051);
 
@@ -215,25 +215,25 @@ fn download_if_missing(url: &str, path: &Path) {
         return;
     }
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap();
+        fs::create_dir_all(parent).expect("failed to create download directory");
     }
 
     let part_path = path.with_extension("part");
     println!("Downloading {url}");
     let response = ureq::get(url).call().expect("download failed");
     let mut reader = response.into_body().into_reader();
-    let mut file = File::create(&part_path).unwrap();
-    std::io::copy(&mut reader, &mut file).unwrap();
-    fs::rename(&part_path, path).unwrap();
+    let mut file = File::create(&part_path).expect("failed to create download file");
+    std::io::copy(&mut reader, &mut file).expect("failed to write downloaded data");
+    fs::rename(&part_path, path).expect("failed to rename downloaded file");
     println!("Saved to {}", path.display());
 }
 
 /// Decompresses a `.gz` file to the given output path.
 fn decompress_gz(gz_path: &Path, out_path: &Path) {
-    let gz_file = File::open(gz_path).unwrap();
+    let gz_file = File::open(gz_path).expect("failed to open gzip file");
     let mut decoder = flate2::read::GzDecoder::new(gz_file);
-    let mut out_file = File::create(out_path).unwrap();
-    std::io::copy(&mut decoder, &mut out_file).unwrap();
+    let mut out_file = File::create(out_path).expect("failed to create decompressed output file");
+    std::io::copy(&mut decoder, &mut out_file).expect("failed to decompress gzip data");
 }
 
 fn read_u32(reader: &mut impl Read) -> Result<u32> {
