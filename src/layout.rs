@@ -7,7 +7,7 @@ use std::ops::{Index, IndexMut};
 /// The dimensions of a tensor (e.g. `[2, 3, 4]` for a 3-D tensor).
 ///
 /// Can be created from tuples: `Shape::from((2, 3))` or from `Vec<usize>`.
-#[derive(Debug, PartialEq, PartialOrd, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct Shape {
     shape: Vec<usize>,
 }
@@ -87,7 +87,7 @@ impl_from_tuple!(Shape 0 usize, 1 usize, 2 usize);
 /// Per-dimension byte offsets that map logical indices to storage positions.
 ///
 /// A stride of 0 indicates a broadcasted dimension.
-#[derive(Debug, PartialEq, PartialOrd, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct Strides(pub Vec<isize>);
 
 impl Strides {
@@ -133,7 +133,7 @@ impl From<Vec<isize>> for Strides {
 /// Combines [`Shape`] (logical dimensions), [`Strides`] (memory stepping),
 /// and an offset into the storage buffer. View operations like `permute` and
 /// `broadcast` change the layout without copying data.
-#[derive(Debug, PartialEq, PartialOrd, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct Layout {
     pub shape: Shape,
     pub strides: Strides,
