@@ -134,7 +134,13 @@ pub struct EWiseAdd {
 
 impl EWiseAdd {
     pub fn new(arg1: Tensor, arg2: Tensor) -> Result<Self> {
-        assert!(arg1.layout().shape() == arg2.layout().shape());
+        if arg1.layout().shape() != arg2.layout().shape() {
+            return Err(Error::LayoutMismatch(format!(
+                "add: shape {:?} does not match {:?}",
+                arg1.layout().shape(),
+                arg2.layout().shape()
+            )));
+        }
         Ok(Self { arg1, arg2 })
     }
 }
@@ -174,7 +180,13 @@ pub struct EWiseSub {
 
 impl EWiseSub {
     pub fn new(arg1: Tensor, arg2: Tensor) -> Result<Self> {
-        assert!(arg1.layout().shape() == arg2.layout().shape());
+        if arg1.layout().shape() != arg2.layout().shape() {
+            return Err(Error::LayoutMismatch(format!(
+                "sub: shape {:?} does not match {:?}",
+                arg1.layout().shape(),
+                arg2.layout().shape()
+            )));
+        }
         Ok(Self { arg1, arg2 })
     }
 }
@@ -214,7 +226,13 @@ pub struct EWiseMul {
 
 impl EWiseMul {
     pub fn new(arg1: Tensor, arg2: Tensor) -> Result<Self> {
-        assert!(arg1.layout().shape() == arg2.layout().shape());
+        if arg1.layout().shape() != arg2.layout().shape() {
+            return Err(Error::LayoutMismatch(format!(
+                "mul: shape {:?} does not match {:?}",
+                arg1.layout().shape(),
+                arg2.layout().shape()
+            )));
+        }
         Ok(Self { arg1, arg2 })
     }
 }
@@ -255,7 +273,13 @@ pub struct EWiseDiv {
 
 impl EWiseDiv {
     pub fn new(arg1: Tensor, arg2: Tensor) -> Result<Self> {
-        assert!(arg1.layout().shape() == arg2.layout().shape());
+        if arg1.layout().shape() != arg2.layout().shape() {
+            return Err(Error::LayoutMismatch(format!(
+                "div: shape {:?} does not match {:?}",
+                arg1.layout().shape(),
+                arg2.layout().shape()
+            )));
+        }
         Ok(Self { arg1, arg2 })
     }
 }
@@ -295,7 +319,13 @@ pub struct EWisePowf {
 
 impl EWisePowf {
     pub fn new(arg: Tensor, e: Tensor) -> Result<Self> {
-        assert!(arg.layout().shape() == e.layout().shape());
+        if arg.layout().shape() != e.layout().shape() {
+            return Err(Error::LayoutMismatch(format!(
+                "pow: shape {:?} does not match {:?}",
+                arg.layout().shape(),
+                e.layout().shape()
+            )));
+        }
         Ok(Self { arg, e })
     }
 }
@@ -989,25 +1019,38 @@ impl MatMul {
     pub fn new(arg1: Tensor, arg2: Tensor) -> Result<Self> {
         let a = arg1.layout();
         let b = arg2.layout();
-        assert!(a.ndim() >= 2 && b.ndim() >= 2, "matmul requires ndim >= 2");
-        assert!(
-            a.ndim() == b.ndim(),
-            "matmul requires same number of dimensions, got {} and {}",
-            a.ndim(),
-            b.ndim()
-        );
+        if a.ndim() < 2 || b.ndim() < 2 {
+            return Err(Error::LayoutMismatch(format!(
+                "matmul requires ndim >= 2, got {} and {}",
+                a.ndim(),
+                b.ndim()
+            )));
+        }
+        if a.ndim() != b.ndim() {
+            return Err(Error::LayoutMismatch(format!(
+                "matmul requires same number of dimensions, got {} and {}",
+                a.ndim(),
+                b.ndim()
+            )));
+        }
         let k1 = a.shape()[a.ndim() - 1];
         let k2 = b.shape()[b.ndim() - 2];
-        assert!(k1 == k2, "matmul inner dimensions must match: {} vs {}", k1, k2);
+        if k1 != k2 {
+            return Err(Error::LayoutMismatch(format!(
+                "matmul inner dimensions must match: {} vs {}",
+                k1, k2
+            )));
+        }
         // Batch dimensions must match
         for i in 0..a.ndim() - 2 {
-            assert!(
-                a.shape()[i] == b.shape()[i],
-                "matmul batch dimension {} mismatch: {} vs {}",
-                i,
-                a.shape()[i],
-                b.shape()[i]
-            );
+            if a.shape()[i] != b.shape()[i] {
+                return Err(Error::LayoutMismatch(format!(
+                    "matmul batch dimension {} mismatch: {} vs {}",
+                    i,
+                    a.shape()[i],
+                    b.shape()[i]
+                )));
+            }
         }
         // CPU and CUDA backends handle non-compact layouts directly (CPU passes strides to gemm;
         // CUDA uses try_gemm_params to avoid copies for transposed inputs).
