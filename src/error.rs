@@ -7,10 +7,10 @@ use std::io;
 #[derive(thiserror::Error, fmt::Debug)]
 pub enum Error {
     // Storage errors
-    #[error("Size mismatch, expected buffer of size {expected} but got buffer of size {actual} ")]
+    #[error("size mismatch, expected buffer of size {expected} but got buffer of size {actual}")]
     StorageSizeMismatch { expected: usize, actual: usize },
 
-    #[error("Operation {op} requires tensors on the same device")]
+    #[error("operation {op} requires tensors on the same device")]
     DeviceMismatch { op: &'static str },
 
     #[error("{0}")]
