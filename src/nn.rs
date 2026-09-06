@@ -5,7 +5,7 @@ pub mod functional;
 /// Trainable tensor wrapper used by modules and optimizers.
 pub mod parameter;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::rc::Rc;
@@ -137,6 +137,17 @@ pub trait Module {
         }
         Ok(())
     }
+
+    /// Sets the module and its children to training mode.
+    fn train(&self) {}
+
+    /// Sets the module and its children to evaluation mode.
+    fn eval(&self) {}
+
+    /// Returns true when the module is in training mode.
+    fn is_training(&self) -> bool {
+        true
+    }
 }
 
 /// Fully connected layer: `y = x @ weight` (+ optional bias).
@@ -144,6 +155,7 @@ pub trait Module {
 pub struct Linear {
     weight: Parameter,
     bias: Option<Parameter>,
+    training: Cell<bool>,
 }
 
 impl Linear {
@@ -176,7 +188,7 @@ impl Linear {
         } else {
             None
         };
-        Self { weight, bias }
+        Self { weight, bias, training: Cell::new(true) }
     }
 }
 
@@ -196,12 +208,25 @@ impl Module for Linear {
         }
         parameters
     }
+
+    fn train(&self) {
+        self.training.set(true);
+    }
+
+    fn eval(&self) {
+        self.training.set(false);
+    }
+
+    fn is_training(&self) -> bool {
+        self.training.get()
+    }
 }
 
 /// Embedding lookup table: maps integer indices to dense vectors.
 #[derive(Debug)]
 pub struct Embedding {
     weight: Parameter,
+    training: Cell<bool>,
 }
 
 impl Embedding {
@@ -209,7 +234,7 @@ impl Embedding {
     pub fn new(builder: ParamBuilder, vocab_size: usize, hidden_size: usize) -> Self {
         let weight = builder
             .param("weight", Tensor::randn((vocab_size, hidden_size), DType::F32, Device::Cpu));
-        Self { weight }
+        Self { weight, training: Cell::new(true) }
     }
 }
 
@@ -226,18 +251,41 @@ impl Module for Embedding {
     fn parameters(&self) -> Vec<Parameter> {
         vec![self.weight.clone()]
     }
+
+    fn train(&self) {
+        self.training.set(true);
+    }
+
+    fn eval(&self) {
+        self.training.set(false);
+    }
+
+    fn is_training(&self) -> bool {
+        self.training.get()
+    }
 }
 
-/// RMSNorm: `x / sqrt(mean(x²) + eps)`.
+/// RMSNorm: `x / sqrt(mean(x²) + eps) * weight`.
+///
+/// The weightless `new` constructor is kept for blocks that own no
+/// parameters. Prefer `new_affine` so the scale is trainable.
 #[derive(Debug)]
 pub struct RMSNorm {
+    weight: Option<Parameter>,
     eps: f64,
+    training: Cell<bool>,
 }
 
 impl RMSNorm {
-    /// Creates an RMSNorm layer with epsilon `eps`.
+    /// Creates a weightless RMSNorm layer with epsilon `eps`.
     pub fn new(eps: f64) -> Self {
-        Self { eps }
+        Self { weight: None, eps, training: Cell::new(true) }
+    }
+
+    /// Creates an RMSNorm layer with a trainable scale initialized to ones.
+    pub fn new_affine(builder: ParamBuilder, hidden_size: usize, eps: f64) -> Self {
+        let weight = builder.param("weight", Tensor::ones((hidden_size,), DType::F32, Device::Cpu));
+        Self { weight: Some(weight), eps, training: Cell::new(true) }
     }
 }
 
@@ -246,7 +294,98 @@ impl Module for RMSNorm {
         let last_axis = x.layout().ndim() - 1;
         let mean_sq = (x * x).mean(vec![last_axis], true);
         let inv_norm = (mean_sq + self.eps).scalar_powf(-0.5);
-        Ok(x * &inv_norm)
+        let normed = x * &inv_norm;
+        match &self.weight {
+            Some(weight) => Ok(&normed * &**weight),
+            None => Ok(normed),
+        }
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        self.weight.clone().into_iter().collect()
+    }
+
+    fn train(&self) {
+        self.training.set(true);
+    }
+
+    fn eval(&self) {
+        self.training.set(false);
+    }
+
+    fn is_training(&self) -> bool {
+        self.training.get()
+    }
+}
+
+/// LayerNorm over the last dimension: `(x - mean) / sqrt(var + eps) * weight + bias`.
+///
+/// Matches PyTorch `LayerNorm` with `elementwise_affine` and the candle
+/// `LayerNorm` forward path.
+#[derive(Debug)]
+pub struct LayerNorm {
+    weight: Parameter,
+    bias: Option<Parameter>,
+    eps: f64,
+    training: Cell<bool>,
+}
+
+impl LayerNorm {
+    /// Creates a LayerNorm with weight initialized to ones and bias to zeros.
+    pub fn new(builder: ParamBuilder, normalized_shape: usize, eps: f64) -> Self {
+        let weight =
+            builder.param("weight", Tensor::ones((normalized_shape,), DType::F32, Device::Cpu));
+        let bias =
+            builder.param("bias", Tensor::zeros((normalized_shape,), DType::F32, Device::Cpu));
+        Self { weight, bias: Some(bias), eps, training: Cell::new(true) }
+    }
+
+    /// Creates a LayerNorm with weight initialized to ones and no bias.
+    pub fn no_bias(builder: ParamBuilder, normalized_shape: usize, eps: f64) -> Self {
+        let weight =
+            builder.param("weight", Tensor::ones((normalized_shape,), DType::F32, Device::Cpu));
+        Self { weight, bias: None, eps, training: Cell::new(true) }
+    }
+}
+
+impl Module for LayerNorm {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let last_axis = x.layout().ndim() - 1;
+        let hidden = x.layout().shape()[last_axis];
+        assert_eq!(
+            hidden,
+            self.weight.layout().shape()[0],
+            "LayerNorm input last dim must match normalized shape"
+        );
+        let mean = x.mean(vec![last_axis], true);
+        let centered = x - &mean;
+        let var = (&centered * &centered).mean(vec![last_axis], true);
+        let normed = &centered * &(var + self.eps).scalar_powf(-0.5);
+        let scaled = &normed * &*self.weight;
+        match &self.bias {
+            Some(bias) => Ok(&scaled + &**bias),
+            None => Ok(scaled),
+        }
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        let mut parameters = vec![self.weight.clone()];
+        if let Some(bias) = &self.bias {
+            parameters.push(bias.clone());
+        }
+        parameters
+    }
+
+    fn train(&self) {
+        self.training.set(true);
+    }
+
+    fn eval(&self) {
+        self.training.set(false);
+    }
+
+    fn is_training(&self) -> bool {
+        self.training.get()
     }
 }
 
@@ -260,9 +399,50 @@ impl Module for ReLU {
     }
 }
 
+/// Inverted dropout: zeroes elements with probability `p` while training.
+///
+/// Evaluation is an exact identity. Has no parameters.
+#[derive(Debug)]
+pub struct Dropout {
+    p: f64,
+    training: Cell<bool>,
+}
+
+impl Dropout {
+    /// Creates a Dropout layer with drop probability `p` in `[0, 1)`.
+    pub fn new(p: f64) -> Self {
+        assert!((0.0..1.0).contains(&p), "dropout probability must be in [0, 1), got {p}");
+        Self { p, training: Cell::new(true) }
+    }
+
+    /// Returns the drop probability.
+    pub fn p(&self) -> f64 {
+        self.p
+    }
+}
+
+impl Module for Dropout {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        Ok(functional::dropout(x, self.p, self.training.get()))
+    }
+
+    fn train(&self) {
+        self.training.set(true);
+    }
+
+    fn eval(&self) {
+        self.training.set(false);
+    }
+
+    fn is_training(&self) -> bool {
+        self.training.get()
+    }
+}
+
 /// A sequence of modules applied in order.
 pub struct Sequential {
     layers: Vec<Box<dyn Module>>,
+    training: Cell<bool>,
 }
 
 impl std::fmt::Debug for Sequential {
@@ -292,11 +472,29 @@ impl Module for Sequential {
     fn parameters(&self) -> Vec<Parameter> {
         self.layers.iter().flat_map(|layer| layer.parameters()).collect()
     }
+
+    fn train(&self) {
+        self.training.set(true);
+        for layer in &self.layers {
+            layer.train();
+        }
+    }
+
+    fn eval(&self) {
+        self.training.set(false);
+        for layer in &self.layers {
+            layer.eval();
+        }
+    }
+
+    fn is_training(&self) -> bool {
+        self.training.get()
+    }
 }
 
 /// Creates an empty Sequential to build with `.add()`.
 pub fn seq() -> Sequential {
-    Sequential { layers: vec![] }
+    Sequential { layers: vec![], training: Cell::new(true) }
 }
 
 #[cfg(test)]
