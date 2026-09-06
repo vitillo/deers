@@ -6,7 +6,9 @@
 #![allow(dead_code)]
 
 use std::sync::{Arc, RwLock};
-use std::{fmt, iter};
+use std::{cmp::Ordering, fmt, iter};
+
+use half::f16;
 
 use crate::backprop::GradientStore;
 use crate::error::{Error, Result};
@@ -1538,5 +1540,839 @@ impl TensorOp for Cat {
 
     fn dependencies(&self) -> Vec<&Tensor> {
         self.args.iter().collect()
+    }
+}
+
+fn split_dim(shape: &[usize], dim: usize) -> (usize, usize, usize) {
+    let outer: usize = shape[..dim].iter().product();
+    let size = shape[dim];
+    let inner: usize = shape[dim + 1..].iter().product();
+    (outer, size, inner)
+}
+
+fn check_select_dim(ndim: usize, dim: usize, op: &str) -> Result<()> {
+    if dim >= ndim {
+        return Err(Error::LayoutMismatch(format!(
+            "{op}: dim {dim} out of bounds for {ndim} dims"
+        )));
+    }
+    Ok(())
+}
+
+fn cond_mask(cond: &Tensor) -> Result<Vec<bool>> {
+    match cond.dtype() {
+        crate::DType::F16 => Ok(cond.to_vec::<f16>()?.iter().map(|v| v.to_f32() != 0.0).collect()),
+        crate::DType::F32 => Ok(cond.to_vec::<f32>()?.iter().map(|v| *v != 0.0).collect()),
+        crate::DType::I64 => Ok(cond.to_vec::<i64>()?.iter().map(|v| *v != 0).collect()),
+    }
+}
+
+fn check_same_shape(a: &Tensor, b: &Tensor, op: &str) -> Result<()> {
+    if a.layout().shape() != b.layout().shape() {
+        return Err(Error::LayoutMismatch(format!(
+            "{op}: shape {:?} does not match {:?}",
+            a.layout().shape(),
+            b.layout().shape()
+        )));
+    }
+    Ok(())
+}
+
+pub fn argmax_forward(arg: &Tensor, dim: usize, keep_dims: bool) -> Result<Tensor> {
+    check_select_dim(arg.layout().ndim(), dim, "argmax")?;
+    let shape: Vec<usize> = arg.layout().shape().iter().copied().collect();
+    let (outer, dim_size, inner) = split_dim(&shape, dim);
+    assert!(dim_size > 0, "argmax requires a non-empty dimension");
+    let _profile = profile_view("argmax", &[arg]);
+
+    let mut out_shape = shape.clone();
+    if keep_dims {
+        out_shape[dim] = 1;
+    } else {
+        out_shape.remove(dim);
+    }
+    let device = arg.device();
+    let out: Tensor = match arg.dtype() {
+        crate::DType::F32 => {
+            let vals = arg.to_vec::<f32>()?;
+            let mut idx = Vec::with_capacity(outer * inner);
+            for o in 0..outer {
+                for j in 0..inner {
+                    let base = (o * dim_size) * inner + j;
+                    let mut best = 0;
+                    for i in 1..dim_size {
+                        if vals[base + i * inner] > vals[base + best * inner] {
+                            best = i;
+                        }
+                    }
+                    idx.push(best as i64);
+                }
+            }
+            Tensor::from_vec(idx, out_shape, device)
+        }
+        crate::DType::F16 => {
+            let vals = arg.to_vec::<f16>()?;
+            let mut idx = Vec::with_capacity(outer * inner);
+            for o in 0..outer {
+                for j in 0..inner {
+                    let base = (o * dim_size) * inner + j;
+                    let mut best = 0;
+                    for i in 1..dim_size {
+                        if vals[base + i * inner].to_f32() > vals[base + best * inner].to_f32() {
+                            best = i;
+                        }
+                    }
+                    idx.push(best as i64);
+                }
+            }
+            Tensor::from_vec(idx, out_shape, device)
+        }
+        crate::DType::I64 => {
+            let vals = arg.to_vec::<i64>()?;
+            let mut idx = Vec::with_capacity(outer * inner);
+            for o in 0..outer {
+                for j in 0..inner {
+                    let base = (o * dim_size) * inner + j;
+                    let mut best = 0;
+                    for i in 1..dim_size {
+                        if vals[base + i * inner] > vals[base + best * inner] {
+                            best = i;
+                        }
+                    }
+                    idx.push(best as i64);
+                }
+            }
+            Tensor::from_vec(idx, out_shape, device)
+        }
+    };
+    Ok(out)
+}
+
+fn topk_positions_f32(
+    vals: &[f32],
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    k: usize,
+) -> Vec<usize> {
+    let mut out = Vec::with_capacity(outer * k * inner);
+    for o in 0..outer {
+        for j in 0..inner {
+            let base = (o * dim_size) * inner + j;
+            let mut order: Vec<usize> = (0..dim_size).collect();
+            order.sort_by(|&a, &b| {
+                vals[base + b * inner]
+                    .partial_cmp(&vals[base + a * inner])
+                    .unwrap_or(Ordering::Greater)
+            });
+            for &i in order.iter().take(k) {
+                out.push(base + i * inner);
+            }
+        }
+    }
+    out
+}
+
+pub fn topk_forward(arg: &Tensor, k: usize, dim: usize) -> Result<(Tensor, Tensor)> {
+    check_select_dim(arg.layout().ndim(), dim, "topk")?;
+    let shape: Vec<usize> = arg.layout().shape().iter().copied().collect();
+    let (outer, dim_size, inner) = split_dim(&shape, dim);
+    if k == 0 || k > dim_size {
+        return Err(Error::LayoutMismatch(format!(
+            "topk: k {k} out of bounds for dim size {dim_size}"
+        )));
+    }
+    let inputs: Vec<&Tensor> = vec![arg];
+    let _profile = profile_output("topk", &inputs, arg.layout().size(), arg.dtype());
+
+    let mut out_shape = shape.clone();
+    out_shape[dim] = k;
+    let device = arg.device();
+    match arg.dtype() {
+        crate::DType::F32 => {
+            let vals = arg.to_vec::<f32>()?;
+            let pos = topk_positions_f32(&vals, outer, dim_size, inner, k);
+            let values: Vec<f32> = pos.iter().map(|&p| vals[p]).collect();
+            let mut idx = Vec::with_capacity(pos.len());
+            for &p in &pos {
+                let in_slice = p % (dim_size * inner);
+                idx.push((in_slice / inner) as i64);
+            }
+            Ok((
+                Tensor::from_vec(values, out_shape.clone(), device),
+                Tensor::from_vec(idx, out_shape, device),
+            ))
+        }
+        crate::DType::F16 => {
+            let vals = arg.to_vec::<f16>()?;
+            let as_f32: Vec<f32> = vals.iter().map(|v| v.to_f32()).collect();
+            let pos = topk_positions_f32(&as_f32, outer, dim_size, inner, k);
+            let values: Vec<f16> = pos.iter().map(|&p| vals[p]).collect();
+            let mut idx = Vec::with_capacity(pos.len());
+            for &p in &pos {
+                let in_slice = p % (dim_size * inner);
+                idx.push((in_slice / inner) as i64);
+            }
+            Ok((
+                Tensor::from_vec(values, out_shape.clone(), device),
+                Tensor::from_vec(idx, out_shape, device),
+            ))
+        }
+        crate::DType::I64 => {
+            let vals = arg.to_vec::<i64>()?;
+            let mut pos = Vec::with_capacity(outer * k * inner);
+            for o in 0..outer {
+                for j in 0..inner {
+                    let base = (o * dim_size) * inner + j;
+                    let mut order: Vec<usize> = (0..dim_size).collect();
+                    order.sort_by(|&a, &b| vals[base + b * inner].cmp(&vals[base + a * inner]));
+                    for &i in order.iter().take(k) {
+                        pos.push(base + i * inner);
+                    }
+                }
+            }
+            let values: Vec<i64> = pos.iter().map(|&p| vals[p]).collect();
+            let mut idx = Vec::with_capacity(pos.len());
+            for &p in &pos {
+                let in_slice = p % (dim_size * inner);
+                idx.push((in_slice / inner) as i64);
+            }
+            Ok((
+                Tensor::from_vec(values, out_shape.clone(), device),
+                Tensor::from_vec(idx, out_shape, device),
+            ))
+        }
+    }
+}
+
+pub fn sort_forward(arg: &Tensor, dim: usize, descending: bool) -> Result<(Tensor, Tensor)> {
+    check_select_dim(arg.layout().ndim(), dim, "sort")?;
+    let shape: Vec<usize> = arg.layout().shape().iter().copied().collect();
+    let (outer, dim_size, inner) = split_dim(&shape, dim);
+    let inputs: Vec<&Tensor> = vec![arg];
+    let _profile = profile_output("sort", &inputs, arg.layout().size(), arg.dtype());
+
+    let device = arg.device();
+    match arg.dtype() {
+        crate::DType::F32 => {
+            let vals = arg.to_vec::<f32>()?;
+            let mut values = vec![0.0f32; vals.len()];
+            let mut idx = vec![0i64; vals.len()];
+            for o in 0..outer {
+                for j in 0..inner {
+                    let base = (o * dim_size) * inner + j;
+                    let mut order: Vec<usize> = (0..dim_size).collect();
+                    if descending {
+                        order.sort_by(|&a, &b| {
+                            vals[base + b * inner]
+                                .partial_cmp(&vals[base + a * inner])
+                                .unwrap_or(Ordering::Greater)
+                        });
+                    } else {
+                        order.sort_by(|&a, &b| {
+                            vals[base + a * inner]
+                                .partial_cmp(&vals[base + b * inner])
+                                .unwrap_or(Ordering::Greater)
+                        });
+                    }
+                    for (rank, &i) in order.iter().enumerate() {
+                        values[base + rank * inner] = vals[base + i * inner];
+                        idx[base + rank * inner] = i as i64;
+                    }
+                }
+            }
+            Ok((
+                Tensor::from_vec(values, shape.clone(), device),
+                Tensor::from_vec(idx, shape, device),
+            ))
+        }
+        crate::DType::F16 => {
+            let vals = arg.to_vec::<f16>()?;
+            let as_f32: Vec<f32> = vals.iter().map(|v| v.to_f32()).collect();
+            let mut values = vec![f16::from_f32(0.0); vals.len()];
+            let mut idx = vec![0i64; vals.len()];
+            for o in 0..outer {
+                for j in 0..inner {
+                    let base = (o * dim_size) * inner + j;
+                    let mut order: Vec<usize> = (0..dim_size).collect();
+                    if descending {
+                        order.sort_by(|&a, &b| {
+                            as_f32[base + b * inner]
+                                .partial_cmp(&as_f32[base + a * inner])
+                                .unwrap_or(Ordering::Greater)
+                        });
+                    } else {
+                        order.sort_by(|&a, &b| {
+                            as_f32[base + a * inner]
+                                .partial_cmp(&as_f32[base + b * inner])
+                                .unwrap_or(Ordering::Greater)
+                        });
+                    }
+                    for (rank, &i) in order.iter().enumerate() {
+                        values[base + rank * inner] = vals[base + i * inner];
+                        idx[base + rank * inner] = i as i64;
+                    }
+                }
+            }
+            Ok((
+                Tensor::from_vec(values, shape.clone(), device),
+                Tensor::from_vec(idx, shape, device),
+            ))
+        }
+        crate::DType::I64 => {
+            let vals = arg.to_vec::<i64>()?;
+            let mut values = vec![0i64; vals.len()];
+            let mut idx = vec![0i64; vals.len()];
+            for o in 0..outer {
+                for j in 0..inner {
+                    let base = (o * dim_size) * inner + j;
+                    let mut order: Vec<usize> = (0..dim_size).collect();
+                    if descending {
+                        order.sort_by(|&a, &b| vals[base + b * inner].cmp(&vals[base + a * inner]));
+                    } else {
+                        order.sort_by(|&a, &b| vals[base + a * inner].cmp(&vals[base + b * inner]));
+                    }
+                    for (rank, &i) in order.iter().enumerate() {
+                        values[base + rank * inner] = vals[base + i * inner];
+                        idx[base + rank * inner] = i as i64;
+                    }
+                }
+            }
+            Ok((
+                Tensor::from_vec(values, shape.clone(), device),
+                Tensor::from_vec(idx, shape, device),
+            ))
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Clamp {
+    arg: Tensor,
+    min: f64,
+    max: f64,
+}
+
+impl Clamp {
+    pub fn new(arg: Tensor, min: f64, max: f64) -> Result<Self> {
+        if min > max {
+            return Err(Error::LayoutMismatch(format!("clamp: min {min} exceeds max {max}")));
+        }
+        Ok(Self { arg, min, max })
+    }
+}
+
+impl TensorOp for Clamp {
+    fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("clamp", &self.arg);
+        let shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
+        let device = self.arg.device();
+        let out = match self.arg.dtype() {
+            crate::DType::F32 => {
+                let vals = self.arg.to_vec::<f32>()?;
+                let (lo, hi) = (self.min as f32, self.max as f32);
+                Tensor::from_vec(
+                    vals.iter().map(|v| v.clamp(lo, hi)).collect::<Vec<f32>>(),
+                    shape,
+                    device,
+                )
+            }
+            crate::DType::F16 => {
+                let vals = self.arg.to_vec::<f16>()?;
+                let (lo, hi) = (self.min as f32, self.max as f32);
+                Tensor::from_vec(
+                    vals.iter()
+                        .map(|v| f16::from_f32(v.to_f32().clamp(lo, hi)))
+                        .collect::<Vec<f16>>(),
+                    shape,
+                    device,
+                )
+            }
+            crate::DType::I64 => {
+                let vals = self.arg.to_vec::<i64>()?;
+                let (lo, hi) = (self.min as i64, self.max as i64);
+                Tensor::from_vec(
+                    vals.iter().map(|v| (*v).clamp(lo, hi)).collect::<Vec<i64>>(),
+                    shape,
+                    device,
+                )
+            }
+        };
+        Ok(Tensor::new(out.storage_clone(), out.layout().clone(), false, Some(Box::new(self))))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
+        let device = self.arg.device();
+        match self.arg.dtype() {
+            crate::DType::F32 => {
+                let vals = self.arg.to_vec::<f32>()?;
+                let go = out_grad.to_vec::<f32>()?;
+                let (lo, hi) = (self.min as f32, self.max as f32);
+                let grad: Vec<f32> = vals
+                    .iter()
+                    .zip(go.iter())
+                    .map(|(v, g)| if *v >= lo && *v <= hi { *g } else { 0.0 })
+                    .collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+            crate::DType::F16 => {
+                let vals = self.arg.to_vec::<f16>()?;
+                let go = out_grad.to_vec::<f16>()?;
+                let (lo, hi) = (self.min as f32, self.max as f32);
+                let grad: Vec<f16> =
+                    vals.iter()
+                        .zip(go.iter())
+                        .map(|(v, g)| {
+                            if v.to_f32() >= lo && v.to_f32() <= hi {
+                                *g
+                            } else {
+                                f16::from_f32(0.0)
+                            }
+                        })
+                        .collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+            crate::DType::I64 => {
+                let vals = self.arg.to_vec::<i64>()?;
+                let go = out_grad.to_vec::<i64>()?;
+                let (lo, hi) = (self.min as i64, self.max as i64);
+                let grad: Vec<i64> = vals
+                    .iter()
+                    .zip(go.iter())
+                    .map(|(v, g)| if *v >= lo && *v <= hi { *g } else { 0 })
+                    .collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+        }
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
+#[derive(Debug)]
+pub struct WhereCond {
+    cond: Tensor,
+    on_true: Tensor,
+    on_false: Tensor,
+}
+
+impl WhereCond {
+    pub fn new(cond: Tensor, on_true: Tensor, on_false: Tensor) -> Result<Self> {
+        check_same_shape(&cond, &on_true, "where")?;
+        check_same_shape(&cond, &on_false, "where")?;
+        if on_true.dtype() != on_false.dtype() {
+            return Err(Error::DTypeMismatch(format!(
+                "where: {:?} vs {:?}",
+                on_true.dtype(),
+                on_false.dtype()
+            )));
+        }
+        Ok(Self { cond, on_true, on_false })
+    }
+}
+
+impl TensorOp for WhereCond {
+    fn forward(self) -> Result<Tensor> {
+        let inputs: Vec<&Tensor> = vec![&self.cond, &self.on_true, &self.on_false];
+        let _profile =
+            profile_output("where", &inputs, self.on_true.layout().size(), self.on_true.dtype());
+        let shape: Vec<usize> = self.on_true.layout().shape().iter().copied().collect();
+        let device = self.on_true.device();
+        let mask = cond_mask(&self.cond)?;
+        let out = match self.on_true.dtype() {
+            crate::DType::F32 => {
+                let t = self.on_true.to_vec::<f32>()?;
+                let f = self.on_false.to_vec::<f32>()?;
+                Tensor::from_vec(
+                    mask.iter()
+                        .enumerate()
+                        .map(|(i, m)| if *m { t[i] } else { f[i] })
+                        .collect::<Vec<f32>>(),
+                    shape,
+                    device,
+                )
+            }
+            crate::DType::F16 => {
+                let t = self.on_true.to_vec::<f16>()?;
+                let f = self.on_false.to_vec::<f16>()?;
+                Tensor::from_vec(
+                    mask.iter()
+                        .enumerate()
+                        .map(|(i, m)| if *m { t[i] } else { f[i] })
+                        .collect::<Vec<f16>>(),
+                    shape,
+                    device,
+                )
+            }
+            crate::DType::I64 => {
+                let t = self.on_true.to_vec::<i64>()?;
+                let f = self.on_false.to_vec::<i64>()?;
+                Tensor::from_vec(
+                    mask.iter()
+                        .enumerate()
+                        .map(|(i, m)| if *m { t[i] } else { f[i] })
+                        .collect::<Vec<i64>>(),
+                    shape,
+                    device,
+                )
+            }
+        };
+        Ok(Tensor::new(out.storage_clone(), out.layout().clone(), false, Some(Box::new(self))))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let shape: Vec<usize> = self.on_true.layout().shape().iter().copied().collect();
+        let mask = cond_mask(&self.cond)?;
+        match self.on_true.dtype() {
+            crate::DType::F32 => {
+                let go = out_grad.to_vec::<f32>()?;
+                let zero = 0.0f32;
+                let gt: Vec<f32> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { go[i] } else { zero }).collect();
+                let gf: Vec<f32> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { zero } else { go[i] }).collect();
+                let device = self.on_true.device();
+                grads.accumulate(&self.on_true, Tensor::from_vec(gt, shape.clone(), device));
+                let device = self.on_false.device();
+                grads.accumulate(&self.on_false, Tensor::from_vec(gf, shape, device));
+            }
+            crate::DType::F16 => {
+                let go = out_grad.to_vec::<f16>()?;
+                let zero = f16::from_f32(0.0);
+                let gt: Vec<f16> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { go[i] } else { zero }).collect();
+                let gf: Vec<f16> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { zero } else { go[i] }).collect();
+                let device = self.on_true.device();
+                grads.accumulate(&self.on_true, Tensor::from_vec(gt, shape.clone(), device));
+                let device = self.on_false.device();
+                grads.accumulate(&self.on_false, Tensor::from_vec(gf, shape, device));
+            }
+            crate::DType::I64 => {
+                let go = out_grad.to_vec::<i64>()?;
+                let gt: Vec<i64> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { go[i] } else { 0 }).collect();
+                let gf: Vec<i64> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { 0 } else { go[i] }).collect();
+                let device = self.on_true.device();
+                grads.accumulate(&self.on_true, Tensor::from_vec(gt, shape.clone(), device));
+                let device = self.on_false.device();
+                grads.accumulate(&self.on_false, Tensor::from_vec(gf, shape, device));
+            }
+        }
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.cond, &self.on_true, &self.on_false]
+    }
+}
+
+#[derive(Debug)]
+pub struct MaskedFill {
+    arg: Tensor,
+    mask: Tensor,
+    value: f64,
+}
+
+impl MaskedFill {
+    pub fn new(arg: Tensor, mask: Tensor, value: f64) -> Result<Self> {
+        check_same_shape(&arg, &mask, "masked_fill")?;
+        Ok(Self { arg, mask, value })
+    }
+}
+
+impl TensorOp for MaskedFill {
+    fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("masked_fill", &self.arg);
+        let shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
+        let device = self.arg.device();
+        let mask = cond_mask(&self.mask)?;
+        let out = match self.arg.dtype() {
+            crate::DType::F32 => {
+                let vals = self.arg.to_vec::<f32>()?;
+                let v = self.value as f32;
+                Tensor::from_vec(
+                    vals.iter()
+                        .enumerate()
+                        .map(|(i, x)| if mask[i] { v } else { *x })
+                        .collect::<Vec<f32>>(),
+                    shape,
+                    device,
+                )
+            }
+            crate::DType::F16 => {
+                let vals = self.arg.to_vec::<f16>()?;
+                let v = f16::from_f32(self.value as f32);
+                Tensor::from_vec(
+                    vals.iter()
+                        .enumerate()
+                        .map(|(i, x)| if mask[i] { v } else { *x })
+                        .collect::<Vec<f16>>(),
+                    shape,
+                    device,
+                )
+            }
+            crate::DType::I64 => {
+                let vals = self.arg.to_vec::<i64>()?;
+                let v = self.value as i64;
+                Tensor::from_vec(
+                    vals.iter()
+                        .enumerate()
+                        .map(|(i, x)| if mask[i] { v } else { *x })
+                        .collect::<Vec<i64>>(),
+                    shape,
+                    device,
+                )
+            }
+        };
+        Ok(Tensor::new(out.storage_clone(), out.layout().clone(), false, Some(Box::new(self))))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
+        let device = self.arg.device();
+        let mask = cond_mask(&self.mask)?;
+        match self.arg.dtype() {
+            crate::DType::F32 => {
+                let go = out_grad.to_vec::<f32>()?;
+                let grad: Vec<f32> =
+                    go.iter().enumerate().map(|(i, g)| if mask[i] { 0.0 } else { *g }).collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+            crate::DType::F16 => {
+                let go = out_grad.to_vec::<f16>()?;
+                let grad: Vec<f16> = go
+                    .iter()
+                    .enumerate()
+                    .map(|(i, g)| if mask[i] { f16::from_f32(0.0) } else { *g })
+                    .collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+            crate::DType::I64 => {
+                let go = out_grad.to_vec::<i64>()?;
+                let grad: Vec<i64> =
+                    go.iter().enumerate().map(|(i, g)| if mask[i] { 0 } else { *g }).collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+        }
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg, &self.mask]
+    }
+}
+
+fn tri_keep_mask(shape: &[usize], diagonal: i32, lower: bool) -> Vec<bool> {
+    let ndim = shape.len();
+    let rows = shape[ndim - 2];
+    let cols = shape[ndim - 1];
+    let batch: usize = shape[..ndim - 2].iter().product();
+    let mut mask = vec![false; batch * rows * cols];
+    for b in 0..batch {
+        for r in 0..rows {
+            for c in 0..cols {
+                let keep = if lower {
+                    (c as i64) <= (r as i64) + (diagonal as i64)
+                } else {
+                    (c as i64) >= (r as i64) + (diagonal as i64)
+                };
+                mask[(b * rows + r) * cols + c] = keep;
+            }
+        }
+    }
+    mask
+}
+
+#[derive(Debug)]
+pub struct Tril {
+    arg: Tensor,
+    diagonal: i32,
+}
+
+impl Tril {
+    pub fn new(arg: Tensor, diagonal: i32) -> Result<Self> {
+        if arg.layout().ndim() < 2 {
+            return Err(Error::LayoutMismatch("tril requires ndim >= 2".into()));
+        }
+        Ok(Self { arg, diagonal })
+    }
+}
+
+impl TensorOp for Tril {
+    fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("tril", &self.arg);
+        let shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
+        let device = self.arg.device();
+        let mask = tri_keep_mask(&shape, self.diagonal, true);
+        let out = match self.arg.dtype() {
+            crate::DType::F32 => {
+                let vals = self.arg.to_vec::<f32>()?;
+                Tensor::from_vec(
+                    vals.iter()
+                        .enumerate()
+                        .map(|(i, v)| if mask[i] { *v } else { 0.0 })
+                        .collect::<Vec<f32>>(),
+                    shape,
+                    device,
+                )
+            }
+            crate::DType::F16 => {
+                let vals = self.arg.to_vec::<f16>()?;
+                Tensor::from_vec(
+                    vals.iter()
+                        .enumerate()
+                        .map(|(i, v)| if mask[i] { *v } else { f16::from_f32(0.0) })
+                        .collect::<Vec<f16>>(),
+                    shape,
+                    device,
+                )
+            }
+            crate::DType::I64 => {
+                let vals = self.arg.to_vec::<i64>()?;
+                Tensor::from_vec(
+                    vals.iter()
+                        .enumerate()
+                        .map(|(i, v)| if mask[i] { *v } else { 0 })
+                        .collect::<Vec<i64>>(),
+                    shape,
+                    device,
+                )
+            }
+        };
+        Ok(Tensor::new(out.storage_clone(), out.layout().clone(), false, Some(Box::new(self))))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
+        let device = self.arg.device();
+        let mask = tri_keep_mask(&shape, self.diagonal, true);
+        match self.arg.dtype() {
+            crate::DType::F32 => {
+                let go = out_grad.to_vec::<f32>()?;
+                let grad: Vec<f32> =
+                    go.iter().enumerate().map(|(i, g)| if mask[i] { *g } else { 0.0 }).collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+            crate::DType::F16 => {
+                let go = out_grad.to_vec::<f16>()?;
+                let grad: Vec<f16> = go
+                    .iter()
+                    .enumerate()
+                    .map(|(i, g)| if mask[i] { *g } else { f16::from_f32(0.0) })
+                    .collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+            crate::DType::I64 => {
+                let go = out_grad.to_vec::<i64>()?;
+                let grad: Vec<i64> =
+                    go.iter().enumerate().map(|(i, g)| if mask[i] { *g } else { 0 }).collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+        }
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
+#[derive(Debug)]
+pub struct Triu {
+    arg: Tensor,
+    diagonal: i32,
+}
+
+impl Triu {
+    pub fn new(arg: Tensor, diagonal: i32) -> Result<Self> {
+        if arg.layout().ndim() < 2 {
+            return Err(Error::LayoutMismatch("triu requires ndim >= 2".into()));
+        }
+        Ok(Self { arg, diagonal })
+    }
+}
+
+impl TensorOp for Triu {
+    fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("triu", &self.arg);
+        let shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
+        let device = self.arg.device();
+        let mask = tri_keep_mask(&shape, self.diagonal, false);
+        let out = match self.arg.dtype() {
+            crate::DType::F32 => {
+                let vals = self.arg.to_vec::<f32>()?;
+                Tensor::from_vec(
+                    vals.iter()
+                        .enumerate()
+                        .map(|(i, v)| if mask[i] { *v } else { 0.0 })
+                        .collect::<Vec<f32>>(),
+                    shape,
+                    device,
+                )
+            }
+            crate::DType::F16 => {
+                let vals = self.arg.to_vec::<f16>()?;
+                Tensor::from_vec(
+                    vals.iter()
+                        .enumerate()
+                        .map(|(i, v)| if mask[i] { *v } else { f16::from_f32(0.0) })
+                        .collect::<Vec<f16>>(),
+                    shape,
+                    device,
+                )
+            }
+            crate::DType::I64 => {
+                let vals = self.arg.to_vec::<i64>()?;
+                Tensor::from_vec(
+                    vals.iter()
+                        .enumerate()
+                        .map(|(i, v)| if mask[i] { *v } else { 0 })
+                        .collect::<Vec<i64>>(),
+                    shape,
+                    device,
+                )
+            }
+        };
+        Ok(Tensor::new(out.storage_clone(), out.layout().clone(), false, Some(Box::new(self))))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
+        let device = self.arg.device();
+        let mask = tri_keep_mask(&shape, self.diagonal, false);
+        match self.arg.dtype() {
+            crate::DType::F32 => {
+                let go = out_grad.to_vec::<f32>()?;
+                let grad: Vec<f32> =
+                    go.iter().enumerate().map(|(i, g)| if mask[i] { *g } else { 0.0 }).collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+            crate::DType::F16 => {
+                let go = out_grad.to_vec::<f16>()?;
+                let grad: Vec<f16> = go
+                    .iter()
+                    .enumerate()
+                    .map(|(i, g)| if mask[i] { *g } else { f16::from_f32(0.0) })
+                    .collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+            crate::DType::I64 => {
+                let go = out_grad.to_vec::<i64>()?;
+                let grad: Vec<i64> =
+                    go.iter().enumerate().map(|(i, g)| if mask[i] { *g } else { 0 }).collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+        }
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
     }
 }
