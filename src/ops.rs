@@ -576,6 +576,46 @@ impl TensorOp for Relu {
 }
 
 #[derive(Debug)]
+pub struct Silu {
+    arg: Tensor,
+}
+
+impl Silu {
+    pub fn new(arg: Tensor) -> Result<Self> {
+        Ok(Self { arg })
+    }
+}
+
+impl TensorOp for Silu {
+    fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("silu", &self.arg);
+        let out = {
+            let _no_grad = crate::tensor::NoGradGuard::new();
+            &self.arg * &self.arg.sigmoid()
+        };
+        Ok(Tensor::new(
+            out.storage_clone(),
+            Layout::from(self.arg.layout().shape().clone()),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let s = self.arg.sigmoid();
+        let y = self.arg.silu();
+        let one_minus_s = &s * -1.0 + 1.0;
+        let deriv = &s + &(&y * &one_minus_s);
+        grads.accumulate(&self.arg, out_grad * &deriv);
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
+#[derive(Debug)]
 pub struct ScalarAdd {
     arg: Tensor,
     scalar: f64,

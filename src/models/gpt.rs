@@ -4,7 +4,7 @@
 use half::f16;
 
 use crate::error::Result;
-use crate::nn::{Embedding, Linear, Module, ParamBuilder, Parameter, RMSNorm, functional};
+use crate::nn::{Embedding, Linear, Module, ParamBuilder, Parameter, RMSNorm, SwiGLU, functional};
 use crate::tensor::Tensor;
 use crate::{DType, Device};
 
@@ -206,13 +206,65 @@ impl Module for MLP {
     }
 }
 
+/// Selects the feed-forward activation used by a [`Block`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MlpKind {
+    /// Two projections with a `relu^2` activation (the historical default).
+    #[default]
+    ReluSquared,
+    /// Gated SiLU MLP (SwiGLU) with gate, up, and down projections.
+    SwiGlu,
+}
+
+/// Transformer MLP dispatching over the configured [`MlpKind`].
+#[derive(Debug)]
+pub enum Mlp {
+    /// Historical two-projection MLP with `relu^2`.
+    ReluSquared(MLP),
+    /// Gated SiLU MLP.
+    SwiGlu(SwiGLU),
+}
+
+impl Mlp {
+    /// Creates an MLP of the requested kind, registered under `builder`.
+    pub fn new(
+        builder: ParamBuilder,
+        n_embd: usize,
+        hidden_dim: usize,
+        kind: MlpKind,
+    ) -> Self {
+        match kind {
+            MlpKind::ReluSquared => Self::ReluSquared(MLP::new(builder, n_embd, hidden_dim)),
+            MlpKind::SwiGlu => {
+                Self::SwiGlu(SwiGLU::new(builder, n_embd, hidden_dim, n_embd))
+            }
+        }
+    }
+}
+
+impl Module for Mlp {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::ReluSquared(mlp) => mlp.forward(x),
+            Self::SwiGlu(mlp) => mlp.forward(x),
+        }
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        match self {
+            Self::ReluSquared(mlp) => mlp.parameters(),
+            Self::SwiGlu(mlp) => mlp.parameters(),
+        }
+    }
+}
+
 /// Pre-norm residual GPT block.
 #[derive(Debug)]
 pub struct Block {
     norm1: RMSNorm,
     attn: CausalSelfAttention,
     norm2: RMSNorm,
-    mlp: MLP,
+    mlp: Mlp,
 }
 
 impl Block {
@@ -224,11 +276,23 @@ impl Block {
         hidden_dim: usize,
         eps: f64,
     ) -> Self {
+        Self::new_with_kind(builder, n_embd, n_head, hidden_dim, eps, MlpKind::ReluSquared)
+    }
+
+    /// Creates a transformer block with the requested MLP kind.
+    pub fn new_with_kind(
+        builder: ParamBuilder,
+        n_embd: usize,
+        n_head: usize,
+        hidden_dim: usize,
+        eps: f64,
+        mlp_kind: MlpKind,
+    ) -> Self {
         Self {
             norm1: RMSNorm::new(eps),
             attn: CausalSelfAttention::new(builder.pp("attn"), n_embd, n_head),
             norm2: RMSNorm::new(eps),
-            mlp: MLP::new(builder.pp("mlp"), n_embd, hidden_dim),
+            mlp: Mlp::new(builder.pp("mlp"), n_embd, hidden_dim, mlp_kind),
         }
     }
 
@@ -298,17 +362,23 @@ pub struct GPT {
 impl GPT {
     /// Creates a GPT model whose trainable weights are registered under `builder`.
     pub fn new(config: GPTConfig, builder: ParamBuilder) -> Self {
+        Self::new_with_kind(config, builder, MlpKind::ReluSquared)
+    }
+
+    /// Creates a GPT model with the requested MLP kind.
+    pub fn new_with_kind(config: GPTConfig, builder: ParamBuilder, mlp_kind: MlpKind) -> Self {
         assert!(config.n_embd.is_multiple_of(config.n_head), "n_embd must be divisible by n_head");
 
         let wte = Embedding::new(builder.pp("wte"), config.vocab_size, config.n_embd);
         let blocks = (0..config.n_layer)
             .map(|index| {
-                Block::new(
+                Block::new_with_kind(
                     builder.pp("blocks").pp(index.to_string()),
                     config.n_embd,
                     config.n_head,
                     config.mlp_hidden_dim,
                     config.rms_norm_eps,
+                    mlp_kind,
                 )
             })
             .collect();
