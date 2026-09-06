@@ -480,6 +480,65 @@ impl Tensor {
     pub fn index_select(&self, dim: usize, indices: &Tensor) -> Tensor {
         ops::IndexSelect::new(self.clone(), dim, indices.clone()).unwrap().forward().unwrap()
     }
+
+    /// Returns indices of maximum values along `dim` as `I64`.
+    ///
+    /// This is a non-differentiable selector. The output drops `dim` unless
+    /// `keep_dims` sets it to size 1.
+    pub fn argmax(&self, dim: usize, keep_dims: bool) -> Tensor {
+        ops::argmax_forward(self, dim, keep_dims).unwrap()
+    }
+
+    /// Returns the `k` largest values along `dim` with their indices.
+    ///
+    /// Values are sorted descending. Both outputs are non-differentiable.
+    pub fn topk(&self, k: usize, dim: usize) -> (Tensor, Tensor) {
+        ops::topk_forward(self, k, dim).unwrap()
+    }
+
+    /// Sorts values along `dim`, returning values with their indices.
+    ///
+    /// Both outputs are non-differentiable.
+    pub fn sort(&self, dim: usize, descending: bool) -> (Tensor, Tensor) {
+        ops::sort_forward(self, dim, descending).unwrap()
+    }
+
+    /// Clamps values into `[min, max]`. Gradient flows only inside the range.
+    pub fn clamp(&self, min: f64, max: f64) -> Tensor {
+        ops::Clamp::new(self.clone(), min, max).unwrap().forward().unwrap()
+    }
+
+    /// Picks from `on_true` where `self` is nonzero, else from `on_false`.
+    ///
+    /// All three tensors must share one shape and the branches one dtype.
+    /// Gradient routes to the picked branch. No gradient flows into `self`.
+    pub fn where_cond(&self, on_true: &Tensor, on_false: &Tensor) -> Tensor {
+        ops::WhereCond::new(self.clone(), on_true.clone(), on_false.clone())
+            .unwrap()
+            .forward()
+            .unwrap()
+    }
+
+    /// Replaces values with `value` where `mask` is nonzero.
+    ///
+    /// Gradient is zeroed at masked positions.
+    pub fn masked_fill(&self, mask: &Tensor, value: f64) -> Tensor {
+        ops::MaskedFill::new(self.clone(), mask.clone(), value).unwrap().forward().unwrap()
+    }
+
+    /// Zeroes elements above the diagonal offset in the last two dims.
+    ///
+    /// Gradient flows only through kept positions.
+    pub fn tril(&self, diagonal: i32) -> Tensor {
+        ops::Tril::new(self.clone(), diagonal).unwrap().forward().unwrap()
+    }
+
+    /// Zeroes elements below the diagonal offset in the last two dims.
+    ///
+    /// Gradient flows only through kept positions.
+    pub fn triu(&self, diagonal: i32) -> Tensor {
+        ops::Triu::new(self.clone(), diagonal).unwrap().forward().unwrap()
+    }
 }
 
 /// Computes the broadcast-compatible output shape for two shapes (numpy-style).

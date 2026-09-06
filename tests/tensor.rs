@@ -2384,3 +2384,389 @@ fn index_select_backward_conforms() {
         );
     }
 }
+
+#[test]
+fn argmax_forward_drops_dim() {
+    // Arrange
+    let data = vec![1.0f32, 3.0, 2.0, 4.0, 0.0, 5.0];
+    let expected = vec![1i64, 2];
+
+    // Act
+    let results: Vec<(Device, Vec<i64>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 3), device);
+            let output = input.argmax(1, false);
+            let values = output.to_vec::<i64>().unwrap();
+            (device, values)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_eq!(actual, expected, "argmax forward on {:?}", device);
+    }
+}
+
+#[test]
+fn argmax_forward_keep_dims() {
+    // Arrange
+    let data = vec![1.0f32, 3.0, 2.0, 4.0, 0.0, 5.0];
+    let expected = vec![1i64, 2];
+
+    // Act
+    let results: Vec<(Device, Vec<i64>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 3), device);
+            let output = input.argmax(1, true);
+            let values = output.to_vec::<i64>().unwrap();
+            (device, values)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_eq!(actual, expected, "argmax keep_dims on {:?}", device);
+    }
+}
+
+#[test]
+fn topk_forward_values_and_indices() {
+    // Arrange
+    let data = vec![1.0f32, 3.0, 2.0, 4.0, 0.0, 5.0];
+    let expected_values = vec![3.0f32, 2.0, 5.0, 4.0];
+    let expected_indices = vec![1i64, 2, 2, 0];
+
+    // Act
+    let results: Vec<(Device, Vec<f32>, Vec<i64>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 3), device);
+            let (values, indices) = input.topk(2, 1);
+            let values = values.to_vec::<f32>().unwrap();
+            let indices = indices.to_vec::<i64>().unwrap();
+            (device, values, indices)
+        })
+        .collect();
+
+    // Assert
+    for (device, values, indices) in results {
+        assert_close(&values, &expected_values, &format!("topk values on {:?}", device));
+        assert_eq!(indices, expected_indices, "topk indices on {:?}", device);
+    }
+}
+
+#[test]
+fn sort_forward_ascending() {
+    // Arrange
+    let data = vec![3.0f32, 1.0, 2.0, 5.0, 4.0, 0.0];
+    let expected_values = vec![1.0f32, 2.0, 3.0, 0.0, 4.0, 5.0];
+    let expected_indices = vec![1i64, 2, 0, 2, 1, 0];
+
+    // Act
+    let results: Vec<(Device, Vec<f32>, Vec<i64>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 3), device);
+            let (values, indices) = input.sort(1, false);
+            let values = values.to_vec::<f32>().unwrap();
+            let indices = indices.to_vec::<i64>().unwrap();
+            (device, values, indices)
+        })
+        .collect();
+
+    // Assert
+    for (device, values, indices) in results {
+        assert_close(&values, &expected_values, &format!("sort values on {:?}", device));
+        assert_eq!(indices, expected_indices, "sort indices on {:?}", device);
+    }
+}
+
+#[test]
+fn sort_forward_descending() {
+    // Arrange
+    let data = vec![3.0f32, 1.0, 2.0];
+    let expected_values = vec![3.0f32, 2.0, 1.0];
+    let expected_indices = vec![0i64, 2, 1];
+
+    // Act
+    let results: Vec<(Device, Vec<f32>, Vec<i64>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (3,), device);
+            let (values, indices) = input.sort(0, true);
+            let values = values.to_vec::<f32>().unwrap();
+            let indices = indices.to_vec::<i64>().unwrap();
+            (device, values, indices)
+        })
+        .collect();
+
+    // Assert
+    for (device, values, indices) in results {
+        assert_close(&values, &expected_values, &format!("sort desc values on {:?}", device));
+        assert_eq!(indices, expected_indices, "sort desc indices on {:?}", device);
+    }
+}
+
+#[test]
+fn clamp_forward_conforms() {
+    // Arrange
+    let data = vec![-1.0f32, 0.5, 1.5, 3.0];
+    let expected = vec![0.0f32, 0.5, 1.5, 2.0];
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 2), device);
+            let output = input.clamp(0.0, 2.0);
+            let values = output.to_vec::<f32>().unwrap();
+            (device, values)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_close(&actual, &expected, &format!("clamp forward on {:?}", device));
+    }
+}
+
+#[test]
+fn clamp_backward_conforms() {
+    // Arrange
+    let data = vec![-1.0f32, 0.5, 2.0, 3.0];
+    let expected_grad = vec![0.0f32, 1.0, 1.0, 0.0];
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
+            let loss = input.clamp(0.0, 2.0).sum(vec![0, 1], false);
+            let grads = loss.backward().unwrap();
+            let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
+            (device, grad)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual_grad) in results {
+        assert_close(&actual_grad, &expected_grad, &format!("clamp backward on {:?}", device));
+    }
+}
+
+#[test]
+fn where_forward_conforms() {
+    // Arrange
+    let cond = vec![1i64, 0, 0, 1];
+    let on_true = vec![1.0f32, 2.0, 3.0, 4.0];
+    let on_false = vec![10.0f32, 20.0, 30.0, 40.0];
+    let expected = vec![1.0f32, 20.0, 30.0, 4.0];
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let cond = Tensor::from_vec(cond.clone(), (2, 2), device);
+            let on_true = Tensor::from_vec(on_true.clone(), (2, 2), device);
+            let on_false = Tensor::from_vec(on_false.clone(), (2, 2), device);
+            let output = cond.where_cond(&on_true, &on_false);
+            let values = output.to_vec::<f32>().unwrap();
+            (device, values)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_close(&actual, &expected, &format!("where forward on {:?}", device));
+    }
+}
+
+#[test]
+fn where_backward_conforms() {
+    // Arrange
+    let cond = vec![1i64, 0, 0, 1];
+    let on_true = vec![1.0f32, 2.0, 3.0, 4.0];
+    let on_false = vec![10.0f32, 20.0, 30.0, 40.0];
+    let expected_true_grad = vec![1.0f32, 0.0, 0.0, 1.0];
+    let expected_false_grad = vec![0.0f32, 1.0, 1.0, 0.0];
+
+    // Act
+    let results: Vec<(Device, Vec<f32>, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let cond = Tensor::from_vec(cond.clone(), (2, 2), device);
+            let on_true = Tensor::from_vec(on_true.clone(), (2, 2), device).attach();
+            let on_false = Tensor::from_vec(on_false.clone(), (2, 2), device).attach();
+            let loss = cond.where_cond(&on_true, &on_false).sum(vec![0, 1], false);
+            let grads = loss.backward().unwrap();
+            let true_grad = grads.get(on_true.id()).unwrap().to_vec::<f32>().unwrap();
+            let false_grad = grads.get(on_false.id()).unwrap().to_vec::<f32>().unwrap();
+            (device, true_grad, false_grad)
+        })
+        .collect();
+
+    // Assert
+    for (device, true_grad, false_grad) in results {
+        assert_close(
+            &true_grad,
+            &expected_true_grad,
+            &format!("where backward true on {:?}", device),
+        );
+        assert_close(
+            &false_grad,
+            &expected_false_grad,
+            &format!("where backward false on {:?}", device),
+        );
+    }
+}
+
+#[test]
+fn masked_fill_forward_conforms() {
+    // Arrange
+    let data = vec![1.0f32, 2.0, 3.0, 4.0];
+    let mask = vec![0i64, 1, 0, 1];
+    let expected = vec![1.0f32, 0.0, 3.0, 0.0];
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 2), device);
+            let mask = Tensor::from_vec(mask.clone(), (2, 2), device);
+            let output = input.masked_fill(&mask, 0.0);
+            let values = output.to_vec::<f32>().unwrap();
+            (device, values)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_close(&actual, &expected, &format!("masked_fill forward on {:?}", device));
+    }
+}
+
+#[test]
+fn masked_fill_backward_conforms() {
+    // Arrange
+    let data = vec![1.0f32, 2.0, 3.0, 4.0];
+    let mask = vec![0i64, 1, 0, 1];
+    let expected_grad = vec![1.0f32, 0.0, 1.0, 0.0];
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
+            let mask = Tensor::from_vec(mask.clone(), (2, 2), device);
+            let loss = input.masked_fill(&mask, 0.0).sum(vec![0, 1], false);
+            let grads = loss.backward().unwrap();
+            let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
+            (device, grad)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual_grad) in results {
+        assert_close(
+            &actual_grad,
+            &expected_grad,
+            &format!("masked_fill backward on {:?}", device),
+        );
+    }
+}
+
+#[test]
+fn tril_forward_conforms() {
+    // Arrange
+    let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+    let expected = vec![1.0f32, 0.0, 0.0, 4.0, 5.0, 0.0, 7.0, 8.0, 9.0];
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (3, 3), device);
+            let output = input.tril(0);
+            let values = output.to_vec::<f32>().unwrap();
+            (device, values)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_close(&actual, &expected, &format!("tril forward on {:?}", device));
+    }
+}
+
+#[test]
+fn tril_backward_conforms() {
+    // Arrange
+    let data = vec![1.0f32, 2.0, 3.0, 4.0];
+    let expected_grad = vec![1.0f32, 0.0, 1.0, 1.0];
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
+            let loss = input.tril(0).sum(vec![0, 1], false);
+            let grads = loss.backward().unwrap();
+            let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
+            (device, grad)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual_grad) in results {
+        assert_close(&actual_grad, &expected_grad, &format!("tril backward on {:?}", device));
+    }
+}
+
+#[test]
+fn triu_forward_conforms() {
+    // Arrange
+    let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+    let expected = vec![1.0f32, 2.0, 3.0, 0.0, 5.0, 6.0, 0.0, 0.0, 9.0];
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (3, 3), device);
+            let output = input.triu(0);
+            let values = output.to_vec::<f32>().unwrap();
+            (device, values)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_close(&actual, &expected, &format!("triu forward on {:?}", device));
+    }
+}
+
+#[test]
+fn triu_backward_conforms() {
+    // Arrange
+    let data = vec![1.0f32, 2.0, 3.0, 4.0];
+    let expected_grad = vec![1.0f32, 1.0, 0.0, 1.0];
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
+            let loss = input.triu(0).sum(vec![0, 1], false);
+            let grads = loss.backward().unwrap();
+            let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
+            (device, grad)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual_grad) in results {
+        assert_close(&actual_grad, &expected_grad, &format!("triu backward on {:?}", device));
+    }
+}
