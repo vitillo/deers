@@ -665,6 +665,7 @@ impl TrainOptions {
             mlp_hidden_dim: self.mlp_hidden_dim,
             rms_norm_eps: 1e-5,
             rope_base: 10_000.0,
+            tie_word_embeddings: false,
         }
     }
 }

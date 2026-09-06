@@ -155,6 +155,7 @@ pub trait Module {
 pub struct Linear {
     weight: Parameter,
     bias: Option<Parameter>,
+    transpose_weight: bool,
     training: Cell<bool>,
 }
 
@@ -167,6 +168,20 @@ impl Linear {
     /// Creates a Linear layer without bias.
     pub fn no_bias(builder: ParamBuilder, in_features: usize, out_features: usize) -> Self {
         Self::new_inner(builder, in_features, out_features, false)
+    }
+
+    /// Creates a bias-free Linear layer that reuses an existing weight
+    /// parameter instead of registering a new one (for LM head weight tying).
+    ///
+    /// The shared weight keeps its embedding `[out, in]` layout and is
+    /// transposed on the fly, so `y = x @ weight.t()`.
+    pub fn shared_weight(weight: Parameter) -> Self {
+        Self { weight, bias: None, transpose_weight: true, training: Cell::new(true) }
+    }
+
+    /// Returns the layer weight parameter.
+    pub fn weight(&self) -> Parameter {
+        self.weight.clone()
     }
 
     fn new_inner(
@@ -188,13 +203,14 @@ impl Linear {
         } else {
             None
         };
-        Self { weight, bias, training: Cell::new(true) }
+        Self { weight, bias, transpose_weight: false, training: Cell::new(true) }
     }
 }
 
 impl Module for Linear {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let out = x.matmul(&self.weight);
+        let weight = self.weight.transpose(None);
+        let out = if self.transpose_weight { x.matmul(&weight) } else { x.matmul(&self.weight) };
         match &self.bias {
             Some(bias) => Ok(&out + &**bias),
             None => Ok(out),
@@ -235,6 +251,11 @@ impl Embedding {
         let weight = builder
             .param("weight", Tensor::randn((vocab_size, hidden_size), DType::F32, Device::Cpu));
         Self { weight, training: Cell::new(true) }
+    }
+
+    /// Returns the embedding table parameter (e.g. for LM head weight tying).
+    pub fn weight(&self) -> Parameter {
+        self.weight.clone()
     }
 }
 

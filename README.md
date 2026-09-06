@@ -25,6 +25,7 @@ let config = GPTConfig {
     vocab_size: tokenizer.vocab_size(),
     sequence_len: 256, n_layer: 6, n_head: 6, n_embd: 192,
     mlp_hidden_dim: 768, rms_norm_eps: 1e-5, rope_base: 10_000.0,
+    tie_word_embeddings: false,
 };
 let store = ParamStore::new();
 let mut model = GPT::new(config, store.root());

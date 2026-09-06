@@ -78,6 +78,7 @@ fn bench_deers(device: deers::Device, profile_enabled: bool) {
         mlp_hidden_dim: MLP_HIDDEN,
         rms_norm_eps: 1e-5,
         rope_base: 10_000.0,
+        tie_word_embeddings: false,
     };
     let store = deers::nn::ParamStore::new();
     let mut model = GPT::new(config, store.root());

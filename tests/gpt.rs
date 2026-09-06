@@ -45,6 +45,7 @@ fn test_config() -> gpt::GPTConfig {
         mlp_hidden_dim: 8,
         rms_norm_eps: 1e-5,
         rope_base: 10_000.0,
+        tie_word_embeddings: false,
     }
 }
 
@@ -76,6 +77,10 @@ fn candle_rms_norm(x: &CTensor, eps: f64) -> CTensor {
     let mean_sq = x.sqr().unwrap().mean_keepdim(D::Minus1).unwrap();
     let inv_norm = (mean_sq + eps).unwrap().powf(-0.5).unwrap();
     x.broadcast_mul(&inv_norm).unwrap()
+}
+
+fn candle_affine_rms_norm(x: &CTensor, weight: &CTensor, eps: f64) -> CTensor {
+    candle_rms_norm(x, eps).broadcast_mul(weight).unwrap()
 }
 
 fn candle_precompute_rotary_embeddings(
@@ -184,20 +189,23 @@ fn candle_gpt_forward(
     weights: &[CTensor],
 ) -> CTensor {
     let wte = &weights[0];
-    let q_proj = &weights[1];
-    let k_proj = &weights[2];
-    let v_proj = &weights[3];
-    let out_proj = &weights[4];
-    let up_proj = &weights[5];
-    let down_proj = &weights[6];
-    let lm_head = &weights[7];
+    let norm1_w = &weights[1];
+    let q_proj = &weights[2];
+    let k_proj = &weights[3];
+    let v_proj = &weights[4];
+    let out_proj = &weights[5];
+    let norm2_w = &weights[6];
+    let up_proj = &weights[7];
+    let down_proj = &weights[8];
+    let norm_w = &weights[9];
+    let lm_head = &weights[10];
 
     let ids = CTensor::from_vec(ids.to_vec(), &[batch_size * seq_len], &CDevice::Cpu).unwrap();
     let mut x = wte.embedding(&ids).unwrap().reshape((batch_size, seq_len, config.n_embd)).unwrap(); // [B, T, C]
     let (cos, sin) =
         candle_precompute_rotary_embeddings(seq_len, config.head_dim(), config.rope_base);
 
-    let norm1 = candle_rms_norm(&x, config.rms_norm_eps);
+    let norm1 = candle_affine_rms_norm(&x, norm1_w, config.rms_norm_eps);
     let attn = candle_attention_forward(
         &norm1,
         q_proj,
@@ -210,11 +218,11 @@ fn candle_gpt_forward(
     );
     x = x.broadcast_add(&attn).unwrap(); // [B, T, C]
 
-    let norm2 = candle_rms_norm(&x, config.rms_norm_eps);
+    let norm2 = candle_affine_rms_norm(&x, norm2_w, config.rms_norm_eps);
     let mlp = candle_mlp_forward(&norm2, up_proj, down_proj);
     x = x.broadcast_add(&mlp).unwrap(); // [B, T, C]
 
-    let x = candle_rms_norm(&x, config.rms_norm_eps); // [B, T, C]
+    let x = candle_affine_rms_norm(&x, norm_w, config.rms_norm_eps); // [B, T, C]
     x.reshape((batch_size * seq_len, config.n_embd))
         .unwrap()
         .matmul(lm_head)
@@ -290,6 +298,76 @@ fn test_gpt_forward_conforms_with_candle_on_cpu_and_accelerators() {
         // Assert
         assert_close(&actual, &expected, tol_for(device), &format!("gpt forward on {:?}", device));
     }
+}
+
+#[test]
+fn test_gpt_norms_are_affine_by_default_with_gradients() {
+    // Arrange
+    let config = test_config();
+    let model = gpt::GPT::new(config.clone(), ParamStore::new().root());
+    let parameters = model.parameters();
+
+    // Act
+    let idx = Tensor::from_vec(token_ids_i64(), (2, 3), Device::Cpu);
+    let targets = Tensor::from_vec(targets_i64(), (2 * 3,), Device::Cpu);
+    let logits = model.forward(&idx).unwrap();
+    let loss = loss::cross_entropy(
+        &logits.reshape((2 * 3, config.vocab_size)),
+        &targets,
+    );
+    let grads = loss.backward().unwrap();
+
+    // Assert
+    assert_eq!(parameters.len(), 11);
+    for parameter in &parameters {
+        let grad = grads.get(parameter.id()).unwrap().to_vec::<f32>().unwrap();
+        assert!(grad.iter().any(|g| *g != 0.0), "every parameter should receive gradient");
+    }
+}
+
+#[test]
+fn test_gpt_tied_weights_share_embedding_and_head() {
+    // Arrange
+    let config = gpt::GPTConfig { tie_word_embeddings: true, ..test_config() };
+
+    // Act
+    let model = gpt::GPT::new(config.clone(), ParamStore::new().root());
+    let parameters = model.parameters();
+    let ids: Vec<_> = parameters.iter().map(|p| p.id()).collect();
+    let deduped: std::collections::HashSet<_> = ids.iter().collect();
+
+    // Assert
+    assert!(model.tied_weights());
+    assert_eq!(parameters.len(), 10);
+    assert_eq!(deduped.len(), parameters.len(), "tied head must not duplicate parameters");
+
+    // Act (gradients flow into the shared table through both paths)
+    let idx = Tensor::from_vec(token_ids_i64(), (2, 3), Device::Cpu);
+    let targets = Tensor::from_vec(targets_i64(), (2 * 3,), Device::Cpu);
+    let logits = model.forward(&idx).unwrap();
+    assert_eq!(logits.layout().shape().as_slice(), &[2, 3, config.vocab_size]);
+    let loss = loss::cross_entropy(
+        &logits.reshape((2 * 3, config.vocab_size)),
+        &targets,
+    );
+    let grads = loss.backward().unwrap();
+
+    // Assert
+    let grad = grads.get(parameters[0].id()).unwrap().to_vec::<f32>().unwrap();
+    assert!(grad.iter().any(|g| *g != 0.0), "shared table should receive gradient");
+}
+
+#[test]
+fn test_gpt_weightless_compat_keeps_old_parameter_count() {
+    // Arrange
+    let config = test_config();
+
+    // Act
+    let model = gpt::GPT::new_weightless(config, ParamStore::new().root());
+
+    // Assert
+    assert_eq!(model.parameters().len(), 8);
+    assert!(!model.tied_weights());
 }
 
 #[test]

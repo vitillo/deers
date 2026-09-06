@@ -216,8 +216,26 @@ pub struct Block {
 }
 
 impl Block {
-    /// Creates a transformer block whose trainable weights are registered under `builder`.
+    /// Creates a transformer block with affine RMSNorms registered under `builder`.
     pub fn new(
+        builder: ParamBuilder,
+        n_embd: usize,
+        n_head: usize,
+        hidden_dim: usize,
+        eps: f64,
+    ) -> Self {
+        Self {
+            norm1: RMSNorm::new_affine(builder.pp("norm1"), n_embd, eps),
+            attn: CausalSelfAttention::new(builder.pp("attn"), n_embd, n_head),
+            norm2: RMSNorm::new_affine(builder.pp("norm2"), n_embd, eps),
+            mlp: MLP::new(builder.pp("mlp"), n_embd, hidden_dim),
+        }
+    }
+
+    /// Creates a transformer block with weightless RMSNorms.
+    ///
+    /// Kept for loading checkpoints saved before norms became affine.
+    pub fn new_weightless(
         builder: ParamBuilder,
         n_embd: usize,
         n_head: usize,
@@ -241,7 +259,9 @@ impl Block {
 
     /// Returns the trainable parameters owned by the block.
     pub fn parameters(&self) -> Vec<Parameter> {
-        let mut parameters = self.attn.parameters();
+        let mut parameters = self.norm1.parameters();
+        parameters.extend(self.attn.parameters());
+        parameters.extend(self.norm2.parameters());
         parameters.extend(self.mlp.parameters());
         parameters
     }
@@ -252,6 +272,11 @@ impl Block {
             parameter.to_device(device)?;
         }
         Ok(())
+    }
+
+    /// Returns true when both norms own a trainable scale.
+    pub fn is_affine(&self) -> bool {
+        !self.norm1.parameters().is_empty() && !self.norm2.parameters().is_empty()
     }
 }
 
@@ -274,6 +299,8 @@ pub struct GPTConfig {
     pub rms_norm_eps: f64,
     /// Base frequency used by RoPE.
     pub rope_base: f32,
+    /// Share the token embedding table with the LM head output projection.
+    pub tie_word_embeddings: bool,
 }
 
 impl GPTConfig {
@@ -287,6 +314,7 @@ impl GPTConfig {
 #[derive(Debug)]
 pub struct GPT {
     vocab_size: usize,
+    tied: bool,
     wte: Embedding,
     blocks: Vec<Block>,
     norm: RMSNorm,
@@ -312,6 +340,42 @@ impl GPT {
                 )
             })
             .collect();
+        let norm = RMSNorm::new_affine(builder.pp("norm"), config.n_embd, config.rms_norm_eps);
+        let tied = config.tie_word_embeddings;
+        let lm_head = if tied {
+            Linear::shared_weight(wte.weight())
+        } else {
+            Linear::no_bias(builder.pp("lm_head"), config.n_embd, config.vocab_size)
+        };
+        let (cos, sin) = precompute_rotary_embeddings(
+            config.sequence_len,
+            config.head_dim(),
+            config.rope_base,
+            DType::F32,
+            Device::Cpu,
+        );
+
+        Self { vocab_size: config.vocab_size, tied, wte, blocks, norm, lm_head, cos, sin }
+    }
+
+    /// Creates a GPT model with weightless RMSNorms and an untied LM head.
+    ///
+    /// Kept for loading checkpoints saved before norms became affine.
+    pub fn new_weightless(config: GPTConfig, builder: ParamBuilder) -> Self {
+        assert!(config.n_embd.is_multiple_of(config.n_head), "n_embd must be divisible by n_head");
+
+        let wte = Embedding::new(builder.pp("wte"), config.vocab_size, config.n_embd);
+        let blocks = (0..config.n_layer)
+            .map(|index| {
+                Block::new_weightless(
+                    builder.pp("blocks").pp(index.to_string()),
+                    config.n_embd,
+                    config.n_head,
+                    config.mlp_hidden_dim,
+                    config.rms_norm_eps,
+                )
+            })
+            .collect();
         let norm = RMSNorm::new(config.rms_norm_eps);
         let lm_head = Linear::no_bias(builder.pp("lm_head"), config.n_embd, config.vocab_size);
         let (cos, sin) = precompute_rotary_embeddings(
@@ -322,7 +386,12 @@ impl GPT {
             Device::Cpu,
         );
 
-        Self { vocab_size: config.vocab_size, wte, blocks, norm, lm_head, cos, sin }
+        Self { vocab_size: config.vocab_size, tied: false, wte, blocks, norm, lm_head, cos, sin }
+    }
+
+    /// Returns true when the LM head shares the token embedding table.
+    pub fn tied_weights(&self) -> bool {
+        self.tied
     }
 
     /// Runs the decoder on token ids shaped `[B, T]`.
@@ -355,12 +424,18 @@ impl GPT {
     }
 
     /// Returns the trainable parameters owned by the model.
+    ///
+    /// When weights are tied the LM head reuses the embedding table, so it
+    /// contributes no additional parameter.
     pub fn parameters(&self) -> Vec<Parameter> {
         let mut parameters = self.wte.parameters();
         for block in &self.blocks {
             parameters.extend(block.parameters());
         }
-        parameters.extend(self.lm_head.parameters());
+        parameters.extend(self.norm.parameters());
+        if !self.tied {
+            parameters.extend(self.lm_head.parameters());
+        }
         parameters
     }
 
@@ -370,6 +445,7 @@ impl GPT {
         for block in &self.blocks {
             block.to_device(device)?;
         }
+        self.norm.to_device(device)?;
         self.lm_head.to_device(device)?;
         self.cos = self.cos.to_device(device)?;
         self.sin = self.sin.to_device(device)?;
