@@ -417,6 +417,7 @@ pub struct SwiGLU {
     gate_proj: Linear,
     up_proj: Linear,
     down_proj: Linear,
+    out_features: usize,
 }
 
 impl SwiGLU {
@@ -431,6 +432,7 @@ impl SwiGLU {
             gate_proj: Linear::no_bias(builder.pp("gate_proj"), in_features, hidden_dim),
             up_proj: Linear::no_bias(builder.pp("up_proj"), in_features, hidden_dim),
             down_proj: Linear::no_bias(builder.pp("down_proj"), hidden_dim, out_features),
+            out_features,
         }
     }
 }
@@ -446,7 +448,7 @@ impl Module for SwiGLU {
         let gate = self.gate_proj.forward(&x_flat)?.silu();
         let up = self.up_proj.forward(&x_flat)?;
         let y = self.down_proj.forward(&(&gate * &up))?;
-        out_shape.push(in_features);
+        out_shape.push(self.out_features);
         Ok(y.reshape(out_shape))
     }
 

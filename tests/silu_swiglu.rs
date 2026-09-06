@@ -152,6 +152,41 @@ fn swiglu_forward_matches_candle_reference() {
 }
 
 #[test]
+fn swiglu_forward_supports_nonsquare_output() {
+    // Arrange
+    let store = nn::ParamStore::new();
+    let swiglu = nn::SwiGLU::new(store.root(), 4, 6, 5);
+    let params = swiglu.parameters();
+    let weights: Vec<Vec<f32>> = params.iter().map(|p| p.to_vec::<f32>().unwrap()).collect();
+    let gate = CTensor::from_vec(weights[0].clone(), &[4, 6], &CDevice::Cpu).unwrap();
+    let up = CTensor::from_vec(weights[1].clone(), &[4, 6], &CDevice::Cpu).unwrap();
+    let down = CTensor::from_vec(weights[2].clone(), &[6, 5], &CDevice::Cpu).unwrap();
+    let input_data: Vec<f32> = (0..8).map(|v| v as f32 * 0.1 - 0.5).collect();
+    let candle_x = CTensor::from_vec(input_data.clone(), &[2, 4], &CDevice::Cpu).unwrap();
+    let expected = candle_x
+        .matmul(&gate)
+        .unwrap()
+        .silu()
+        .unwrap()
+        .broadcast_mul(&candle_x.matmul(&up).unwrap())
+        .unwrap()
+        .matmul(&down)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+
+    // Act
+    let x = Tensor::from_vec(input_data, (2, 4), Device::Cpu);
+    let out = swiglu.forward(&x).unwrap();
+
+    // Assert
+    assert_eq!(out.layout().shape().as_slice(), &[2, 5]);
+    assert_close(&out.to_vec::<f32>().unwrap(), &expected, "swiglu nonsquare forward");
+}
+
+#[test]
 fn swiglu_backward_flows_to_all_projections() {
     // Arrange
     let store = nn::ParamStore::new();
