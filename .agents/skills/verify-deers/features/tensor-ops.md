@@ -16,7 +16,8 @@ cargo test --locked tensor 2>&1 | tail -20
 
 Proof is exit code 0 plus passing forward and backward candle parity
 assertions for the touched op (same inputs in deers and candle, compared
-with `assert_close` at 1e-4 for f32).
+with `assert_close` at 1e-4 for f32). On CPU-only hosts use the CPU tier
+from the skill body. The full test needs `nvcc`.
 
 ## Gotchas
 

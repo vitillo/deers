@@ -17,7 +17,8 @@ cargo test --locked grad 2>&1 | tail -20
 
 Proof is exit code 0 and passing gradient parity checks against
 candle's `GradStore` on the same graph (sum the outputs, call backward in
-both frameworks, compare each input grad at 1e-4).
+both frameworks, compare each input grad at 1e-4). On CPU-only hosts use
+the CPU tier from the skill body. The full test needs `nvcc`.
 
 ## Gotchas
 

@@ -16,8 +16,9 @@ cargo test --locked gpt 2>&1 | tail -20
 ```
 
 Proof is exit code 0 and passing candle parity checks for the module
-(logits and grads vs the candle reference at 1e-4 on CPU, 2e-3 on
-accelerators, following `tests/gpt.rs`).
+(logits and grads vs the candle reference at 1e-4 on CPU, following
+`tests/gpt.rs`). Accelerator numbers count only when the run used that
+hardware. On CPU-only hosts use the CPU tier from the skill body.
 
 ## Gotchas
 

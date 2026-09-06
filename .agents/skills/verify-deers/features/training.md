@@ -16,7 +16,7 @@ cargo build --locked --example mnist_train 2>&1 | tail -5
 ```
 
 Proof is a green suite plus loss and gradient parity with candle on a
-small fixed batch (see `tests/gpt.rs` loss_and_grads pattern). Run a full training loop only when the change touches the training path, since it downloads data and takes much longer.
+small fixed batch (see `tests/gpt.rs` loss_and_grads pattern). Run a full training loop only when the change touches the training path, since it downloads data and takes much longer. On CPU-only hosts use the CPU tier from the skill body and skip the example build.
 
 ## Gotchas
 
