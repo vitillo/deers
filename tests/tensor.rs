@@ -2770,3 +2770,348 @@ fn triu_backward_conforms() {
         assert_close(&actual_grad, &expected_grad, &format!("triu backward on {:?}", device));
     }
 }
+
+#[test]
+fn argmax_forward_candle_conforms() {
+    // Arrange
+    let data = vec![1.0f32, 3.0, 2.0, 4.0, 0.0, 5.0];
+    let candle_input = CTensor::from_vec(data.clone(), &[2, 3], &CDevice::Cpu).unwrap();
+    let expected: Vec<i64> = candle_input
+        .argmax(1)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<u32>()
+        .unwrap()
+        .iter()
+        .map(|v| *v as i64)
+        .collect();
+
+    // Act
+    let results: Vec<(Device, Vec<i64>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 3), device);
+            let output = input.argmax(1, false);
+            let values = output.to_vec::<i64>().unwrap();
+            (device, values)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_eq!(actual, expected, "argmax forward on {:?}", device);
+    }
+}
+
+#[test]
+fn argmax_forward_dim0_candle_conforms() {
+    // Arrange
+    let data = vec![1.0f32, 3.0, 2.0, 4.0, 0.0, 5.0];
+    let candle_input = CTensor::from_vec(data.clone(), &[2, 3], &CDevice::Cpu).unwrap();
+    let expected: Vec<i64> = candle_input
+        .argmax(0)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<u32>()
+        .unwrap()
+        .iter()
+        .map(|v| *v as i64)
+        .collect();
+
+    // Act
+    let results: Vec<(Device, Vec<i64>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 3), device);
+            let output = input.argmax(0, false);
+            let values = output.to_vec::<i64>().unwrap();
+            (device, values)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_eq!(actual, expected, "argmax dim0 forward on {:?}", device);
+    }
+}
+
+#[test]
+fn clamp_forward_candle_conforms() {
+    // Arrange
+    let data = vec![-1.0f32, 0.5, 1.5, 3.0];
+    let candle_input = CTensor::from_vec(data.clone(), &[2, 2], &CDevice::Cpu).unwrap();
+    let expected =
+        candle_input.clamp(0f32, 2f32).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 2), device);
+            let output = input.clamp(0.0, 2.0);
+            let values = output.to_vec::<f32>().unwrap();
+            (device, values)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_close(&actual, &expected, &format!("clamp forward on {:?}", device));
+    }
+}
+
+#[test]
+fn clamp_backward_candle_conforms() {
+    // Arrange
+    let data = vec![-1.0f32, 0.5, 1.5, 3.0];
+    let candle_input = candle_var(data.clone(), &[2, 2]);
+    let candle_output = candle_input.clamp(0f32, 2f32).unwrap();
+    let candle_loss = candle_output.sum_all().unwrap();
+    let candle_grads = candle_loss.backward().unwrap();
+    let expected_grad = candle_grad(&candle_grads, &candle_input);
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
+            let loss = input.clamp(0.0, 2.0).sum(vec![0, 1], false);
+            let grads = loss.backward().unwrap();
+            let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
+            (device, grad)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual_grad) in results {
+        assert_close(&actual_grad, &expected_grad, &format!("clamp backward on {:?}", device));
+    }
+}
+
+#[test]
+fn where_forward_candle_conforms() {
+    // Arrange
+    let cond = vec![1i64, 0, 0, 1];
+    let on_true = vec![1.0f32, 2.0, 3.0, 4.0];
+    let on_false = vec![10.0f32, 20.0, 30.0, 40.0];
+    let candle_cond = CTensor::from_vec(cond.clone(), &[2, 2], &CDevice::Cpu).unwrap();
+    let candle_true = CTensor::from_vec(on_true.clone(), &[2, 2], &CDevice::Cpu).unwrap();
+    let candle_false = CTensor::from_vec(on_false.clone(), &[2, 2], &CDevice::Cpu).unwrap();
+    let expected = candle_cond
+        .where_cond(&candle_true, &candle_false)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let cond = Tensor::from_vec(cond.clone(), (2, 2), device);
+            let on_true = Tensor::from_vec(on_true.clone(), (2, 2), device);
+            let on_false = Tensor::from_vec(on_false.clone(), (2, 2), device);
+            let output = cond.where_cond(&on_true, &on_false);
+            let values = output.to_vec::<f32>().unwrap();
+            (device, values)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_close(&actual, &expected, &format!("where forward on {:?}", device));
+    }
+}
+
+#[test]
+fn where_backward_candle_conforms() {
+    // Arrange
+    let cond = vec![1i64, 0, 0, 1];
+    let on_true = vec![1.0f32, 2.0, 3.0, 4.0];
+    let on_false = vec![10.0f32, 20.0, 30.0, 40.0];
+    let candle_cond = CTensor::from_vec(cond.clone(), &[2, 2], &CDevice::Cpu).unwrap();
+    let candle_true = candle_var(on_true.clone(), &[2, 2]);
+    let candle_false = candle_var(on_false.clone(), &[2, 2]);
+    let candle_output = candle_cond.where_cond(&candle_true, &candle_false).unwrap();
+    let candle_loss = candle_output.sum_all().unwrap();
+    let candle_grads = candle_loss.backward().unwrap();
+    let expected_true_grad = candle_grad(&candle_grads, &candle_true);
+    let expected_false_grad = candle_grad(&candle_grads, &candle_false);
+
+    // Act
+    let results: Vec<(Device, Vec<f32>, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let cond = Tensor::from_vec(cond.clone(), (2, 2), device);
+            let on_true = Tensor::from_vec(on_true.clone(), (2, 2), device).attach();
+            let on_false = Tensor::from_vec(on_false.clone(), (2, 2), device).attach();
+            let loss = cond.where_cond(&on_true, &on_false).sum(vec![0, 1], false);
+            let grads = loss.backward().unwrap();
+            let true_grad = grads.get(on_true.id()).unwrap().to_vec::<f32>().unwrap();
+            let false_grad = grads.get(on_false.id()).unwrap().to_vec::<f32>().unwrap();
+            (device, true_grad, false_grad)
+        })
+        .collect();
+
+    // Assert
+    for (device, true_grad, false_grad) in results {
+        assert_close(
+            &true_grad,
+            &expected_true_grad,
+            &format!("where backward true on {:?}", device),
+        );
+        assert_close(
+            &false_grad,
+            &expected_false_grad,
+            &format!("where backward false on {:?}", device),
+        );
+    }
+}
+
+#[test]
+fn sort_last_dim_candle_conforms() {
+    // Arrange
+    let data = vec![3.0f32, 1.0, 2.0, 5.0, 4.0, 0.0];
+    let candle_input = CTensor::from_vec(data.clone(), &[2, 3], &CDevice::Cpu).unwrap();
+    let (candle_values, candle_indices) = candle_input.sort_last_dim(true).unwrap();
+    let expected_values = candle_values.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    let expected_indices: Vec<i64> = candle_indices
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<u32>()
+        .unwrap()
+        .iter()
+        .map(|v| *v as i64)
+        .collect();
+
+    // Act
+    let results: Vec<(Device, Vec<f32>, Vec<i64>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 3), device);
+            let (values, indices) = input.sort(1, false);
+            let values = values.to_vec::<f32>().unwrap();
+            let indices = indices.to_vec::<i64>().unwrap();
+            (device, values, indices)
+        })
+        .collect();
+
+    // Assert
+    for (device, values, indices) in results {
+        assert_close(&values, &expected_values, &format!("sort values on {:?}", device));
+        assert_eq!(indices, expected_indices, "sort indices on {:?}", device);
+    }
+}
+
+#[test]
+fn tril_forward_candle_conforms() {
+    // Arrange
+    let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+    let candle_input = CTensor::from_vec(data.clone(), &[3, 3], &CDevice::Cpu).unwrap();
+    let mask = CTensor::tril2(3, candle_core::DType::F32, &CDevice::Cpu).unwrap();
+    let expected =
+        candle_input.mul(&mask).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (3, 3), device);
+            let output = input.tril(0);
+            let values = output.to_vec::<f32>().unwrap();
+            (device, values)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_close(&actual, &expected, &format!("tril forward on {:?}", device));
+    }
+}
+
+#[test]
+fn tril_backward_candle_conforms() {
+    // Arrange
+    let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+    let mask = CTensor::tril2(3, candle_core::DType::F32, &CDevice::Cpu).unwrap();
+    let candle_input = candle_var(data.clone(), &[3, 3]);
+    let candle_output = candle_input.mul(&mask).unwrap();
+    let candle_loss = candle_output.sum_all().unwrap();
+    let candle_grads = candle_loss.backward().unwrap();
+    let expected_grad = candle_grad(&candle_grads, &candle_input);
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (3, 3), device).attach();
+            let loss = input.tril(0).sum(vec![0, 1], false);
+            let grads = loss.backward().unwrap();
+            let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
+            (device, grad)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual_grad) in results {
+        assert_close(&actual_grad, &expected_grad, &format!("tril backward on {:?}", device));
+    }
+}
+
+#[test]
+fn triu_forward_candle_conforms() {
+    // Arrange
+    let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+    let candle_input = CTensor::from_vec(data.clone(), &[3, 3], &CDevice::Cpu).unwrap();
+    let mask = CTensor::triu2(3, candle_core::DType::F32, &CDevice::Cpu).unwrap();
+    let expected =
+        candle_input.mul(&mask).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (3, 3), device);
+            let output = input.triu(0);
+            let values = output.to_vec::<f32>().unwrap();
+            (device, values)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_close(&actual, &expected, &format!("triu forward on {:?}", device));
+    }
+}
+
+#[test]
+fn triu_backward_candle_conforms() {
+    // Arrange
+    let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+    let mask = CTensor::triu2(3, candle_core::DType::F32, &CDevice::Cpu).unwrap();
+    let candle_input = candle_var(data.clone(), &[3, 3]);
+    let candle_output = candle_input.mul(&mask).unwrap();
+    let candle_loss = candle_output.sum_all().unwrap();
+    let candle_grads = candle_loss.backward().unwrap();
+    let expected_grad = candle_grad(&candle_grads, &candle_input);
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (3, 3), device).attach();
+            let loss = input.triu(0).sum(vec![0, 1], false);
+            let grads = loss.backward().unwrap();
+            let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
+            (device, grad)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual_grad) in results {
+        assert_close(&actual_grad, &expected_grad, &format!("triu backward on {:?}", device));
+    }
+}
