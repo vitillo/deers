@@ -385,6 +385,11 @@ impl Tensor {
         ops::Relu::new(self.clone()).unwrap().forward().unwrap()
     }
 
+    /// Element-wise SiLU (swish): `x * sigmoid(x)`.
+    pub fn silu(&self) -> Tensor {
+        ops::Silu::new(self.clone()).unwrap().forward().unwrap()
+    }
+
     pub(crate) fn eq(&self, other: &Tensor) -> Tensor {
         let (a, b) = broadcast_pair(self, other);
         let storage = Arc::new(RwLock::new(

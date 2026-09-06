@@ -399,6 +399,67 @@ impl Module for ReLU {
     }
 }
 
+/// Element-wise SiLU (swish) activation: `x * sigmoid(x)`.
+#[derive(Debug)]
+pub struct SiLU;
+
+impl Module for SiLU {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        Ok(x.silu())
+    }
+}
+
+/// Gated SiLU MLP (SwiGLU): `down(silu(gate(x)) * up(x))`.
+///
+/// Follows the Llama feed-forward recipe with three bias-free projections.
+#[derive(Debug)]
+pub struct SwiGLU {
+    gate_proj: Linear,
+    up_proj: Linear,
+    down_proj: Linear,
+    out_features: usize,
+}
+
+impl SwiGLU {
+    /// Creates a SwiGLU module whose projections are registered under `builder`.
+    pub fn new(
+        builder: ParamBuilder,
+        in_features: usize,
+        hidden_dim: usize,
+        out_features: usize,
+    ) -> Self {
+        Self {
+            gate_proj: Linear::no_bias(builder.pp("gate_proj"), in_features, hidden_dim),
+            up_proj: Linear::no_bias(builder.pp("up_proj"), in_features, hidden_dim),
+            down_proj: Linear::no_bias(builder.pp("down_proj"), hidden_dim, out_features),
+            out_features,
+        }
+    }
+}
+
+impl Module for SwiGLU {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let shape = x.layout().shape();
+        assert!(shape.ndim() >= 2, "SwiGLU expects input with rank >= 2");
+        let in_features = shape[shape.ndim() - 1];
+        let mut out_shape: Vec<usize> = (0..shape.ndim() - 1).map(|i| shape[i]).collect();
+        let rows: usize = out_shape.iter().product();
+        let x_flat = x.reshape(vec![rows, in_features]);
+        let gate = self.gate_proj.forward(&x_flat)?.silu();
+        let up = self.up_proj.forward(&x_flat)?;
+        let y = self.down_proj.forward(&(&gate * &up))?;
+        out_shape.push(self.out_features);
+        Ok(y.reshape(out_shape))
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        let mut parameters = self.gate_proj.parameters();
+        parameters.extend(self.up_proj.parameters());
+        parameters.extend(self.down_proj.parameters());
+        parameters
+    }
+}
+
 /// Inverted dropout: zeroes elements with probability `p` while training.
 ///
 /// Evaluation is an exact identity. Has no parameters.
