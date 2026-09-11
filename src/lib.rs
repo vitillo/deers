@@ -38,3 +38,7 @@ pub use dtype::DType;
 pub use profiler::{Profile, ProfileRow, Profiler, ProfilerConfig, profile};
 /// The core tensor type.
 pub use tensor::Tensor;
+/// RAII guard that disables gradient tracking within a scope.
+pub use tensor::NoGradGuard;
+/// Runs a closure with gradient tracking disabled (inference / eval).
+pub use tensor::no_grad;
