@@ -67,29 +67,30 @@ fn read_tensor(tensors: &SafeTensors<'_>, name: &str, device: Device) -> Result<
         SafeDtype::F16 => {
             let values = view
                 .data()
-                .chunks_exact(2)
-                .map(|chunk| f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|chunk| f16::from_bits(u16::from_le_bytes(*chunk)))
                 .collect::<Vec<_>>();
             Tensor::from_vec(values, shape, device)
         }
         SafeDtype::F32 => {
             let values = view
                 .data()
-                .chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| f32::from_le_bytes(*chunk))
                 .collect::<Vec<_>>();
             Tensor::from_vec(values, shape, device)
         }
         SafeDtype::I64 => {
             let values = view
                 .data()
-                .chunks_exact(8)
-                .map(|chunk| {
-                    i64::from_le_bytes([
-                        chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
-                        chunk[7],
-                    ])
-                })
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|chunk| i64::from_le_bytes(*chunk))
                 .collect::<Vec<_>>();
             Tensor::from_vec(values, shape, device)
         }
