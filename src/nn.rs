@@ -399,6 +399,26 @@ impl Module for ReLU {
     }
 }
 
+/// Element-wise GELU activation (tanh approximation).
+#[derive(Debug)]
+pub struct GELU;
+
+impl Module for GELU {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        Ok(x.gelu())
+    }
+}
+
+/// Element-wise SiLU (swish) activation.
+#[derive(Debug)]
+pub struct SiLU;
+
+impl Module for SiLU {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        Ok(x.silu())
+    }
+}
+
 /// Inverted dropout: zeroes elements with probability `p` while training.
 ///
 /// Evaluation is an exact identity. Has no parameters.
