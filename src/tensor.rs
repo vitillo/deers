@@ -447,6 +447,22 @@ impl Tensor {
         &one / &denom
     }
 
+    /// Element-wise SiLU (swish): `x * sigmoid(x)`.
+    pub fn silu(&self) -> Tensor {
+        self * &self.sigmoid()
+    }
+
+    /// Element-wise GELU using the tanh approximation (candle / PyTorch `gelu`):
+    /// `0.5 * x * (1 + tanh(√(2/π) * x * (1 + 0.044715 * x²)))`.
+    pub fn gelu(&self) -> Tensor {
+        // Match candle-core's association so parity tests stay within 1e-4.
+        const SQRT_2_OVER_PI: f64 = 0.7978845608028654;
+        let x2 = self * self;
+        let inner = self * &((x2 * 0.044715) + 1.0);
+        let tanh_out = (inner * SQRT_2_OVER_PI).tanh();
+        &(self * &(tanh_out + 1.0)) * 0.5
+    }
+
     /// Element-wise tanh.
     pub fn tanh(&self) -> Tensor {
         ops::Tanh::new(self.clone()).unwrap().forward().unwrap()
