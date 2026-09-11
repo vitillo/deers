@@ -10,24 +10,84 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 thread_local! {
-    static NO_GRAD: Cell<bool> = const { Cell::new(false) };
+    // Nesting depth so overlapping guards (and nested `no_grad` closures) stay
+    // disabled until the outermost scope exits.
+    static NO_GRAD_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+fn no_grad_active() -> bool {
+    NO_GRAD_DEPTH.with(|depth| depth.get() > 0)
 }
 
 /// RAII guard that disables autograd tracking for all tensor operations
-/// within its scope. Used during backward to avoid building secondary graphs.
-pub(crate) struct NoGradGuard;
+/// within its scope.
+///
+/// Dropping the guard restores the previous nesting depth. Nested guards are
+/// supported: gradients stay off until the outermost guard is dropped.
+///
+/// Prefer [`no_grad`] for short inference blocks; use this when a longer
+/// lexical scope is clearer (for example during [`Tensor::backward`]).
+///
+/// # Examples
+///
+/// ```
+/// use deers::{Device, DType, NoGradGuard, Tensor};
+///
+/// let x = Tensor::ones((2,), DType::F32, Device::Cpu).attach();
+/// let _guard = NoGradGuard::new();
+/// let y = &x + &x;
+/// assert!(!y.requires_grad());
+/// ```
+pub struct NoGradGuard;
 
 impl NoGradGuard {
+    /// Disables autograd tracking until this guard is dropped.
     pub fn new() -> Self {
-        NO_GRAD.with(|f| f.set(true));
+        NO_GRAD_DEPTH.with(|depth| depth.set(depth.get() + 1));
         NoGradGuard
+    }
+}
+
+impl Default for NoGradGuard {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Drop for NoGradGuard {
     fn drop(&mut self) {
-        NO_GRAD.with(|f| f.set(false));
+        NO_GRAD_DEPTH.with(|depth| {
+            let current = depth.get();
+            debug_assert!(current > 0, "NoGradGuard dropped with zero nesting depth");
+            depth.set(current.saturating_sub(1));
+        });
     }
+}
+
+/// Runs `f` with autograd tracking disabled, then restores the previous state.
+///
+/// Operations inside `f` do not attach to the computation graph, even when
+/// their inputs were created with [`Tensor::attach`]. This matches PyTorch's
+/// `torch.no_grad()` and is the usual pattern for inference / eval.
+///
+/// Nested calls are safe: gradients remain off until the outermost scope ends.
+///
+/// # Examples
+///
+/// ```
+/// use deers::{Device, DType, Tensor, no_grad};
+///
+/// let x = Tensor::ones((2,), DType::F32, Device::Cpu).attach();
+/// let y = no_grad(|| &x * 2.0);
+/// assert!(!y.requires_grad());
+/// assert!(y.op().is_none());
+/// ```
+pub fn no_grad<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let _guard = NoGradGuard::new();
+    f()
 }
 
 use half::f16;
@@ -91,8 +151,8 @@ impl Tensor {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let id = TensorId(COUNTER.fetch_add(1, Ordering::Relaxed));
 
-        // When no_grad is active (e.g. during backward), skip autograd tracking.
-        let (requires_grad, op) = if NO_GRAD.with(|f| f.get()) {
+        // When no_grad is active (e.g. during backward or inference), skip autograd tracking.
+        let (requires_grad, op) = if no_grad_active() {
             (false, None)
         } else {
             let requires_grad = requires_grad
@@ -876,6 +936,68 @@ mod tests {
 
         // Assert
         assert_eq!(grads.get(tensor.id()).unwrap().to_vec::<f32>().unwrap(), vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_no_grad_disables_tracking_inside_scope() {
+        // Arrange
+        let x = Tensor::ones((2,), DType::F32, Device::Cpu).attach();
+
+        // Act
+        let y = no_grad(|| &x + &x);
+
+        // Assert — ops inside no_grad must not attach or keep op history.
+        assert!(!y.requires_grad());
+        assert!(y.op().is_none());
+        assert_eq!(y.to_vec::<f32>().unwrap(), vec![2.0, 2.0]);
+    }
+
+    #[test]
+    fn test_no_grad_restores_tracking_after_scope() {
+        // Arrange
+        let x = Tensor::ones((2,), DType::F32, Device::Cpu).attach();
+        let _ = no_grad(|| &x * 3.0);
+
+        // Act — tracking should be back on after the closure returns.
+        let y = &x + &x;
+
+        // Assert
+        assert!(y.requires_grad());
+        assert!(y.op().is_some());
+    }
+
+    #[test]
+    fn test_no_grad_guard_disables_tracking() {
+        // Arrange
+        let x = Tensor::ones((2,), DType::F32, Device::Cpu).attach();
+
+        // Act
+        let y = {
+            let _guard = NoGradGuard::new();
+            &x * 2.0
+        };
+
+        // Assert
+        assert!(!y.requires_grad());
+        assert!(y.op().is_none());
+    }
+
+    #[test]
+    fn test_nested_no_grad_stays_off_until_outer_exits() {
+        // Arrange
+        let x = Tensor::ones((2,), DType::F32, Device::Cpu).attach();
+
+        // Act / Assert
+        let _outer = NoGradGuard::new();
+        {
+            let _inner = NoGradGuard::new();
+            let mid = &x + &x;
+            assert!(!mid.requires_grad());
+        }
+        // Inner guard dropped; outer still active so tracking stays off.
+        let still_off = &x * 2.0;
+        assert!(!still_off.requires_grad());
+        assert!(still_off.op().is_none());
     }
 
     #[test]
