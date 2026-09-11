@@ -41,7 +41,8 @@ candle-nn = { version = "0.9.2", features = ["cuda"] }
 debug = true
 
 [lints.clippy]
-all = { level = "warn", priority = -1 }
+# Match AGENTS.md: treat Clippy warnings as errors (same as `clippy … -D warnings`).
+all = { level = "deny", priority = -1 }
 too_many_arguments = "allow"
 enum_variant_names = "allow"
 needless_borrow = "allow"

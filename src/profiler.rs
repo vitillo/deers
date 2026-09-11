@@ -367,7 +367,7 @@ pub(crate) fn record_device_time(event_id: usize, elapsed_ns: u64) {
 }
 
 fn avg_time(total_ns: u64, calls: u64) -> u64 {
-    if calls == 0 { 0 } else { total_ns / calls }
+    total_ns.checked_div(calls).unwrap_or(0)
 }
 
 fn format_duration(ns: u64) -> String {
