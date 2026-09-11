@@ -2114,6 +2114,110 @@ fn tanh_backward_conforms() {
 }
 
 #[test]
+fn gelu_forward_conforms() {
+    // Arrange
+    let data = vec![-2.0f32, -1.0, 0.0, 1.0, 2.0, 3.0];
+    let candle_input = CTensor::from_vec(data.clone(), &[2, 3], &CDevice::Cpu).unwrap();
+    let expected = candle_input.gelu().unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 3), device);
+            let output = input.gelu();
+            let values = output.to_vec::<f32>().unwrap();
+            (device, values)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_close(&actual, &expected, &format!("gelu forward on {:?}", device));
+    }
+}
+
+#[test]
+fn gelu_backward_conforms() {
+    // Arrange
+    let data = vec![-2.0f32, -1.0, 0.0, 1.0, 2.0, 3.0];
+    let candle_input = candle_var(data.clone(), &[2, 3]);
+    let candle_output = candle_input.gelu().unwrap();
+    let candle_loss = candle_output.sum_all().unwrap();
+    let candle_grads = candle_loss.backward().unwrap();
+    let expected_grad = candle_grad(&candle_grads, &candle_input);
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
+            let loss = input.gelu().sum(vec![0, 1], false);
+            let grads = loss.backward().unwrap();
+            let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
+            (device, grad)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual_grad) in results {
+        assert_close(&actual_grad, &expected_grad, &format!("gelu backward on {:?}", device));
+    }
+}
+
+#[test]
+fn silu_forward_conforms() {
+    // Arrange
+    let data = vec![-2.0f32, -1.0, 0.0, 1.0, 2.0, 3.0];
+    let candle_input = CTensor::from_vec(data.clone(), &[2, 3], &CDevice::Cpu).unwrap();
+    let expected = candle_input.silu().unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 3), device);
+            let output = input.silu();
+            let values = output.to_vec::<f32>().unwrap();
+            (device, values)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_close(&actual, &expected, &format!("silu forward on {:?}", device));
+    }
+}
+
+#[test]
+fn silu_backward_conforms() {
+    // Arrange
+    let data = vec![-2.0f32, -1.0, 0.0, 1.0, 2.0, 3.0];
+    let candle_input = candle_var(data.clone(), &[2, 3]);
+    let candle_output = candle_input.silu().unwrap();
+    let candle_loss = candle_output.sum_all().unwrap();
+    let candle_grads = candle_loss.backward().unwrap();
+    let expected_grad = candle_grad(&candle_grads, &candle_input);
+
+    // Act
+    let results: Vec<(Device, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
+            let loss = input.silu().sum(vec![0, 1], false);
+            let grads = loss.backward().unwrap();
+            let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
+            (device, grad)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual_grad) in results {
+        assert_close(&actual_grad, &expected_grad, &format!("silu backward on {:?}", device));
+    }
+}
+
+#[test]
 fn softmax_forward_conforms() {
     // Arrange
     let data = vec![1.0f32, 2.0, 3.0, 1.5, 0.5, -1.0];
