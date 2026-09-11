@@ -1,3 +1,4 @@
 [alias]
 fmt-check = "fmt --all --check"
-lint = "clippy --all-targets --all-features"
+# Matches AGENTS.md: fail the build on Clippy warnings.
+lint = "clippy --all-targets --all-features -- -D warnings"

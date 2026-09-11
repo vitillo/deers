@@ -77,15 +77,15 @@ See [`examples/mnist_train.rs`](examples/mnist_train.rs) for a simpler MNIST cla
 
 **DTypes** — `f16`, `f32`, and `i64`
 
-**Tensor ops** — neg, add, sub, mul, div, powf, log, exp, sqrt, sin, cos, relu, sigmoid, tanh, matmul, gather, index_select, cat
+**Tensor ops** — neg, add, sub, mul, div, powf, log, exp, sqrt, sin, cos, relu, sigmoid, tanh, matmul, gather, index_select, cat, clamp, where_cond, masked_fill, tril, triu
 
-**Reductions** — sum, max, mean, logsumexp, log_softmax, softmax
+**Reductions / selection** — sum, max, mean, logsumexp, log_softmax, softmax, argmax, topk, sort
 
 **Shape ops** — permute, broadcast, reshape, transpose, compact, narrow
 
 **Autograd** — reverse-mode differentiation with gradient accumulation
 
-**Modules** — `Linear`, `Embedding`, `RMSNorm`, `ReLU`, `Sequential`, `CausalSelfAttention`, `MLP`, `GPTBlock`, `GPT`
+**Modules** — `Linear`, `Embedding`, `RMSNorm`, `LayerNorm`, `ReLU`, `Dropout`, `Sequential`, `CausalSelfAttention`, `MLP`, `Block`, `GPT`
 
 **Optimizers** — SGD, AdamW (decoupled weight decay, bias correction)
 
@@ -99,7 +99,7 @@ See [`examples/mnist_train.rs`](examples/mnist_train.rs) for a simpler MNIST cla
 
 **Checkpoints** — safetensors-based model and optimizer state serialization
 
-Most `Tensor` methods return values directly and panic on shape or device mismatches, keeping call sites compact. Gradients are enabled via `.attach()` or `Var`. Reductions and device movement are always explicit.
+Most `Tensor` methods return values directly and panic on shape or device mismatches, keeping call sites compact. Gradients are enabled via `.attach()` or `Parameter`. Reductions and device movement are always explicit.
 
 ## Design
 
@@ -107,7 +107,7 @@ Each operation implements the `TensorOp` trait with `forward()`, `backward()`, a
 
 Views (permute, broadcast, reshape) only change the layout metadata without copying data. A stride of 0 encodes broadcast dimensions. `compact()` materializes a view into contiguous storage when needed, but short-circuits to a no-op if the tensor is already contiguous.
 
-`Var` wraps a `Tensor` as a trainable parameter. It implements `Deref<Target = Tensor>` so it can be used anywhere a tensor is expected. The optimizer updates `Var` storage in-place, keeping tensor IDs stable across training steps.
+`Parameter` wraps a `Tensor` as a trainable parameter. It implements `Deref<Target = Tensor>` so it can be used anywhere a tensor is expected. The optimizer updates `Parameter` storage in-place, keeping tensor IDs stable across training steps.
 
 `Tensor::to_device(...)` moves tensor data between backends. At the module level, `Module::to_device(...)` moves all trainable parameters, keeping the API close to `model.to(device)` in PyTorch.
 
@@ -118,7 +118,10 @@ The accelerator backends (MPS, CUDA) are intentionally small and explicit. They 
 ```
 cargo build
 cargo test
+cargo lint
 ```
+
+`cargo lint` runs Clippy with `-D warnings` (see `AGENTS.md`).
 
 With CUDA (Linux):
 
