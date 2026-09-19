@@ -181,10 +181,18 @@ pub fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
     Tensor::cat(&[y1, y2], 3)
 }
 
+/// Epsilon for QK-Norm. Matches the Qwen3 default `rms_norm_eps`, which Qwen3
+/// reuses for its query/key norms.
+const QK_NORM_EPS: f64 = 1e-6;
+
 /// Minimal causal self-attention with bias-free projections and RoPE on queries/keys.
 ///
 /// `n_kv_heads` key/value heads are shared across `n_q_heads` query heads.
 /// Equal counts is plain multi-head attention.
+///
+/// Queries and keys pass through a per-head RMSNorm before RoPE. Large models let
+/// attention logits grow until softmax saturates and gradients vanish. QK-Norm caps
+/// each head at unit RMS, so scores stay bounded and training stays stable at scale.
 #[derive(Debug)]
 pub struct CausalSelfAttention {
     n_q_heads: usize,
@@ -195,6 +203,8 @@ pub struct CausalSelfAttention {
     k_proj: Linear,
     v_proj: Linear,
     out_proj: Linear,
+    q_norm: RMSNorm,
+    k_norm: RMSNorm,
 }
 
 impl CausalSelfAttention {
@@ -224,6 +234,8 @@ impl CausalSelfAttention {
             k_proj: Linear::no_bias(builder.pp("k_proj"), n_embd, n_kv_heads * head_dim),
             v_proj: Linear::no_bias(builder.pp("v_proj"), n_embd, n_kv_heads * head_dim),
             out_proj: Linear::no_bias(builder.pp("out_proj"), n_embd, n_embd),
+            q_norm: RMSNorm::new_affine(builder.pp("q_norm"), head_dim, QK_NORM_EPS),
+            k_norm: RMSNorm::new_affine(builder.pp("k_norm"), head_dim, QK_NORM_EPS),
         }
     }
 
@@ -255,6 +267,11 @@ impl CausalSelfAttention {
             &[("b", batch_size), ("t", seq_len), ("h", self.n_kv_heads)],
         );
 
+        // QK-Norm runs before RoPE: rotation preserves each head norm, so unit RMS
+        // vectors enter both the rotation and the dot product scores.
+        let q = self.q_norm.forward(&q)?;
+        let k = self.k_norm.forward(&k)?;
+
         // RoPE rotates each head independently, so one rotation serves the whole query group.
         let q = apply_rotary_emb(&q, cos, sin).rearrange("b t h d -> b h t d", &[]);
         let k = apply_rotary_emb(&k, cos, sin);
@@ -277,7 +294,8 @@ impl CausalSelfAttention {
         let attn = (&scores + &mask).softmax(3); // [B, H, T, T]
         let y_flat = attn.matmul(&v).rearrange("b h t d -> (b t) (h d)", &[]);
 
-        self.out_proj.forward(&y_flat).map(|out| out.reshape(vec![batch_size, seq_len, channels]))
+        let out = self.out_proj.forward(&y_flat)?;
+        Ok(out.rearrange("(b t) c -> b t c", &[("b", batch_size), ("t", seq_len)]))
     }
 
     /// Returns the trainable parameters owned by the attention module.
@@ -286,6 +304,8 @@ impl CausalSelfAttention {
         parameters.extend(self.k_proj.parameters());
         parameters.extend(self.v_proj.parameters());
         parameters.extend(self.out_proj.parameters());
+        parameters.extend(self.q_norm.parameters());
+        parameters.extend(self.k_norm.parameters());
         parameters
     }
 

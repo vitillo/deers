@@ -17,15 +17,19 @@ fn values(tensor: &Tensor) -> Vec<f32> {
     tensor.to_vec::<f32>().unwrap()
 }
 
-/// Builds grouped-query attention with deterministic projection weights.
+/// Builds grouped-query attention with deterministic weights on every parameter.
 fn gqa(n_embd: usize, n_q_heads: usize, n_kv_heads: usize, device: Device) -> CausalSelfAttention {
     let head_dim = n_embd / n_q_heads;
     let attn =
         CausalSelfAttention::new_gqa(ParamStore::new().root(), n_embd, n_q_heads, n_kv_heads);
+    let params = attn.parameters();
     let widths = [n_q_heads * head_dim, n_kv_heads * head_dim, n_kv_heads * head_dim, n_embd];
-    for (param, width) in attn.parameters().iter().zip(widths) {
+    for (param, width) in params[..4].iter().zip(widths) {
         let data = det_vec(n_embd * width);
         param.set(&Tensor::from_vec(data, vec![n_embd, width], device)).unwrap();
+    }
+    for param in &params[4..] {
+        param.set(&Tensor::from_vec(det_vec(head_dim), vec![head_dim], device)).unwrap();
     }
     attn
 }
@@ -57,6 +61,8 @@ fn naive_mha_from(
         dst_param.set(&tiled).unwrap();
     }
     dst[3].set(&src[3]).unwrap();
+    dst[4].set(&src[4]).unwrap();
+    dst[5].set(&src[5]).unwrap();
     naive
 }
 
@@ -113,9 +119,9 @@ fn mha_constructor_matches_gqa_with_equal_heads() {
         for (plain_param, grouped_param) in
             plain.parameters().iter().zip(grouped.parameters().iter())
         {
-            let width = plain_param.layout().shape()[1];
-            let data = det_vec(n_embd * width);
-            let tensor = Tensor::from_vec(data, vec![n_embd, width], device);
+            let shape: Vec<usize> = plain_param.layout().shape().iter().copied().collect();
+            let data = det_vec(shape.iter().product());
+            let tensor = Tensor::from_vec(data, shape, device);
             plain_param.set(&tensor).unwrap();
             grouped_param.set(&tensor).unwrap();
         }
@@ -135,10 +141,10 @@ fn mha_constructor_matches_gqa_with_equal_heads() {
                 -0.0127500035,
                 -0.0016250028,
                 0.009499998,
-                -0.015242673,
-                -0.012746319,
-                -0.0053746966,
-                0.0019969258
+                -0.014993625,
+                -0.012627342,
+                -0.005457919,
+                0.0017115037
             ]
         );
     }
@@ -189,7 +195,7 @@ fn gradients_reach_every_projection() {
     }
     assert_eq!(
         &grad_of(&grouped_grads, &grouped_params[0])[..4],
-        &[-4.863824e-5, -8.130807e-6, -0.00046206897, -0.00021508266]
+        &[-0.0010020477, 0.0006114427, -0.0030584084, 0.00082552957]
     );
 }
 
@@ -242,14 +248,14 @@ fn shared_rope_heads_feed_each_query_identically() {
             4.200265e-9,
             0.05000001,
             4.200265e-9,
-            0.010342829,
-            -0.040110618,
-            0.010342829,
-            -0.040110618,
-            0.021309288,
-            0.0024948437,
-            0.021309288,
-            0.0024948437,
+            0.012410526,
+            -0.03323856,
+            0.012410526,
+            -0.03323856,
+            0.02331322,
+            0.002320589,
+            0.02331322,
+            0.002320589,
         ]
     );
 }
