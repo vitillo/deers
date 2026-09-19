@@ -98,7 +98,7 @@ See [`examples/mnist_train.rs`](examples/mnist_train.rs) for a simpler MNIST cla
 
 **Data** — MNIST loader, text dataset, token-bin dataset with auto-download
 
-**Checkpoints** — safetensors-based model and optimizer state serialization
+**Checkpoints** — safetensors-based model and optimizer state serialization, plus sharded Qwen3 checkpoints with tensor-name mapping
 
 Most `Tensor` methods return values directly and panic on shape or device mismatches, keeping call sites compact. Gradients are enabled via `.attach()` or `Parameter`. Reductions and device movement are always explicit.
 
