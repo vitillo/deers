@@ -45,6 +45,7 @@ fn test_config() -> gpt::GPTConfig {
         mlp_hidden_dim: 8,
         rms_norm_eps: 1e-5,
         rope_base: 10_000.0,
+        rope_scaling: gpt::RopeScaling::None,
     }
 }
 
