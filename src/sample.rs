@@ -179,3 +179,290 @@ fn sample_from_probs(probs: &[f32], seed: u64) -> u32 {
     // Rounding can leave cumulative just under 1.0; fall back to the last id.
     probs.len() as u32 - 1
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_greedy_selects_argmax() {
+        // Arrange
+        let logits = vec![0.5f32, 2.0, 1.0];
+        let config = SamplingConfig {
+            temperature: 0.0,
+            ..SamplingConfig::new()
+        };
+
+        // Act
+        let token = sample_token(&logits, &config);
+
+        // Assert
+        assert_eq!(token, 1);
+    }
+
+    #[test]
+    fn test_greedy_breaks_ties_toward_first() {
+        // Arrange
+        let logits = vec![1.0f32, 1.0, 0.0];
+        let config = SamplingConfig {
+            temperature: 0.0,
+            ..SamplingConfig::new()
+        };
+
+        // Act
+        let token = sample_token(&logits, &config);
+
+        // Assert
+        assert_eq!(token, 0);
+    }
+
+    #[test]
+    fn test_temperature_scales_logits() {
+        // Arrange
+        let logits = vec![2.0f32, 4.0];
+
+        // Act
+        let scaled = apply_temperature(&logits, 2.0);
+
+        // Assert
+        assert_eq!(scaled, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_hot_temperature_draw() {
+        // Arrange
+        let logits = vec![1.0f32, 2.0, 3.0, 0.5];
+        let config = SamplingConfig {
+            temperature: 2.0,
+            seed: 42,
+            ..SamplingConfig::new()
+        };
+
+        // Act
+        let token = sample_token(&logits, &config);
+
+        // Assert
+        assert_eq!(token, 0);
+    }
+
+    #[test]
+    fn test_cold_temperature_draw() {
+        // Arrange
+        let logits = vec![1.0f32, 2.0, 3.0, 0.5];
+        let config = SamplingConfig {
+            temperature: 0.1,
+            seed: 42,
+            ..SamplingConfig::new()
+        };
+
+        // Act
+        let token = sample_token(&logits, &config);
+
+        // Assert
+        assert_eq!(token, 2);
+    }
+
+    #[test]
+    fn test_top_k_masks_tail() {
+        // Arrange
+        let logits = vec![3.0f32, 1.0, 2.0, 0.0];
+
+        // Act
+        let filtered = apply_top_k(&logits, 2);
+
+        // Assert
+        assert_eq!(filtered, vec![3.0, f32::NEG_INFINITY, 2.0, f32::NEG_INFINITY]);
+    }
+
+    #[test]
+    fn test_top_k_larger_than_vocab_keeps_all() {
+        // Arrange
+        let logits = vec![1.0f32, 2.0];
+
+        // Act
+        let filtered = apply_top_k(&logits, 5);
+
+        // Assert
+        assert_eq!(filtered, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_top_k_sampling_draw() {
+        // Arrange
+        let logits = vec![1.0f32, 2.0, 3.0, 0.5];
+        let config = SamplingConfig {
+            top_k: Some(2),
+            seed: 42,
+            ..SamplingConfig::new()
+        };
+
+        // Act
+        let token = sample_token(&logits, &config);
+
+        // Assert
+        assert_eq!(token, 1);
+    }
+
+    #[test]
+    fn test_top_p_masks_tail() {
+        // Arrange
+        let logits = vec![1.0f32, 2.0, 3.0, 0.5];
+
+        // Act
+        let filtered = apply_top_p(&logits, 0.7);
+
+        // Assert
+        assert_eq!(
+            filtered,
+            vec![f32::NEG_INFINITY, 2.0, 3.0, f32::NEG_INFINITY]
+        );
+    }
+
+    #[test]
+    fn test_top_p_zero_keeps_most_likely_only() {
+        // Arrange
+        let logits = vec![1.0f32, 2.0, 3.0, 0.5];
+
+        // Act
+        let filtered = apply_top_p(&logits, 0.0);
+
+        // Assert
+        assert_eq!(
+            filtered,
+            vec![
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                3.0,
+                f32::NEG_INFINITY
+            ]
+        );
+    }
+
+    #[test]
+    fn test_top_p_one_keeps_all() {
+        // Arrange
+        let logits = vec![1.0f32, 2.0, 3.0, 0.5];
+
+        // Act
+        let filtered = apply_top_p(&logits, 1.0);
+
+        // Assert
+        assert_eq!(filtered, vec![1.0, 2.0, 3.0, 0.5]);
+    }
+
+    #[test]
+    fn test_top_p_sampling_draw() {
+        // Arrange
+        let logits = vec![1.0f32, 2.0, 3.0, 0.5];
+        let config = SamplingConfig {
+            top_p: Some(0.7),
+            seed: 42,
+            ..SamplingConfig::new()
+        };
+
+        // Act
+        let token = sample_token(&logits, &config);
+
+        // Assert
+        assert_eq!(token, 1);
+    }
+
+    #[test]
+    fn test_same_seed_reproduces_token() {
+        // Arrange
+        let logits = vec![1.0f32, 2.0, 3.0, 0.5];
+        let config = SamplingConfig {
+            seed: 42,
+            ..SamplingConfig::new()
+        };
+
+        // Act
+        let first = sample_token(&logits, &config);
+        let second = sample_token(&logits, &config);
+
+        // Assert
+        assert_eq!(first, 1);
+        assert_eq!(second, 1);
+    }
+
+    #[test]
+    fn test_other_seed_draws_literal_token() {
+        // Arrange
+        let logits = vec![1.0f32, 2.0, 3.0, 0.5];
+        let config = SamplingConfig {
+            seed: 7,
+            ..SamplingConfig::new()
+        };
+
+        // Act
+        let token = sample_token(&logits, &config);
+
+        // Assert
+        assert_eq!(token, 2);
+    }
+
+    #[test]
+    fn test_single_token_vocab_always_wins() {
+        // Arrange
+        let logits = vec![5.0f32];
+        let config = SamplingConfig::new();
+
+        // Act
+        let token = sample_token(&logits, &config);
+
+        // Assert
+        assert_eq!(token, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-empty logits")]
+    fn test_empty_logits_panics() {
+        // Arrange
+        let config = SamplingConfig::new();
+
+        // Act
+        let _ = sample_token(&[], &config);
+    }
+
+    #[test]
+    #[should_panic(expected = "temperature")]
+    fn test_negative_temperature_panics() {
+        // Arrange
+        let logits = vec![1.0f32, 2.0];
+        let config = SamplingConfig {
+            temperature: -1.0,
+            ..SamplingConfig::new()
+        };
+
+        // Act
+        let _ = sample_token(&logits, &config);
+    }
+
+    #[test]
+    #[should_panic(expected = "top_k")]
+    fn test_zero_top_k_panics() {
+        // Arrange
+        let logits = vec![1.0f32, 2.0];
+        let config = SamplingConfig {
+            top_k: Some(0),
+            ..SamplingConfig::new()
+        };
+
+        // Act
+        let _ = sample_token(&logits, &config);
+    }
+
+    #[test]
+    #[should_panic(expected = "top_p")]
+    fn test_top_p_above_one_panics() {
+        // Arrange
+        let logits = vec![1.0f32, 2.0];
+        let config = SamplingConfig {
+            top_p: Some(1.5),
+            ..SamplingConfig::new()
+        };
+
+        // Act
+        let _ = sample_token(&logits, &config);
+    }
+}
