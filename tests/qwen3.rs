@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use deers::models::gpt::{Qwen3, Qwen3Config, RopeScaling};
 use deers::nn::{ParamStore, Parameter};
-use deers::{Device, Tensor};
+use deers::{DType, Device, Tensor, no_grad};
 
 fn small_config() -> Qwen3Config {
     Qwen3Config {
@@ -186,4 +186,41 @@ fn qwen3_zeroed_model_emits_zero_logits() {
 
     // Assert
     assert_eq!(logits, vec![0.0f32; 2 * 64]);
+}
+
+#[test]
+fn qwen3_to_dtype_converts_params_and_caches_to_bf16() {
+    // Arrange: a small F32 model with named handles into every parameter.
+    let (mut model, named) = small_model();
+    let by_name: BTreeMap<&str, &Parameter> =
+        named.iter().map(|(name, parameter)| (name.as_str(), parameter)).collect();
+
+    // Act
+    model.to_dtype(DType::BF16).unwrap();
+    let dtypes: Vec<DType> = named.iter().map(|(_, parameter)| parameter.dtype()).collect();
+
+    // Assert: every parameter converts while the tied head keeps one tensor id.
+    assert_eq!(named.len(), 25);
+    assert!(dtypes.iter().all(|&dtype| dtype == DType::BF16));
+    assert_eq!(by_name["wte.weight"].id(), by_name["lm_head.weight"].id());
+}
+
+#[test]
+fn qwen3_bf16_forward_emits_finite_logits() {
+    // Arrange: a small model converted to the published checkpoint dtype.
+    let (mut model, _) = small_model();
+    model.to_dtype(DType::BF16).unwrap();
+    let idx = ids(1, 2, 64);
+
+    // Act
+    let logits = no_grad(|| model.forward(&idx).unwrap());
+    let shape: Vec<usize> = logits.layout().shape().iter().copied().collect();
+    model.to_dtype(DType::F32).unwrap();
+    let back = model.forward(&idx).unwrap().to_vec::<f32>().unwrap();
+
+    // Assert: BF16 forward runs end to end with a finite F32 round trip.
+    assert_eq!(logits.dtype(), DType::BF16);
+    assert_eq!(shape, vec![1, 2, 64]);
+    assert_eq!(back.len(), 2 * 64);
+    assert!(back.iter().all(|v| v.is_finite()));
 }
