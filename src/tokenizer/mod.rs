@@ -1,17 +1,20 @@
 //! One tokenizer type per encoding, joined by a shared contract.
 //!
 //! Each encoding owns its module and its type: GPT-family tokenizers live in
-//! [`gpt`], the Qwen tokenizer and its chat template in [`qwen3`]. Dataset
+//! [`gpt`], the Qwen tokenizer and its chat template in [`qwen3`], and the
+//! Qwen3.5 encoding in [`qwen3_5`]. Dataset
 //! plumbing that works with any encoding lives in [`bins`] and stays generic
 //! over the [`Tokenizer`] trait, so it never names an encoding.
 
 mod bins;
 mod gpt;
 mod qwen3;
+mod qwen3_5;
 
 pub use bins::{TokenBinPaths, prepare_text_token_bins};
 pub use gpt::{Cl100kTokenizer, Gpt2Tokenizer};
 pub use qwen3::{ChatMessage, Qwen3Tokenizer};
+pub use qwen3_5::{ChatMessage as Qwen3_5ChatMessage, Qwen3_5Tokenizer};
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
