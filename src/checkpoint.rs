@@ -182,7 +182,11 @@ pub fn discover_shard_files(dir: &Path) -> Result<Vec<PathBuf>> {
 
 /// Loads a sharded checkpoint directory onto `device`, keyed by deers names.
 ///
-/// Qwen3 tensor names map through [`map_qwen_name`]. A tensor listed twice
+/// Qwen3 tensor names map through [`map_qwen_name`]. Mapped projection
+/// weights transpose on the way in: Hugging Face stores `Linear` weights as
+/// `[out, in]` while deers multiplies `x @ weight` with `[in, out]`, so the
+/// boundary converts once and every consumer stays transposed-free.
+/// Embeddings, heads, and norms keep their layout. A tensor listed twice
 /// fails loudly with both shard files named. File dtypes convert to matching
 /// deers dtypes including BF16. See [`load_sharded_tracked`] for per-tensor
 /// file origins.
@@ -208,7 +212,8 @@ pub(crate) fn load_sharded_tracked(
             Error::Checkpoint(format!("failed to parse shard file '{}': {e}", file.display()))
         })?;
         for name in shards.names() {
-            let deers_name = map_qwen_name(name).unwrap_or_else(|| name.to_owned());
+            let mapped = map_qwen_name(name);
+            let deers_name = mapped.clone().unwrap_or_else(|| name.to_owned());
             if let Some(prev) = origins.get(&deers_name) {
                 return Err(Error::Checkpoint(format!(
                     "duplicate tensor '{deers_name}' in shard files '{}' and '{}'",
@@ -222,6 +227,14 @@ pub(crate) fn load_sharded_tracked(
                     file.display()
                 ))
             })?;
+            // Hugging Face `Linear` weights arrive as `[out, in]`; deers
+            // holds `[in, out]`. Only mapped projections transpose, so
+            // deers-native shards keep their exact round trip.
+            let tensor = if mapped.is_some() && deers_name.ends_with("proj.weight") {
+                tensor.transpose(None)
+            } else {
+                tensor
+            };
             origins.insert(deers_name.clone(), file.clone());
             merged.insert(deers_name, tensor);
         }
@@ -635,6 +648,51 @@ mod tests {
 
         // Assert
         assert_eq!(error, format!("no safetensors shard files in '{}'", dir.display()));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod transpose_tests {
+    use super::load_sharded;
+    use crate::{Device, Tensor};
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    #[test]
+    fn test_load_sharded_transposes_mapped_projection_weights() {
+        // Arrange: one Hugging Face `[out, in]` projection plus an embedding
+        // and a norm that must keep their layout.
+        let dir = std::env::temp_dir()
+            .join(format!("deers-sharded-transpose-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut shard = BTreeMap::new();
+        shard.insert(
+            "model.layers.0.self_attn.q_proj.weight".to_owned(),
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (3, 2), Device::Cpu),
+        );
+        shard.insert(
+            "model.embed_tokens.weight".to_owned(),
+            Tensor::from_vec(vec![7.0f32, 8.0, 9.0, 10.0], (2, 2), Device::Cpu),
+        );
+        shard.insert(
+            "model.norm.weight".to_owned(),
+            Tensor::from_vec(vec![0.5f32, 1.5], (2,), Device::Cpu),
+        );
+        super::save_tensors(&dir.join("model.safetensors"), &shard).unwrap();
+
+        // Act
+        let loaded = load_sharded(&dir, Device::Cpu).unwrap();
+
+        // Assert: the projection arrives as `[in, out]` with transposed
+        // values while the embedding and norm are untouched.
+        let q = &loaded["blocks.0.attn.q_proj.weight"];
+        assert_eq!(q.layout().shape().iter().copied().collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(q.to_vec::<f32>().unwrap(), vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]);
+        assert_eq!(loaded["wte.weight"].to_vec::<f32>().unwrap(), vec![7.0, 8.0, 9.0, 10.0]);
+        assert_eq!(loaded["norm.weight"].to_vec::<f32>().unwrap(), vec![0.5, 1.5]);
 
         let _ = fs::remove_dir_all(&dir);
     }
