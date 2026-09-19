@@ -448,9 +448,8 @@ impl SwiGLU {
 
     /// Runs the gate, up, and down projections on a flat `[rows, in]` input.
     ///
-    /// The core stays fixed rank. No pattern applies inside it because the
-    /// projections preserve the flat shape. Only the wrapper below folds
-    /// leading dims, and that fold is dynamic rank the grammar excludes.
+    /// The core stays fixed rank. Only the wrapper below folds leading dims,
+    /// and that fold is rank-polymorphic through the ellipsis form.
     fn forward_flat(&self, x_flat: &Tensor) -> Result<Tensor> {
         let gate = self.gate_proj.forward(x_flat)?.silu();
         let up = self.up_proj.forward(x_flat)?;
@@ -462,10 +461,8 @@ impl Module for SwiGLU {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let shape = x.layout().shape();
         assert!(shape.ndim() >= 2, "SwiGLU expects input with rank >= 2");
-        let in_features = shape[shape.ndim() - 1];
         let mut out_shape: Vec<usize> = (0..shape.ndim() - 1).map(|i| shape[i]).collect();
-        let rows: usize = out_shape.iter().product();
-        let x_flat = x.reshape(vec![rows, in_features]);
+        let x_flat = x.rearrange("... d -> (...) d", &[]);
         let y = self.forward_flat(&x_flat)?;
         out_shape.push(self.out_features);
         Ok(y.reshape(out_shape))
