@@ -511,9 +511,8 @@ fn einsum_values_gradients_match_manual_path() {
     let v_manual = cpu(v_data, vec![1, 1, 2, 2]).attach();
 
     // Act
-    let loss_pattern =
-        Tensor::einsum("b h t s, b h s d -> b h t d", &attn_pattern, &v_pattern)
-            .sum(vec![0, 1, 2, 3], false);
+    let loss_pattern = Tensor::einsum("b h t s, b h s d -> b h t d", &attn_pattern, &v_pattern)
+        .sum(vec![0, 1, 2, 3], false);
     let loss_manual = attn_manual.matmul(&v_manual).sum(vec![0, 1, 2, 3], false);
     let grads_pattern = loss_pattern.backward().unwrap();
     let grads_manual = loss_manual.backward().unwrap();

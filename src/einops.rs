@@ -529,8 +529,12 @@ fn plan_contraction(eq: &Equation) -> ContractPlan {
             many.iter().map(|label| label.as_str()).collect::<Vec<_>>().join(", ")
         ),
     };
-    let batch: Vec<String> =
-        eq.lhs.iter().filter(|label| eq.rhs.contains(label) && eq.out.contains(label)).cloned().collect();
+    let batch: Vec<String> = eq
+        .lhs
+        .iter()
+        .filter(|label| eq.rhs.contains(label) && eq.out.contains(label))
+        .cloned()
+        .collect();
     ContractPlan { batch, keep_left, keep_right, contract }
 }
 
@@ -592,8 +596,9 @@ impl Tensor {
                 );
             }
         }
-        let position =
-            |labels: &[String], label: &str| labels.iter().position(|other| other == label).unwrap();
+        let position = |labels: &[String], label: &str| {
+            labels.iter().position(|other| other == label).unwrap()
+        };
         let mut left_perm: Vec<usize> =
             plan.batch.iter().map(|label| position(&equation.lhs, label)).collect();
         left_perm.push(position(&equation.lhs, &plan.keep_left));
