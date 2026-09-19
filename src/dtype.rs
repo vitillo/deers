@@ -144,8 +144,7 @@ mod tests {
         let exact = [0.0f32, 1.0, -2.0, 1.5, 100.0, 65536.0];
 
         // Act
-        let roundtripped: Vec<f32> =
-            exact.iter().map(|&v| bf16::from_f32(v).to_f32()).collect();
+        let roundtripped: Vec<f32> = exact.iter().map(|&v| bf16::from_f32(v).to_f32()).collect();
 
         // Assert
         assert_eq!(roundtripped, exact);

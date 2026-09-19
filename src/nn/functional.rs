@@ -48,11 +48,7 @@ pub fn dropout(x: &Tensor, p: f64, training: bool) -> Tensor {
             let mask: Vec<bf16> = uniform
                 .iter()
                 .map(|v| {
-                    if v.to_f32() < keep as f32 {
-                        bf16::from_f32(scale as f32)
-                    } else {
-                        bf16::ZERO
-                    }
+                    if v.to_f32() < keep as f32 { bf16::from_f32(scale as f32) } else { bf16::ZERO }
                 })
                 .collect();
             x * &Tensor::from_vec(mask, shape, device)

@@ -397,7 +397,11 @@ impl BackendStorage for CpuStorage {
             }
             (CpuStorage::BF16(src), CpuStorage::BF16(dst)) => {
                 for (i, chunk) in src.chunks(reduce_size).enumerate() {
-                    let sum = chunk.iter().map(|v| v.to_f32()).reduce(O::f32).expect("empty reduce chunk");
+                    let sum = chunk
+                        .iter()
+                        .map(|v| v.to_f32())
+                        .reduce(O::f32)
+                        .expect("empty reduce chunk");
                     dst[i] = bf16::from_f32(sum);
                 }
             }
@@ -674,9 +678,9 @@ impl BackendStorage for CpuStorage {
             CpuStorage::F16(data) => {
                 Ok(CpuStorage::F16(index_select_into(data, left_len, src_dim, right_len, &indices)))
             }
-            CpuStorage::BF16(data) => {
-                Ok(CpuStorage::BF16(index_select_into(data, left_len, src_dim, right_len, &indices)))
-            }
+            CpuStorage::BF16(data) => Ok(CpuStorage::BF16(index_select_into(
+                data, left_len, src_dim, right_len, &indices,
+            ))),
             CpuStorage::F32(data) => {
                 Ok(CpuStorage::F32(index_select_into(data, left_len, src_dim, right_len, &indices)))
             }
@@ -812,8 +816,11 @@ impl BackendStorage for CpuStorage {
             (CpuStorage::BF16(left), CpuStorage::BF16(right)) => {
                 let left_f32: Vec<f32> = left.iter().map(|v| v.to_f32()).collect();
                 let right_f32: Vec<f32> = right.iter().map(|v| v.to_f32()).collect();
-                let out = CpuStorage::F32(left_f32)
-                    .matmul(layout, &CpuStorage::F32(right_f32), layout_other)?;
+                let out = CpuStorage::F32(left_f32).matmul(
+                    layout,
+                    &CpuStorage::F32(right_f32),
+                    layout_other,
+                )?;
                 let CpuStorage::F32(out) = out else {
                     unreachable!("F32 matmul returns F32 storage")
                 };
@@ -1014,12 +1021,9 @@ impl BackendStorage for CpuStorage {
                         let g_row = &grad[start..start + inner_size];
                         let l_row = &lsm_data[start..start + inner_size];
                         let sum_grad: f32 = g_row.iter().map(|v| v.to_f32()).sum();
-                        g_row
-                            .iter()
-                            .zip(l_row.iter())
-                            .map(move |(&g, &l)| {
-                                bf16::from_f32(g.to_f32() - l.to_f32().exp() * sum_grad)
-                            })
+                        g_row.iter().zip(l_row.iter()).map(move |(&g, &l)| {
+                            bf16::from_f32(g.to_f32() - l.to_f32().exp() * sum_grad)
+                        })
                     })
                     .collect();
                 Ok(CpuStorage::BF16(out))
