@@ -80,13 +80,13 @@ pub fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
 
 /// Minimal causal self-attention with bias-free projections and RoPE on queries/keys.
 ///
-/// `n_kv_head` key/value heads are shared across `n_head` query heads.
+/// `n_kv_heads` key/value heads are shared across `n_q_heads` query heads.
 /// Equal counts is plain multi-head attention.
 #[derive(Debug)]
 pub struct CausalSelfAttention {
-    n_head: usize,
-    n_kv_head: usize,
-    n_group: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    group_size: usize,
     head_dim: usize,
     q_proj: Linear,
     k_proj: Linear,
@@ -96,25 +96,30 @@ pub struct CausalSelfAttention {
 
 impl CausalSelfAttention {
     /// Creates a causal self-attention module whose projections are registered under `builder`.
-    pub fn new(builder: ParamBuilder, n_embd: usize, n_head: usize) -> Self {
-        Self::new_gqa(builder, n_embd, n_head, n_head)
+    pub fn new(builder: ParamBuilder, n_embd: usize, n_q_heads: usize) -> Self {
+        Self::new_gqa(builder, n_embd, n_q_heads, n_q_heads)
     }
 
-    /// Creates causal self-attention with `n_kv_head` key/value heads shared
-    /// across `n_head` query heads. Each key/value head serves `n_head /
-    /// n_kv_head` query heads. Pass `n_kv_head == n_head` for plain MHA.
-    pub fn new_gqa(builder: ParamBuilder, n_embd: usize, n_head: usize, n_kv_head: usize) -> Self {
-        assert!(n_embd.is_multiple_of(n_head), "n_embd must be divisible by n_head");
-        assert!(n_head.is_multiple_of(n_kv_head), "n_head must be divisible by n_kv_head");
-        let head_dim = n_embd / n_head;
+    /// Creates causal self-attention with `n_kv_heads` key/value heads shared
+    /// across `n_q_heads` query heads. Each key/value head serves `n_q_heads /
+    /// n_kv_heads` query heads. Pass `n_kv_heads == n_q_heads` for plain MHA.
+    pub fn new_gqa(
+        builder: ParamBuilder,
+        n_embd: usize,
+        n_q_heads: usize,
+        n_kv_heads: usize,
+    ) -> Self {
+        assert!(n_embd.is_multiple_of(n_q_heads), "n_embd must be divisible by n_q_heads");
+        assert!(n_q_heads.is_multiple_of(n_kv_heads), "n_q_heads must be divisible by n_kv_heads");
+        let head_dim = n_embd / n_q_heads;
         Self {
-            n_head,
-            n_kv_head,
-            n_group: n_head / n_kv_head,
+            n_q_heads,
+            n_kv_heads,
+            group_size: n_q_heads / n_kv_heads,
             head_dim,
             q_proj: Linear::no_bias(builder.pp("q_proj"), n_embd, n_embd),
-            k_proj: Linear::no_bias(builder.pp("k_proj"), n_embd, n_kv_head * head_dim),
-            v_proj: Linear::no_bias(builder.pp("v_proj"), n_embd, n_kv_head * head_dim),
+            k_proj: Linear::no_bias(builder.pp("k_proj"), n_embd, n_kv_heads * head_dim),
+            v_proj: Linear::no_bias(builder.pp("v_proj"), n_embd, n_kv_heads * head_dim),
             out_proj: Linear::no_bias(builder.pp("out_proj"), n_embd, n_embd),
         }
     }
@@ -129,37 +134,37 @@ impl CausalSelfAttention {
         let channels = shape[2];
         assert_eq!(
             channels,
-            self.n_head * self.head_dim,
+            self.n_q_heads * self.head_dim,
             "input channel size must match attention width"
         );
 
         let x_flat = x.reshape(vec![batch_size * seq_len, channels]); // [B*T, C]
         let q = self.q_proj.forward(&x_flat)?.rearrange(
             "(b t) (h d) -> b t h d",
-            &[("b", batch_size), ("t", seq_len), ("h", self.n_head)],
+            &[("b", batch_size), ("t", seq_len), ("h", self.n_q_heads)],
         );
         let k = self.k_proj.forward(&x_flat)?.rearrange(
             "(b t) (h d) -> b t h d",
-            &[("b", batch_size), ("t", seq_len), ("h", self.n_kv_head)],
+            &[("b", batch_size), ("t", seq_len), ("h", self.n_kv_heads)],
         );
         let v = self.v_proj.forward(&x_flat)?.rearrange(
             "(b t) (h d) -> b t h d",
-            &[("b", batch_size), ("t", seq_len), ("h", self.n_kv_head)],
+            &[("b", batch_size), ("t", seq_len), ("h", self.n_kv_heads)],
         );
 
         // RoPE rotates each head independently, so one rotation serves the whole query group.
         let q = apply_rotary_emb(&q, cos, sin).rearrange("b t h d -> b h t d", &[]);
         let k = apply_rotary_emb(&k, cos, sin);
-        let k = if self.n_group == 1 {
+        let k = if self.group_size == 1 {
             k
         } else {
-            k.repeat("b t kv d -> b t (kv g) d", &[("g", self.n_group)])
+            k.repeat("b t kv d -> b t (kv g) d", &[("g", self.group_size)])
         };
         let k = k.rearrange("b t h d -> b h t d", &[]);
-        let v = if self.n_group == 1 {
+        let v = if self.group_size == 1 {
             v
         } else {
-            v.repeat("b t kv d -> b t (kv g) d", &[("g", self.n_group)])
+            v.repeat("b t kv d -> b t (kv g) d", &[("g", self.group_size)])
         };
         let v = v.rearrange("b t h d -> b h t d", &[]);
 

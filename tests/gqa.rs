@@ -18,10 +18,11 @@ fn values(tensor: &Tensor) -> Vec<f32> {
 }
 
 /// Builds grouped-query attention with deterministic projection weights.
-fn gqa(n_embd: usize, n_head: usize, n_kv_head: usize, device: Device) -> CausalSelfAttention {
-    let head_dim = n_embd / n_head;
-    let attn = CausalSelfAttention::new_gqa(ParamStore::new().root(), n_embd, n_head, n_kv_head);
-    let widths = [n_head * head_dim, n_kv_head * head_dim, n_kv_head * head_dim, n_embd];
+fn gqa(n_embd: usize, n_q_heads: usize, n_kv_heads: usize, device: Device) -> CausalSelfAttention {
+    let head_dim = n_embd / n_q_heads;
+    let attn =
+        CausalSelfAttention::new_gqa(ParamStore::new().root(), n_embd, n_q_heads, n_kv_heads);
+    let widths = [n_q_heads * head_dim, n_kv_heads * head_dim, n_kv_heads * head_dim, n_embd];
     for (param, width) in attn.parameters().iter().zip(widths) {
         let data = det_vec(n_embd * width);
         param.set(&Tensor::from_vec(data, vec![n_embd, width], device)).unwrap();
@@ -33,22 +34,26 @@ fn gqa(n_embd: usize, n_head: usize, n_kv_head: usize, device: Device) -> Causal
 fn naive_mha_from(
     grouped: &CausalSelfAttention,
     n_embd: usize,
-    n_head: usize,
-    n_kv_head: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
 ) -> CausalSelfAttention {
-    let head_dim = n_embd / n_head;
-    let group = n_head / n_kv_head;
-    let naive = CausalSelfAttention::new(ParamStore::new().root(), n_embd, n_head);
+    let head_dim = n_embd / n_q_heads;
+    let group_size = n_q_heads / n_kv_heads;
+    let naive = CausalSelfAttention::new(ParamStore::new().root(), n_embd, n_q_heads);
     let src = grouped.parameters();
     let dst = naive.parameters();
     dst[0].set(&src[0]).unwrap();
     for (src_param, dst_param) in [(&src[1], &dst[1]), (&src[2], &dst[2])] {
-        let narrow: Vec<Tensor> = (0..n_head)
+        let narrow: Vec<Tensor> = (0..n_q_heads)
             .map(|head| {
-                src_param.reshape(vec![n_embd, n_kv_head, head_dim]).narrow(1, head / group, 1)
+                src_param.reshape(vec![n_embd, n_kv_heads, head_dim]).narrow(
+                    1,
+                    head / group_size,
+                    1,
+                )
             })
             .collect();
-        let tiled = Tensor::cat(&narrow, 1).reshape(vec![n_embd, n_head * head_dim]);
+        let tiled = Tensor::cat(&narrow, 1).reshape(vec![n_embd, n_q_heads * head_dim]);
         dst_param.set(&tiled).unwrap();
     }
     dst[3].set(&src[3]).unwrap();
@@ -66,11 +71,11 @@ fn grad_of(grads: &deers::GradientStore, param: &Parameter) -> Vec<f32> {
 #[test]
 fn gqa_matches_naive_repeated_heads() {
     // Arrange
-    let (batch, seq, n_embd, n_head, n_kv_head) = (1, 3, 8, 4, 2);
-    let head_dim = n_embd / n_head;
+    let (batch, seq, n_embd, n_q_heads, n_kv_heads) = (1, 3, 8, 4, 2);
+    let head_dim = n_embd / n_q_heads;
     for device in devices() {
-        let grouped = gqa(n_embd, n_head, n_kv_head, device);
-        let naive = naive_mha_from(&grouped, n_embd, n_head, n_kv_head);
+        let grouped = gqa(n_embd, n_q_heads, n_kv_heads, device);
+        let naive = naive_mha_from(&grouped, n_embd, n_q_heads, n_kv_heads);
         let x = Tensor::from_vec(det_vec(batch * seq * n_embd), vec![batch, seq, n_embd], device);
         let (cos, sin) = rope(seq, head_dim, device);
 
@@ -99,12 +104,12 @@ fn gqa_matches_naive_repeated_heads() {
 #[test]
 fn mha_constructor_matches_gqa_with_equal_heads() {
     // Arrange
-    let (batch, seq, n_embd, n_head) = (1, 2, 4, 2);
-    let head_dim = n_embd / n_head;
+    let (batch, seq, n_embd, n_q_heads) = (1, 2, 4, 2);
+    let head_dim = n_embd / n_q_heads;
     for device in devices() {
-        let plain = CausalSelfAttention::new(ParamStore::new().root(), n_embd, n_head);
+        let plain = CausalSelfAttention::new(ParamStore::new().root(), n_embd, n_q_heads);
         let grouped =
-            CausalSelfAttention::new_gqa(ParamStore::new().root(), n_embd, n_head, n_head);
+            CausalSelfAttention::new_gqa(ParamStore::new().root(), n_embd, n_q_heads, n_q_heads);
         for (plain_param, grouped_param) in
             plain.parameters().iter().zip(grouped.parameters().iter())
         {
@@ -142,12 +147,12 @@ fn mha_constructor_matches_gqa_with_equal_heads() {
 #[test]
 fn gradients_reach_every_projection() {
     // Arrange
-    let (batch, seq, n_embd, n_head, n_kv_head) = (1, 3, 8, 4, 2);
-    let head_dim = n_embd / n_head;
-    let group = n_head / n_kv_head;
+    let (batch, seq, n_embd, n_q_heads, n_kv_heads) = (1, 3, 8, 4, 2);
+    let head_dim = n_embd / n_q_heads;
+    let group_size = n_q_heads / n_kv_heads;
     let device = Device::Cpu;
-    let grouped = gqa(n_embd, n_head, n_kv_head, device);
-    let naive = naive_mha_from(&grouped, n_embd, n_head, n_kv_head);
+    let grouped = gqa(n_embd, n_q_heads, n_kv_heads, device);
+    let naive = naive_mha_from(&grouped, n_embd, n_q_heads, n_kv_heads);
     let x = Tensor::from_vec(det_vec(batch * seq * n_embd), vec![batch, seq, n_embd], device);
     let (cos, sin) = rope(seq, head_dim, device);
 
@@ -166,14 +171,14 @@ fn gradients_reach_every_projection() {
     }
     let grouped_k = grad_of(&grouped_grads, &grouped_params[1]);
     let naive_k = grad_of(&naive_grads, &naive_params[1]);
-    for kv in 0..n_kv_head {
+    for kv in 0..n_kv_heads {
         for row in 0..n_embd {
             for dim in 0..head_dim {
-                let shared = grouped_k[(row * n_kv_head + kv) * head_dim + dim];
+                let shared = grouped_k[(row * n_kv_heads + kv) * head_dim + dim];
                 let mut summed = 0.0;
-                for rep in 0..group {
-                    let head = kv * group + rep;
-                    summed += naive_k[(row * n_head + head) * head_dim + dim];
+                for rep in 0..group_size {
+                    let head = kv * group_size + rep;
+                    summed += naive_k[(row * n_q_heads + head) * head_dim + dim];
                 }
                 assert!(
                     (shared - summed).abs() < 1e-4,
@@ -191,15 +196,15 @@ fn gradients_reach_every_projection() {
 #[test]
 fn shared_rope_heads_feed_each_query_identically() {
     // Arrange
-    let (batch, seq, n_embd, n_head, n_kv_head) = (1, 2, 8, 4, 2);
-    let head_dim = n_embd / n_head;
-    let group = n_head / n_kv_head;
+    let (batch, seq, n_embd, n_q_heads, n_kv_heads) = (1, 2, 8, 4, 2);
+    let head_dim = n_embd / n_q_heads;
+    let group_size = n_q_heads / n_kv_heads;
     let device = Device::Cpu;
-    let grouped = gqa(n_embd, n_head, n_kv_head, device);
+    let grouped = gqa(n_embd, n_q_heads, n_kv_heads, device);
     let params = grouped.parameters();
-    let head0 = params[0].reshape(vec![n_embd, n_head, head_dim]).narrow(1, 0, 1);
+    let head0 = params[0].reshape(vec![n_embd, n_q_heads, head_dim]).narrow(1, 0, 1);
     let tiled =
-        Tensor::cat(&vec![head0.clone(); n_head], 1).reshape(vec![n_embd, n_head * head_dim]);
+        Tensor::cat(&vec![head0.clone(); n_q_heads], 1).reshape(vec![n_embd, n_q_heads * head_dim]);
     params[0].set(&tiled).unwrap();
     // Identity output projection so each output channel exposes one attention head directly.
     let mut identity = vec![0.0; n_embd * n_embd];
@@ -211,16 +216,16 @@ fn shared_rope_heads_feed_each_query_identically() {
     let (cos, sin) = rope(seq, head_dim, device);
 
     // Act
-    let out = grouped.forward(&x, &cos, &sin).unwrap().reshape(vec![seq, n_head, head_dim]);
+    let out = grouped.forward(&x, &cos, &sin).unwrap().reshape(vec![seq, n_q_heads, head_dim]);
     let out = values(&out);
 
     // Assert
     for pos in 0..seq {
-        for rep in 1..group {
+        for rep in 1..group_size {
             for dim in 0..head_dim {
-                for kv in 0..n_kv_head {
-                    let first = out[(pos * n_head + kv * group) * head_dim + dim];
-                    let other = out[(pos * n_head + kv * group + rep) * head_dim + dim];
+                for kv in 0..n_kv_heads {
+                    let first = out[(pos * n_q_heads + kv * group_size) * head_dim + dim];
+                    let other = out[(pos * n_q_heads + kv * group_size + rep) * head_dim + dim];
                     assert_eq!(first, other);
                 }
             }
