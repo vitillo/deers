@@ -1,11 +1,16 @@
-//! Element types (`F16`, `F32`, `I64`) and the [`WithDType`] trait for
+//! Element types (`F16`, `BF16`, `F32`, `I64`) and the [`WithDType`] trait for
 //! projecting Rust scalars into and out of tensor storage.
+//!
+//! `BF16` (brain float 16) keeps the 8-bit exponent of `F32` with a truncated
+//! 7-bit mantissa. It covers nearly the full `F32` range (up to ~3.4e38) but
+//! only about 3 decimal digits of precision, so large model weights load
+//! unchanged while fine detail rounds to the nearest-even 7-bit mantissa.
 
 #![allow(dead_code)]
 
 use std::fmt;
 
-use half::f16;
+use half::{bf16, f16};
 
 use crate::storage::{BackendStorage, CpuStorage};
 
@@ -14,6 +19,8 @@ use crate::storage::{BackendStorage, CpuStorage};
 pub enum DType {
     /// IEEE half-precision floating point.
     F16,
+    /// Brain floating point: F32 range with a 7-bit mantissa.
+    BF16,
     /// IEEE single-precision floating point.
     F32,
     /// 64-bit signed integer.
@@ -24,6 +31,7 @@ impl fmt::Display for DType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DType::F16 => write!(f, "f16"),
+            DType::BF16 => write!(f, "bf16"),
             DType::F32 => write!(f, "f32"),
             DType::I64 => write!(f, "i64"),
         }
@@ -35,6 +43,7 @@ impl DType {
     pub fn size_in_bytes(self) -> usize {
         match self {
             DType::F16 => std::mem::size_of::<f16>(),
+            DType::BF16 => std::mem::size_of::<bf16>(),
             DType::F32 => std::mem::size_of::<f32>(),
             DType::I64 => std::mem::size_of::<i64>(),
         }
@@ -59,6 +68,22 @@ impl WithDType for f16 {
         match storage {
             CpuStorage::F16(vec) => vec.as_slice(),
             other => panic!("expected F16 storage but got {:?}", other.dtype()),
+        }
+    }
+}
+
+impl WithDType for bf16 {
+    fn to_vec(storage: &CpuStorage) -> Vec<Self> {
+        match storage {
+            CpuStorage::BF16(vec) => vec.clone(),
+            other => panic!("expected BF16 storage but got {:?}", other.dtype()),
+        }
+    }
+
+    fn as_slice(storage: &CpuStorage) -> &[Self] {
+        match storage {
+            CpuStorage::BF16(vec) => vec.as_slice(),
+            other => panic!("expected BF16 storage but got {:?}", other.dtype()),
         }
     }
 }

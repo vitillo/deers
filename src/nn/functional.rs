@@ -1,7 +1,7 @@
 //! Stateless helper functions for building neural networks (causal masks,
 //! composable primitives).
 
-use half::f16;
+use half::{bf16, f16};
 
 use crate::{DType, Device, Tensor};
 
@@ -40,6 +40,21 @@ pub fn dropout(x: &Tensor, p: f64, training: bool) -> Tensor {
                 Tensor::rand(shape.clone(), DType::F32, device).to_vec().unwrap();
             let mask: Vec<f32> =
                 uniform.iter().map(|&v| if v < keep as f32 { scale as f32 } else { 0.0 }).collect();
+            x * &Tensor::from_vec(mask, shape, device)
+        }
+        DType::BF16 => {
+            let uniform: Vec<bf16> =
+                Tensor::rand(shape.clone(), DType::BF16, device).to_vec().unwrap();
+            let mask: Vec<bf16> = uniform
+                .iter()
+                .map(|v| {
+                    if v.to_f32() < keep as f32 {
+                        bf16::from_f32(scale as f32)
+                    } else {
+                        bf16::ZERO
+                    }
+                })
+                .collect();
             x * &Tensor::from_vec(mask, shape, device)
         }
         DType::I64 => panic!("dropout requires a floating-point dtype"),
@@ -84,6 +99,22 @@ pub fn causal_mask(
                                 f32::NEG_INFINITY
                             } else {
                                 0.0
+                            }
+                        })
+                    })
+                })
+                .collect();
+            Tensor::from_vec(mask, vec![batch_size, 1, tgt_len, total_len], device)
+        }
+        DType::BF16 => {
+            let mask: Vec<bf16> = (0..batch_size)
+                .flat_map(|_| {
+                    (0..tgt_len).flat_map(|i| {
+                        (0..total_len).map(move |j| {
+                            if j >= seqlen_offset && j - seqlen_offset > i {
+                                bf16::NEG_INFINITY
+                            } else {
+                                bf16::ZERO
                             }
                         })
                     })
