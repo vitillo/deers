@@ -630,9 +630,12 @@ impl Qwen3Block {
 
     /// Runs the pre-norm attention and SwiGLU residual block.
     pub fn forward(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
-        let x = x + &self.attn.forward(&self.input_layernorm.forward(x)?, cos, sin)?;
-        let y = self.mlp.forward(&self.post_attention_layernorm.forward(&x)?)?;
-        Ok(&x + &y)
+        let normed = self.input_layernorm.forward(x)?;
+        let attended = self.attn.forward(&normed, cos, sin)?;
+        let x = x + &attended;
+        let post_normed = self.post_attention_layernorm.forward(&x)?;
+        let fed = self.mlp.forward(&post_normed)?;
+        Ok(&x + &fed)
     }
 
     /// Returns the trainable parameters owned by the block.
