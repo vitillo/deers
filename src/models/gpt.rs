@@ -830,6 +830,41 @@ impl Qwen3Config {
     }
 }
 
+/// Converts a tensor to `dtype` through an F32 round trip.
+///
+/// Integer tensors only convert onto themselves; anything else fails loudly
+/// instead of silently requantizing ids.
+fn cast_tensor(tensor: &Tensor, dtype: DType) -> Result<Tensor> {
+    if tensor.dtype() == dtype {
+        return Ok(tensor.detach());
+    }
+    let shape: Vec<usize> = tensor.layout().shape().iter().copied().collect();
+    let device = tensor.device();
+    let as_f32: Vec<f32> = match tensor.dtype() {
+        DType::F16 => tensor.to_vec::<f16>()?.iter().map(|v| v.to_f32()).collect(),
+        DType::BF16 => tensor.to_vec::<bf16>()?.iter().map(|v| v.to_f32()).collect(),
+        DType::F32 => tensor.to_vec::<f32>()?,
+        DType::I64 => {
+            assert_eq!(dtype, DType::I64, "refusing to quantize integer tensor");
+            return Ok(tensor.detach());
+        }
+    };
+    Ok(match dtype {
+        DType::F16 => Tensor::from_vec(
+            as_f32.iter().map(|&v| f16::from_f32(v)).collect::<Vec<_>>(),
+            shape,
+            device,
+        ),
+        DType::BF16 => Tensor::from_vec(
+            as_f32.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+            shape,
+            device,
+        ),
+        DType::F32 => Tensor::from_vec(as_f32, shape, device),
+        DType::I64 => panic!("refusing to quantize float tensor to integer"),
+    })
+}
+
 /// Full Qwen3 model: token embedding, decoder blocks, final norm, tied LM head.
 ///
 /// The head reuses the embedding storage under `lm_head.weight`, so the
@@ -938,6 +973,22 @@ impl Qwen3 {
         }
         self.cos = self.cos.to_device(device)?;
         self.sin = self.sin.to_device(device)?;
+        Ok(())
+    }
+
+    /// Converts the model parameters and rotary caches to `dtype` in place.
+    ///
+    /// Published Qwen3 weights ship as BF16 while fresh parameters init as
+    /// F32, and binary ops reject mixed dtypes, so the model must convert
+    /// before loading a real checkpoint. Conversion keeps each tensor id,
+    /// so the tied head still shares the embedding storage afterwards.
+    pub fn to_dtype(&mut self, dtype: DType) -> Result<()> {
+        for parameter in self.parameters() {
+            let converted = cast_tensor(&parameter.detach(), dtype)?;
+            parameter.set(&converted)?;
+        }
+        self.cos = cast_tensor(&self.cos, dtype)?;
+        self.sin = cast_tensor(&self.sin, dtype)?;
         Ok(())
     }
 }
