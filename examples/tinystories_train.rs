@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use deers::checkpoint;
 use deers::dataset::TokenBinDataset;
-use deers::models::gpt::{GPT, GPTConfig};
+use deers::models::gpt::{GPT, GPTConfig, RopeScaling};
 use deers::nn::{ParamStore, Parameter};
 use deers::optim::{AdamW, AdamWConfig, LrSchedule, WarmupWarmdown, clip_grad_norm};
 use deers::tokenizer::{Gpt2Tokenizer, TokenBinPaths, Tokenizer, prepare_text_token_bins};
@@ -664,6 +664,7 @@ impl TrainOptions {
             mlp_hidden_dim: self.mlp_hidden_dim,
             rms_norm_eps: 1e-5,
             rope_base: 10_000.0,
+            rope_scaling: RopeScaling::None,
         }
     }
 }

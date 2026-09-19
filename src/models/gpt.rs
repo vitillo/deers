@@ -14,6 +14,99 @@ use crate::nn::{Embedding, Linear, Module, ParamBuilder, Parameter, RMSNorm, fun
 use crate::tensor::Tensor;
 use crate::{DType, Device};
 
+/// RoPE scaling applied when precomputing the rotary cache.
+///
+/// Rotary embeddings store one angle per position and channel, so a cache built for short
+/// training sequences runs out of angular room on longer inputs. Scaling stretches the cache:
+/// use `None` for training length, `Linear` or `Yarn` to serve longer contexts. Qwen3 ships
+/// with a large theta (1_000_000) and extends context with YaRN-style scaling.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum RopeScaling {
+    /// No scaling. Reproduces the original RoPE caches exactly.
+    #[default]
+    None,
+    /// Positional interpolation. Divides every inverse frequency by `factor`.
+    Linear {
+        /// Ratio of the extended context length to the original one.
+        factor: f32,
+    },
+    /// YaRN scaling. Interpolates low frequencies, extrapolates high ones, and
+    /// multiplies cos/sin by `0.1 * ln(factor) + 1`.
+    Yarn {
+        /// Ratio of the extended context length to the original one.
+        factor: f32,
+        /// Training context length the base frequencies were built for.
+        original_max_position_embeddings: usize,
+        /// Band edge below which frequencies interpolate. Defaults to 32.
+        beta_fast: f32,
+        /// Band edge above which frequencies extrapolate. Defaults to 1.
+        beta_slow: f32,
+    },
+}
+
+impl RopeScaling {
+    /// YaRN scaling with the reference band defaults (`beta_fast` 32, `beta_slow` 1).
+    pub fn yarn(factor: f32, original_max_position_embeddings: usize) -> Self {
+        Self::Yarn {
+            factor,
+            original_max_position_embeddings,
+            beta_fast: 32.0,
+            beta_slow: 1.0,
+        }
+    }
+}
+
+/// Derives RoPE inverse frequencies plus the cos/sin multiplier for a scaling choice.
+fn rope_inv_freq(head_dim: usize, base: f32, scaling: RopeScaling) -> (Vec<f32>, f32) {
+    let half_dim = head_dim / 2;
+    let default: Vec<f32> = (0..half_dim)
+        .map(|i| 1.0 / base.powf((2 * i) as f32 / head_dim as f32))
+        .collect();
+
+    match scaling {
+        RopeScaling::None => (default, 1.0),
+        RopeScaling::Linear { factor } => {
+            assert!(factor.is_finite() && factor > 0.0, "RoPE linear factor must be positive");
+            (default.iter().map(|freq| freq / factor).collect(), 1.0)
+        }
+        RopeScaling::Yarn { factor, original_max_position_embeddings, beta_fast, beta_slow } => {
+            assert!(factor.is_finite() && factor > 0.0, "RoPE YaRN factor must be positive");
+            assert!(
+                original_max_position_embeddings > 0,
+                "RoPE YaRN original_max_position_embeddings must be positive"
+            );
+
+            let dim = head_dim as f32;
+            let low = find_correction_dim(beta_fast, dim, base, original_max_position_embeddings)
+                .floor()
+                .max(0.0);
+            let mut high = find_correction_dim(beta_slow, dim, base, original_max_position_embeddings)
+                .ceil()
+                .min(dim - 1.0);
+            if low == high {
+                high += 0.001;
+            }
+            let inv_freq = default
+                .iter()
+                .enumerate()
+                .map(|(i, freq)| {
+                    let ramp = ((i as f32 - low) / (high - low)).clamp(0.0, 1.0);
+                    freq / factor * ramp + freq * (1.0 - ramp)
+                })
+                .collect();
+            let attention_factor =
+                if factor <= 1.0 { 1.0 } else { 0.1 * factor.ln() + 1.0 };
+            (inv_freq, attention_factor)
+        }
+    }
+}
+
+/// Inverse-dimension formula locating the band edge for `rotations` full turns.
+fn find_correction_dim(rotations: f32, dim: f32, base: f32, max_position_embeddings: usize) -> f32 {
+    const TAU: f32 = 2.0 * std::f32::consts::PI;
+    dim * (max_position_embeddings as f32 / (rotations * TAU)).ln() / (2.0 * base.ln())
+}
+
 /// Precomputes RoPE cos/sin caches with shape `[1, seq_len, 1, head_dim / 2]`.
 pub fn precompute_rotary_embeddings(
     seq_len: usize,
@@ -22,29 +115,38 @@ pub fn precompute_rotary_embeddings(
     dtype: DType,
     device: Device,
 ) -> (Tensor, Tensor) {
+    precompute_rotary_embeddings_scaled(seq_len, head_dim, base, RopeScaling::None, dtype, device)
+}
+
+/// Precomputes RoPE cos/sin caches with shape `[1, seq_len, 1, head_dim / 2]` under `scaling`.
+pub fn precompute_rotary_embeddings_scaled(
+    seq_len: usize,
+    head_dim: usize,
+    base: f32,
+    scaling: RopeScaling,
+    dtype: DType,
+    device: Device,
+) -> (Tensor, Tensor) {
     assert!(head_dim.is_multiple_of(2), "RoPE requires an even head dimension");
 
-    let half_dim = head_dim / 2;
-    let inv_freq: Vec<f32> = (0..half_dim)
-        .map(|i| {
-            let channel = (2 * i) as f32;
-            1.0 / base.powf(channel / head_dim as f32)
-        })
-        .collect();
+    let (inv_freq, attention_factor) = rope_inv_freq(head_dim, base, scaling);
 
     let freqs: Vec<f32> =
         (0..seq_len).flat_map(|t| inv_freq.iter().map(move |&freq| t as f32 * freq)).collect();
 
+    let half_dim = head_dim / 2;
     let shape = vec![1, seq_len, 1, half_dim];
     match dtype {
         DType::F16 => {
-            let cos: Vec<f16> = freqs.iter().map(|&x| f16::from_f32(x.cos())).collect();
-            let sin: Vec<f16> = freqs.iter().map(|&x| f16::from_f32(x.sin())).collect();
+            let cos: Vec<f16> =
+                freqs.iter().map(|&x| f16::from_f32(x.cos() * attention_factor)).collect();
+            let sin: Vec<f16> =
+                freqs.iter().map(|&x| f16::from_f32(x.sin() * attention_factor)).collect();
             (Tensor::from_vec(cos, shape.clone(), device), Tensor::from_vec(sin, shape, device))
         }
         DType::F32 => {
-            let cos: Vec<f32> = freqs.iter().map(|&x| x.cos()).collect();
-            let sin: Vec<f32> = freqs.iter().map(|&x| x.sin()).collect();
+            let cos: Vec<f32> = freqs.iter().map(|&x| x.cos() * attention_factor).collect();
+            let sin: Vec<f32> = freqs.iter().map(|&x| x.sin() * attention_factor).collect();
             (Tensor::from_vec(cos, shape.clone(), device), Tensor::from_vec(sin, shape, device))
         }
         DType::I64 => panic!("RoPE requires a floating-point dtype"),
@@ -303,6 +405,8 @@ pub struct GPTConfig {
     pub rms_norm_eps: f64,
     /// Base frequency used by RoPE.
     pub rope_base: f32,
+    /// RoPE scaling applied to the precomputed rotary cache.
+    pub rope_scaling: RopeScaling,
 }
 
 impl GPTConfig {
@@ -343,10 +447,11 @@ impl GPT {
             .collect();
         let norm = RMSNorm::new(config.rms_norm_eps);
         let lm_head = Linear::no_bias(builder.pp("lm_head"), config.n_embd, config.vocab_size);
-        let (cos, sin) = precompute_rotary_embeddings(
+        let (cos, sin) = precompute_rotary_embeddings_scaled(
             config.sequence_len,
             config.head_dim(),
             config.rope_base,
+            config.rope_scaling,
             DType::F32,
             Device::Cpu,
         );
