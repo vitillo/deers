@@ -131,7 +131,7 @@ impl CausalSelfAttention {
         let v = v.rearrange("b t h d -> b h t d", &[]);
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let scores = q.matmul(&k.transpose(Some((2, 3)))) * scale; // [B, H, T, T]
+        let scores = Tensor::einsum("b h t d, b h s d -> b h t s", &q, &k) * scale; // [B, H, T, T]
         let mask = functional::causal_mask(batch_size, seq_len, 0, x.dtype(), x.device()); // [B, 1, T, T]
         let attn = (&scores + &mask).softmax(3); // [B, H, T, T]
         let y_flat = attn.matmul(&v).rearrange("b h t d -> (b t) (h d)", &[]);
