@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
-use deers::models::gpt::{Qwen3, Qwen3Config, RopeScaling};
+use deers::models::gpt::{KvCache, Qwen3, Qwen3Config, RopeScaling};
 use deers::nn::{ParamStore, Parameter};
+use deers::sample::SamplingConfig;
 use deers::{DType, Device, Tensor, no_grad};
 
 fn small_config() -> Qwen3Config {
@@ -223,4 +224,86 @@ fn qwen3_bf16_forward_emits_finite_logits() {
     assert_eq!(shape, vec![1, 2, 64]);
     assert_eq!(back.len(), 2 * 64);
     assert!(back.iter().all(|v| v.is_finite()));
+}
+
+fn constant_model(fill: f32) -> (Qwen3, Vec<(String, Parameter)>) {
+    let (model, named) = small_model();
+    for (_, parameter) in &named {
+        let shape: Vec<usize> = parameter.layout().shape().iter().copied().collect();
+        let values = Tensor::from_vec(vec![fill; shape.iter().product()], shape, Device::Cpu);
+        parameter.set(&values).unwrap();
+    }
+    (model, named)
+}
+
+#[test]
+fn qwen3_cached_decode_matches_full_forward() {
+    // Arrange: constant weights and a four-token prompt scored both ways.
+    let (model, _) = constant_model(0.02);
+    let prompt = Tensor::from_vec(vec![1i64, 2, 3, 5], (1, 4), Device::Cpu);
+
+    // Act
+    let full = no_grad(|| model.forward(&prompt).unwrap());
+    let mut caches: Vec<KvCache> = (0..model.n_layers()).map(|_| KvCache::new()).collect();
+    let prefix = Tensor::from_vec(vec![1i64, 2], (1, 2), Device::Cpu);
+    let prefilled = no_grad(|| model.prefill(&prefix, &mut caches).unwrap());
+    let mut stepped = Vec::new();
+    for (step, pos) in [3i64, 5].iter().zip([2, 3]) {
+        let token = Tensor::from_vec(vec![*step], (1, 1), Device::Cpu);
+        stepped.push(no_grad(|| model.decode(&token, pos, &mut caches).unwrap()));
+    }
+
+    // Assert: prefill matches positions 0..2 and each decode step its own.
+    let full_values = full.to_vec::<f32>().unwrap();
+    assert_eq!(
+        prefilled.to_vec::<f32>().unwrap(),
+        full.narrow(1, 0, 2).to_vec::<f32>().unwrap()
+    );
+    assert_eq!(prefilled.layout().shape().iter().copied().collect::<Vec<_>>(), vec![1, 2, 64]);
+    for (step, pos) in stepped.iter().zip([2, 3]) {
+        assert_eq!(step.to_vec::<f32>().unwrap(), full.narrow(1, pos, 1).to_vec::<f32>().unwrap());
+    }
+    assert_eq!(full_values.len(), 4 * 64);
+}
+
+#[test]
+fn qwen3_greedy_generate_matches_manual_decode() {
+    // Arrange: constant weights, a three-token prompt, greedy sampling.
+    let (model, _) = constant_model(0.02);
+    let prompt = vec![1u32, 2, 3];
+    let config = SamplingConfig { temperature: 0.0, ..SamplingConfig::new() };
+
+    // Act
+    let generated = model.generate(&prompt, 3, &config).unwrap();
+    let mut caches: Vec<KvCache> = (0..model.n_layers()).map(|_| KvCache::new()).collect();
+    let idx = Tensor::from_vec(vec![1i64, 2, 3], (1, 3), Device::Cpu);
+    let mut manual = Vec::new();
+    let mut next = no_grad(|| {
+        let logits = model.prefill(&idx, &mut caches).unwrap();
+        argmax_row(&logits, 2)
+    });
+    for step in 0..3 {
+        manual.push(next);
+        let token = Tensor::from_vec(vec![next as i64], (1, 1), Device::Cpu);
+        next = no_grad(|| {
+            let logits = model.decode(&token, 3 + step, &mut caches).unwrap();
+            argmax_row(&logits, 0)
+        });
+    }
+
+    // Assert: generate returns exactly the three decoded ids.
+    assert_eq!(generated, manual);
+    assert_eq!(generated.len(), 3);
+}
+
+fn argmax_row(logits: &Tensor, pos: usize) -> u32 {
+    // First index wins ties, matching the sampler's greedy choice.
+    let row = logits.narrow(1, pos, 1).to_vec::<f32>().unwrap();
+    let mut best = 0;
+    for (i, &value) in row.iter().enumerate().skip(1) {
+        if value > row[best] {
+            best = i;
+        }
+    }
+    best as u32
 }
