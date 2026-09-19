@@ -84,6 +84,7 @@ fn rope_inv_freq(head_dim: usize, base: f32, scaling: RopeScaling) -> (Vec<f32>,
                 .ceil()
                 .min(dim - 1.0);
             if low == high {
+                // A zero-width band would divide by zero in the ramp below.
                 high += 0.001;
             }
             let inv_freq = default
