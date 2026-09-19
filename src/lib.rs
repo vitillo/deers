@@ -15,6 +15,8 @@ mod dtype;
 /// Einops-style shape expressions over tensors.
 pub mod einops;
 mod error;
+/// Perplexity scoring and reference parity checks for language models.
+pub mod eval;
 mod layout;
 /// Built-in loss functions.
 pub mod loss;
