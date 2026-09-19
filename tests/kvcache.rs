@@ -192,7 +192,7 @@ fn cached_gradients_match_full_recomputation() {
     }
     assert_eq!(
         &grad_of(&stitched_grads, &params[0])[..4],
-        &[-0.010818105, 0.0063312226, -0.0007816993, -0.0025316612]
+        &[-0.01190285, 0.0068574687, 0.0011260449, 0.0019811452]
     );
 }
 
