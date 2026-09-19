@@ -782,3 +782,162 @@ impl GPT {
         Ok(())
     }
 }
+
+/// Qwen3 configuration: hidden width, decoupled head width, and layer count.
+#[derive(Clone, Debug)]
+pub struct Qwen3Config {
+    /// Token vocabulary size.
+    pub vocab_size: usize,
+    /// Maximum sequence length supported by the rotary cache.
+    pub sequence_len: usize,
+    /// Number of decoder blocks.
+    pub n_layers: usize,
+    /// Residual stream width.
+    pub hidden: usize,
+    /// Number of query heads per block.
+    pub n_q_heads: usize,
+    /// Number of key/value heads per block.
+    pub n_kv_heads: usize,
+    /// Per-head channel width, decoupled from the residual width.
+    pub head_dim: usize,
+    /// Inner width of the SwiGLU projection.
+    pub mlp_hidden_dim: usize,
+    /// Epsilon used by RMSNorm.
+    pub rms_norm_eps: f64,
+    /// Base frequency used by RoPE.
+    pub rope_base: f32,
+    /// RoPE scaling applied to the precomputed rotary cache.
+    pub rope_scaling: RopeScaling,
+}
+
+impl Qwen3Config {
+    /// Published Qwen3-0.6B dims: 28 layers, hidden 1024, 16 query heads over
+    /// 8 key/value heads at width 128, MLP width 3072, tied 151936-token head.
+    pub fn qwen3_06b() -> Self {
+        Self {
+            vocab_size: 151936,
+            sequence_len: 40960,
+            n_layers: 28,
+            hidden: 1024,
+            n_q_heads: 16,
+            n_kv_heads: 8,
+            head_dim: 128,
+            mlp_hidden_dim: 3072,
+            rms_norm_eps: 1e-6,
+            rope_base: 1_000_000.0,
+            rope_scaling: RopeScaling::None,
+        }
+    }
+}
+
+/// Full Qwen3 model: token embedding, decoder blocks, final norm, tied LM head.
+///
+/// The head reuses the embedding storage under `lm_head.weight`, so the
+/// checkpoint names both while the parameter list holds one tensor.
+#[derive(Debug)]
+pub struct Qwen3 {
+    vocab_size: usize,
+    embed_tokens: Embedding,
+    layers: Vec<Qwen3Block>,
+    norm: RMSNorm,
+    lm_head: Parameter,
+    cos: Tensor,
+    sin: Tensor,
+}
+
+impl Qwen3 {
+    /// Creates a Qwen3 model whose trainable weights are registered under `builder`.
+    pub fn new(config: Qwen3Config, builder: ParamBuilder) -> Self {
+        assert!(
+            config.n_q_heads.is_multiple_of(config.n_kv_heads),
+            "n_q_heads must be divisible by n_kv_heads"
+        );
+
+        let embed_tokens = Embedding::new(builder.pp("wte"), config.vocab_size, config.hidden);
+        let layers = (0..config.n_layers)
+            .map(|index| {
+                Qwen3Block::new(
+                    builder.pp("blocks").pp(index.to_string()),
+                    config.hidden,
+                    config.n_q_heads,
+                    config.n_kv_heads,
+                    config.head_dim,
+                    config.mlp_hidden_dim,
+                    config.rms_norm_eps,
+                )
+            })
+            .collect();
+        let norm = RMSNorm::new_affine(builder.pp("norm"), config.hidden, config.rms_norm_eps);
+        // Tied head: the embedding tensor already tracks gradients, so registering
+        // its clone keeps one tensor id and one storage behind both names.
+        let shared = embed_tokens.parameters().into_iter().next().expect("embedding weight");
+        let lm_head = builder.pp("lm_head").param("weight", (*shared).clone());
+        let (cos, sin) = precompute_rotary_embeddings_scaled(
+            config.sequence_len,
+            config.head_dim,
+            config.rope_base,
+            config.rope_scaling,
+            DType::F32,
+            Device::Cpu,
+        );
+
+        Self { vocab_size: config.vocab_size, embed_tokens, layers, norm, lm_head, cos, sin }
+    }
+
+    /// Returns the number of decoder blocks.
+    pub fn n_layers(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Runs the decoder on token ids shaped `[B, T]`.
+    pub fn forward(&self, idx: &Tensor) -> Result<Tensor> {
+        let shape = idx.layout().shape();
+        assert_eq!(shape.ndim(), 2, "Qwen3 expects token ids with shape [B, T]");
+
+        let batch_size = shape[0];
+        let seq_len = shape[1];
+        assert!(seq_len <= self.cos.layout().shape()[1], "sequence length exceeds rotary cache");
+        assert_eq!(
+            idx.device(),
+            self.cos.device(),
+            "token ids and rotary cache must be on the same device"
+        );
+
+        let cos = self.cos.narrow(1, 0, seq_len); // [1, T, 1, D/2]
+        let sin = self.sin.narrow(1, 0, seq_len); // [1, T, 1, D/2]
+
+        let mut x = self.embed_tokens.forward(idx)?; // [B, T, C]
+        for layer in &self.layers {
+            x = layer.forward(&x, &cos, &sin)?; // [B, T, C]
+        }
+        x = self.norm.forward(&x)?; // [B, T, C]
+
+        let x_flat = x.rearrange("b t c -> (b t) c", &[]);
+        let head = self.lm_head.transpose(None); // [C, V] view over [V, C]
+        let logits = x_flat.matmul(&head); // [B*T, V]
+        Ok(logits.rearrange(
+            "(b t) v -> b t v",
+            &[("b", batch_size), ("t", seq_len), ("v", self.vocab_size)],
+        ))
+    }
+
+    /// Returns each trainable tensor once; the tied head shares the embedding entry.
+    pub fn parameters(&self) -> Vec<Parameter> {
+        let mut parameters = self.embed_tokens.parameters();
+        for layer in &self.layers {
+            parameters.extend(layer.parameters());
+        }
+        parameters.extend(self.norm.parameters());
+        parameters
+    }
+
+    /// Moves the model parameters and rotary caches to `device`.
+    pub fn to_device(&mut self, device: Device) -> Result<()> {
+        for parameter in self.parameters() {
+            parameter.to_device(device)?;
+        }
+        self.cos = self.cos.to_device(device)?;
+        self.sin = self.sin.to_device(device)?;
+        Ok(())
+    }
+}
