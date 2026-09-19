@@ -7,15 +7,15 @@
 //! files the map lists. Without an index, loading reads every `*.safetensors`
 //! file in the directory in sorted order.
 //!
-//! Qwen3 weight names map onto deers GPT names for the layers both models
-//! share. `model.embed_tokens.weight` becomes `wte.weight`,
-//! `model.layers.{l}.self_attn.{q,k,v}_proj.weight` become
-//! `blocks.{l}.attn.{q,k,v}_proj.weight`, `o_proj` becomes `out_proj`, the
-//! `q_norm` and `k_norm` weights keep their names under `attn`, the MLP
-//! `up_proj` and `down_proj` weights keep theirs under `mlp`, and
-//! `lm_head.weight` is unchanged. Qwen-only tensors (`gate_proj`, both
-//! layernorms, `model.norm`) have no deers counterpart and fail loudly at
-//! assignment with the shard file and tensor named.
+//! Qwen3 weight names map onto deers Qwen3 names. `model.embed_tokens.weight`
+//! becomes `wte.weight`, `model.layers.{l}.self_attn.{q,k,v}_proj.weight`
+//! become `blocks.{l}.attn.{q,k,v}_proj.weight`, `o_proj` becomes `out_proj`,
+//! the `q_norm` and `k_norm` weights keep their names under `attn`, the MLP
+//! `gate_proj`, `up_proj`, and `down_proj` weights keep theirs under `mlp`,
+//! both layernorms keep theirs under `blocks.{l}`, `model.norm.weight`
+//! becomes `norm.weight`, and `lm_head.weight` is unchanged. Names outside
+//! the Qwen layout keep their names as-is so deers-native shards load
+//! through the same path.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -77,18 +77,19 @@ pub fn load_tensors(path: &Path, device: Device) -> Result<BTreeMap<String, Tens
     Ok(loaded)
 }
 
-/// Maps a Hugging Face Qwen3 tensor name onto a deers GPT parameter name.
+/// Maps a Hugging Face Qwen3 tensor name onto a deers Qwen3 parameter name.
 ///
-/// Returns `None` for Qwen-only tensors with no deers counterpart
-/// (`gate_proj`, both layernorms, `model.norm`) and for names outside the
-/// Qwen layout. Callers keep unmapped names as-is so deers-native shards
-/// load through the same path.
+/// Returns `None` for names outside the Qwen layout. Callers keep unmapped
+/// names as-is so deers-native shards load through the same path.
 pub fn map_qwen_name(hf_name: &str) -> Option<String> {
     if hf_name == "model.embed_tokens.weight" {
         return Some("wte.weight".to_owned());
     }
     if hf_name == "lm_head.weight" {
         return Some("lm_head.weight".to_owned());
+    }
+    if hf_name == "model.norm.weight" {
+        return Some("norm.weight".to_owned());
     }
     let rest = hf_name.strip_prefix("model.layers.")?;
     let (layer, rest) = rest.split_once('.')?;
@@ -102,8 +103,13 @@ pub fn map_qwen_name(hf_name: &str) -> Option<String> {
         "self_attn.o_proj.weight" => format!("blocks.{layer}.attn.out_proj.weight"),
         "self_attn.q_norm.weight" => format!("blocks.{layer}.attn.q_norm.weight"),
         "self_attn.k_norm.weight" => format!("blocks.{layer}.attn.k_norm.weight"),
+        "mlp.gate_proj.weight" => format!("blocks.{layer}.mlp.gate_proj.weight"),
         "mlp.up_proj.weight" => format!("blocks.{layer}.mlp.up_proj.weight"),
         "mlp.down_proj.weight" => format!("blocks.{layer}.mlp.down_proj.weight"),
+        "input_layernorm.weight" => format!("blocks.{layer}.input_layernorm.weight"),
+        "post_attention_layernorm.weight" => {
+            format!("blocks.{layer}.post_attention_layernorm.weight")
+        }
         _ => return None,
     };
     Some(mapped)
@@ -405,18 +411,25 @@ mod tests {
 
     #[test]
     fn test_map_qwen_name_covers_shared_layers() {
-        // Arrange: Qwen3 names for the layers both models share.
+        // Arrange: every Qwen3 weight family against its deers name.
         let cases = [
             ("model.embed_tokens.weight", "wte.weight"),
             ("lm_head.weight", "lm_head.weight"),
+            ("model.norm.weight", "norm.weight"),
             ("model.layers.0.self_attn.q_proj.weight", "blocks.0.attn.q_proj.weight"),
             ("model.layers.2.self_attn.k_proj.weight", "blocks.2.attn.k_proj.weight"),
             ("model.layers.1.self_attn.v_proj.weight", "blocks.1.attn.v_proj.weight"),
             ("model.layers.0.self_attn.o_proj.weight", "blocks.0.attn.out_proj.weight"),
             ("model.layers.3.self_attn.q_norm.weight", "blocks.3.attn.q_norm.weight"),
             ("model.layers.3.self_attn.k_norm.weight", "blocks.3.attn.k_norm.weight"),
+            ("model.layers.0.mlp.gate_proj.weight", "blocks.0.mlp.gate_proj.weight"),
             ("model.layers.0.mlp.up_proj.weight", "blocks.0.mlp.up_proj.weight"),
             ("model.layers.0.mlp.down_proj.weight", "blocks.0.mlp.down_proj.weight"),
+            ("model.layers.0.input_layernorm.weight", "blocks.0.input_layernorm.weight"),
+            (
+                "model.layers.0.post_attention_layernorm.weight",
+                "blocks.0.post_attention_layernorm.weight",
+            ),
         ];
 
         // Act
@@ -430,14 +443,11 @@ mod tests {
 
     #[test]
     fn test_map_qwen_name_rejects_qwen_only_and_foreign_names() {
-        // Arrange: Qwen-only tensors plus names outside the Qwen layout.
+        // Arrange: names outside the Qwen weight layout.
         let cases = [
-            "model.layers.0.mlp.gate_proj.weight",
-            "model.layers.0.input_layernorm.weight",
-            "model.layers.0.post_attention_layernorm.weight",
-            "model.norm.weight",
             "model.layers.x.self_attn.q_proj.weight",
             "model.layers.0.self_attn.q_proj.bias",
+            "model.layers.0.mlp.gate_proj.bias",
             "custom.weight",
             "",
         ];
@@ -446,7 +456,7 @@ mod tests {
         let mapped: Vec<Option<String>> = cases.iter().map(|name| map_qwen_name(name)).collect();
 
         // Assert
-        assert_eq!(mapped, vec![None, None, None, None, None, None, None, None]);
+        assert_eq!(mapped, vec![None, None, None, None, None]);
     }
 
     #[test]
