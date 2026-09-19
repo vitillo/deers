@@ -13,11 +13,11 @@ use deers::models::gpt::{GPT, GPTConfig};
 use deers::nn::{ParamStore, Module};
 use deers::optim::{AdamWConfig, clip_grad_norm};
 use deers::dataset::TokenBinDataset;
-use deers::tokenizer::Tokenizer;
+use deers::tokenizer::{Gpt2Tokenizer, Tokenizer};
 use deers::{Device, loss};
 
 // Tokenizer and data
-let tokenizer = Tokenizer::gpt2();
+let tokenizer = Gpt2Tokenizer::new();
 let dataset = TokenBinDataset::load("data/tinystories_gpt2/train.bin", 256).unwrap();
 
 // Build a 6-layer GPT
@@ -93,7 +93,7 @@ See [`examples/mnist_train.rs`](examples/mnist_train.rs) for a simpler MNIST cla
 
 **Losses** — `cross_entropy`, `nll_loss`
 
-**Tokenizer** — tiktoken-based BPE wrapper
+**Tokenizer** — one BPE tokenizer type per encoding (`Gpt2Tokenizer`, `Cl100kTokenizer`, `Qwen3Tokenizer`) behind the shared `Tokenizer` trait
 
 **Data** — MNIST loader, text dataset, token-bin dataset with auto-download
 

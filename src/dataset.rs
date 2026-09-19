@@ -115,7 +115,7 @@ pub struct TextDataset {
 impl TextDataset {
     /// Creates a dataset from a pre-tokenized stream.
     ///
-    /// `tokens` is the flat token stream (e.g. from [`Tokenizer::encode`]).
+    /// `tokens` is the flat token stream (e.g. from [`Tokenizer::encode`](crate::tokenizer::Tokenizer::encode)).
     /// `vocab_size` should match the tokenizer that produced the tokens.
     /// `seq_len` is the context window the model sees (e.g. 256 or 1024).
     ///
