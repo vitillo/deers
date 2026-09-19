@@ -113,37 +113,29 @@ impl CausalSelfAttention {
         );
 
         let x_flat = x.reshape(vec![batch_size * seq_len, channels]); // [B*T, C]
-        let q = self.q_proj.forward(&x_flat)?.reshape(vec![
-            batch_size,
-            seq_len,
-            self.n_head,
-            self.head_dim,
-        ]); // [B, T, H, D]
-        let k = self.k_proj.forward(&x_flat)?.reshape(vec![
-            batch_size,
-            seq_len,
-            self.n_head,
-            self.head_dim,
-        ]); // [B, T, H, D]
-        let v = self.v_proj.forward(&x_flat)?.reshape(vec![
-            batch_size,
-            seq_len,
-            self.n_head,
-            self.head_dim,
-        ]); // [B, T, H, D]
+        let q = self.q_proj.forward(&x_flat)?.rearrange(
+            "(b t) (h d) -> b t h d",
+            &[("b", batch_size), ("t", seq_len), ("h", self.n_head)],
+        );
+        let k = self.k_proj.forward(&x_flat)?.rearrange(
+            "(b t) (h d) -> b t h d",
+            &[("b", batch_size), ("t", seq_len), ("h", self.n_head)],
+        );
+        let v = self.v_proj.forward(&x_flat)?.rearrange(
+            "(b t) (h d) -> b t h d",
+            &[("b", batch_size), ("t", seq_len), ("h", self.n_head)],
+        );
 
-        let q = apply_rotary_emb(&q, cos, sin).permute(vec![0, 2, 1, 3]); // [B, H, T, D]
-        let k = apply_rotary_emb(&k, cos, sin).permute(vec![0, 2, 1, 3]); // [B, H, T, D]
-        let v = v.permute(vec![0, 2, 1, 3]); // [B, H, T, D]
+        let q = apply_rotary_emb(&q, cos, sin).rearrange("b t h d -> b h t d", &[]);
+        let k = apply_rotary_emb(&k, cos, sin).rearrange("b t h d -> b h t d", &[]);
+        let v = v.rearrange("b t h d -> b h t d", &[]);
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let scores = q.matmul(&k.transpose(Some((2, 3)))) * scale; // [B, H, T, T]
         let mask = functional::causal_mask(batch_size, seq_len, 0, x.dtype(), x.device()); // [B, 1, T, T]
         let attn = (&scores + &mask).softmax(3); // [B, H, T, T]
-        let y =
-            attn.matmul(&v).permute(vec![0, 2, 1, 3]).reshape(vec![batch_size, seq_len, channels]); // [B, T, C]
+        let y_flat = attn.matmul(&v).rearrange("b h t d -> (b t) (h d)", &[]);
 
-        let y_flat = y.reshape(vec![batch_size * seq_len, channels]); // [B*T, C]
         self.out_proj.forward(&y_flat).map(|out| out.reshape(vec![batch_size, seq_len, channels]))
     }
 
