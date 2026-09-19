@@ -2016,17 +2016,15 @@ impl TensorOp for Clamp {
                 let vals = self.arg.to_vec::<bf16>()?;
                 let go = out_grad.to_vec::<bf16>()?;
                 let (lo, hi) = (self.min as f32, self.max as f32);
-                let grad: Vec<bf16> =
-                    vals.iter()
-                        .zip(go.iter())
-                        .map(|(v, g)| {
-                            if v.to_f32() >= lo && v.to_f32() <= hi {
-                                *g
-                            } else {
-                                bf16::ZERO
-                            }
-                        })
-                        .collect();
+                let grad: Vec<bf16> = vals
+                    .iter()
+                    .zip(go.iter())
+                    .map(
+                        |(v, g)| {
+                            if v.to_f32() >= lo && v.to_f32() <= hi { *g } else { bf16::ZERO }
+                        },
+                    )
+                    .collect();
                 grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
             }
             crate::DType::I64 => {

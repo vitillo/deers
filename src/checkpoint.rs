@@ -202,10 +202,7 @@ mod tests {
             "linear.weight".to_owned(),
             Tensor::from_vec(weight.clone(), (3,), Device::Cpu),
         );
-        tensors.insert(
-            "linear.bias".to_owned(),
-            Tensor::from_vec(vec![0.5f32], (1,), Device::Cpu),
-        );
+        tensors.insert("linear.bias".to_owned(), Tensor::from_vec(vec![0.5f32], (1,), Device::Cpu));
 
         // Act
         save_tensors(&path, &tensors).unwrap();

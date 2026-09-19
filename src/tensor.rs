@@ -1170,11 +1170,7 @@ mod tests {
     #[test]
     fn test_bf16_add_rounds_once_through_f32() {
         // Arrange
-        let a = Tensor::from_vec(
-            vec![bf16::from_f32(0.1), bf16::from_f32(0.2)],
-            (2,),
-            Device::Cpu,
-        );
+        let a = Tensor::from_vec(vec![bf16::from_f32(0.1), bf16::from_f32(0.2)], (2,), Device::Cpu);
         let b = Tensor::from_vec(vec![bf16::ZERO, bf16::ZERO], (2,), Device::Cpu);
 
         // Act

@@ -3,9 +3,9 @@
 
 use std::borrow::Borrow;
 
-use half::f16;
 #[cfg(target_os = "macos")]
 use half::bf16;
+use half::f16;
 
 use crate::{
     dtype::{DType, WithDType},
@@ -758,8 +758,9 @@ mod imp {
                 }
                 MpsInner::Accelerated { ctx, buffer, len, dtype: DType::BF16 } => {
                     ctx.synchronize();
-                    let slice =
-                        unsafe { std::slice::from_raw_parts(buffer.contents().cast::<bf16>(), len) };
+                    let slice = unsafe {
+                        std::slice::from_raw_parts(buffer.contents().cast::<bf16>(), len)
+                    };
                     CpuStorage::BF16(slice.to_vec())
                 }
                 MpsInner::Cpu(storage) => storage,
