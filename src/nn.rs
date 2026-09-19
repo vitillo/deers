@@ -758,8 +758,7 @@ mod tests {
 
     #[test]
     fn test_param_store_load_sharded_rejects_unexpected_name() {
-        // Arrange: a Qwen-only tensor with no deers counterpart next to a
-        // valid shard.
+        // Arrange: a tensor outside the Qwen weight layout next to a valid shard.
         let (store, dir) = sharded_case("unexpected");
         let mut first = BTreeMap::new();
         first.insert(
@@ -768,7 +767,7 @@ mod tests {
         );
         let mut second = BTreeMap::new();
         second.insert(
-            "model.layers.0.mlp.gate_proj.weight".to_owned(),
+            "model.layers.0.self_attn.q_proj.bias".to_owned(),
             Tensor::from_vec(vec![1.0f32, 2.0], (1, 2), Device::Cpu),
         );
         write_shard(&dir, "a.safetensors", &first);
@@ -781,7 +780,7 @@ mod tests {
         assert_eq!(
             error,
             format!(
-                "unexpected tensor 'model.layers.0.mlp.gate_proj.weight' in '{}': no matching parameter",
+                "unexpected tensor 'model.layers.0.self_attn.q_proj.bias' in '{}': no matching parameter",
                 dir.join("b.safetensors").display()
             )
         );
