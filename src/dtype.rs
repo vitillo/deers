@@ -119,3 +119,85 @@ impl WithDType for i64 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bf16_display_and_size() {
+        // Arrange
+        let dtype = DType::BF16;
+
+        // Act
+        let name = dtype.to_string();
+        let bytes = dtype.size_in_bytes();
+
+        // Assert
+        assert_eq!(name, "bf16");
+        assert_eq!(bytes, 2);
+    }
+
+    #[test]
+    fn test_bf16_exact_values_roundtrip() {
+        // Arrange: values with at most 7 mantissa bits survive BF16 exactly.
+        let exact = [0.0f32, 1.0, -2.0, 1.5, 100.0, 65536.0];
+
+        // Act
+        let roundtripped: Vec<f32> =
+            exact.iter().map(|&v| bf16::from_f32(v).to_f32()).collect();
+
+        // Assert
+        assert_eq!(roundtripped, exact);
+    }
+
+    #[test]
+    fn test_bf16_rounds_to_nearest_even() {
+        // Arrange: each case is (input, expected BF16 bits). Pi truncates to
+        // 0x4049 (3.140625). 1 + 2^-8 sits exactly halfway between two BF16
+        // values and rounds to the even mantissa (0x3F80 = 1.0), while
+        // 1 + 3*2^-8 rounds up to 0x3F82 (1.015625).
+        let cases = [
+            (std::f32::consts::PI, 0x4049u16),
+            (1.0 + 2f32.powi(-8), 0x3F80),
+            (1.0 + 3.0 * 2f32.powi(-8), 0x3F82),
+            (0.1, 0x3DCD),
+        ];
+
+        // Act
+        let rounded: Vec<u16> = cases.iter().map(|&(v, _)| bf16::from_f32(v).to_bits()).collect();
+
+        // Assert
+        let expected: Vec<u16> = cases.iter().map(|&(_, e)| e).collect();
+        assert_eq!(rounded, expected);
+    }
+
+    #[test]
+    fn test_bf16_extremes() {
+        // Arrange
+        let max = bf16::MAX.to_f32();
+        let min = bf16::MIN.to_f32();
+        let min_positive = bf16::MIN_POSITIVE.to_f32();
+
+        // Act + Assert: BF16 spans the F32 exponent range with 7 mantissa bits.
+        assert_eq!(max, 3.3895314e38f32);
+        assert_eq!(min, -3.3895314e38f32);
+        assert_eq!(min_positive, 1.1754944e-38f32);
+    }
+
+    #[test]
+    fn test_bf16_nonfinite_inputs() {
+        // Arrange
+        let nan = bf16::from_f32(f32::NAN);
+        let pos_inf = bf16::from_f32(f32::INFINITY);
+        let neg_inf = bf16::from_f32(f32::NEG_INFINITY);
+
+        // Act + Assert
+        assert!(nan.is_nan());
+        assert_eq!(pos_inf, bf16::INFINITY);
+        assert_eq!(neg_inf, bf16::NEG_INFINITY);
+        // Overflow past BF16 range saturates to infinity.
+        assert!(bf16::from_f32(bf16::MAX.to_f32() * 2.0).is_infinite());
+        assert!(bf16::from_f32(f32::MAX).is_infinite());
+    }
+}

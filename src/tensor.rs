@@ -1150,4 +1150,90 @@ mod tests {
         assert!(compact_flag);
         assert!(!non_compact_flag);
     }
+
+    #[test]
+    fn test_bf16_zeros_and_ones() {
+        // Arrange
+        let zeros = Tensor::zeros((3,), DType::BF16, Device::Cpu);
+        let ones = Tensor::ones((3,), DType::BF16, Device::Cpu);
+
+        // Act
+        let zero_vals = zeros.to_vec::<bf16>().unwrap();
+        let one_vals = ones.to_vec::<bf16>().unwrap();
+
+        // Assert
+        assert_eq!(zeros.dtype(), DType::BF16);
+        assert_eq!(zero_vals, vec![bf16::ZERO; 3]);
+        assert_eq!(one_vals, vec![bf16::ONE; 3]);
+    }
+
+    #[test]
+    fn test_bf16_add_rounds_once_through_f32() {
+        // Arrange
+        let a = Tensor::from_vec(
+            vec![bf16::from_f32(0.1), bf16::from_f32(0.2)],
+            (2,),
+            Device::Cpu,
+        );
+        let b = Tensor::from_vec(vec![bf16::ZERO, bf16::ZERO], (2,), Device::Cpu);
+
+        // Act
+        let c = &a + &b;
+        let sums = (&a + &a).to_vec::<bf16>().unwrap();
+
+        // Assert: adding zero is the identity, and doubling stays exact because
+        // 0x3E4D (0.2001953125) and 0x3ECD (0.400390625) both fit the mantissa.
+        assert_eq!(c.to_vec::<bf16>().unwrap(), a.to_vec::<bf16>().unwrap());
+        assert_eq!(sums[0].to_bits(), 0x3E4D);
+        assert_eq!(sums[1].to_bits(), 0x3ECD);
+    }
+
+    #[test]
+    fn test_bf16_matmul_small_integers_are_exact() {
+        // Arrange
+        let a = Tensor::from_vec(
+            vec![
+                bf16::from_f32(1.0),
+                bf16::from_f32(2.0),
+                bf16::from_f32(3.0),
+                bf16::from_f32(4.0),
+            ],
+            (2, 2),
+            Device::Cpu,
+        );
+        let b = Tensor::from_vec(
+            vec![
+                bf16::from_f32(5.0),
+                bf16::from_f32(6.0),
+                bf16::from_f32(7.0),
+                bf16::from_f32(8.0),
+            ],
+            (2, 2),
+            Device::Cpu,
+        );
+
+        // Act
+        let c = a.matmul(&b);
+
+        // Assert: [[19, 22], [43, 50]] needs no rounding at any step.
+        assert_eq!(c.dtype(), DType::BF16);
+        let vals: Vec<f32> = c.to_vec::<bf16>().unwrap().iter().map(|v| v.to_f32()).collect();
+        assert_eq!(vals, vec![19.0, 22.0, 43.0, 50.0]);
+    }
+
+    #[test]
+    fn test_bf16_roundtrip_stays_within_half_ulp() {
+        // Arrange: normal-range values plus exact zero.
+        let values = [0.0f64, 0.1, 1.0, -2.5, 100.0, 1234.5678, 1.1754944e-38, 3.0e38];
+
+        // Act
+        let roundtripped: Vec<f64> =
+            values.iter().map(|&v| bf16::from_f32(v as f32).to_f32() as f64).collect();
+
+        // Assert: a 7-bit mantissa keeps relative error under 2^-8 per value.
+        for (&v, &r) in values.iter().zip(roundtripped.iter()) {
+            let bound = 2f64.powi(-8) * v.abs();
+            assert!((r - v).abs() <= bound, "roundtrip of {v} gave {r}, bound {bound}");
+        }
+    }
 }
