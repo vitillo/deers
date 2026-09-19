@@ -659,6 +659,9 @@ mod imp {
                 DType::F16 => CudaInner::F16(unsafe { alloc_uninit::<f16>(&runtime, size) }?),
                 DType::F32 => CudaInner::F32(unsafe { alloc_uninit::<f32>(&runtime, size) }?),
                 DType::I64 => CudaInner::I64(unsafe { alloc_uninit::<i64>(&runtime, size) }?),
+                DType::BF16 => {
+                    return Err(Error::NotImplemented("cuda BF16 storage is not implemented"));
+                }
             };
             Ok(Self { inner, runtime })
         }
@@ -675,6 +678,7 @@ mod imp {
                 DType::I64 => CudaInner::I64(
                     runtime.stream.alloc_zeros::<i64>(size).expect("cuda alloc failed"),
                 ),
+                DType::BF16 => panic!("cuda BF16 storage is not implemented"),
             };
             Self { inner, runtime }
         }
@@ -686,6 +690,7 @@ mod imp {
                 }
                 DType::F32 => Self::from_cpu_storage(CpuStorage::F32(vec![1.0; size])),
                 DType::I64 => Self::from_cpu_storage(CpuStorage::I64(vec![1; size])),
+                DType::BF16 => panic!("cuda BF16 storage is not implemented"),
             }
         }
 
@@ -701,6 +706,7 @@ mod imp {
                 CpuStorage::I64(data) => {
                     CudaInner::I64(runtime.stream.clone_htod(&data).expect("cuda copy failed"))
                 }
+                CpuStorage::BF16(_) => panic!("cuda BF16 storage is not implemented"),
             };
             Self { inner, runtime }
         }
@@ -991,6 +997,11 @@ mod imp {
                                 "cuda reduce_sum for i64 is not implemented",
                             ));
                         }
+                        DType::BF16 => {
+                            return Err(Error::NotImplemented(
+                                "cuda reduce_sum for bf16 is not implemented",
+                            ));
+                        }
                     },
                     dst.len(),
                     compact.len() / dst.len(),
@@ -1002,6 +1013,11 @@ mod imp {
                         DType::I64 => {
                             return Err(Error::NotImplemented(
                                 "cuda reduce_max for i64 is not implemented",
+                            ));
+                        }
+                        DType::BF16 => {
+                            return Err(Error::NotImplemented(
+                                "cuda reduce_max for bf16 is not implemented",
                             ));
                         }
                     },
@@ -1459,6 +1475,11 @@ mod imp {
                     DType::I64 => {
                         return Err(Error::NotImplemented(
                             "cuda log_sum_exp for i64 is not implemented",
+                        ));
+                    }
+                    DType::BF16 => {
+                        return Err(Error::NotImplemented(
+                            "cuda log_sum_exp for bf16 is not implemented",
                         ));
                     }
                 },
