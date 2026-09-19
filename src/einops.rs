@@ -114,12 +114,16 @@ fn parse_side(source: &str, pattern: &str) -> Side {
     Side { groups }
 }
 
+/// Accepts plain axis names: ascii alphanumeric plus `_`, never digit first.
+fn valid_name(word: &str) -> bool {
+    !word.is_empty()
+        && word.chars().all(|current| current.is_ascii_alphanumeric() || current == '_')
+        && !word.chars().next().is_some_and(|current| current.is_ascii_digit())
+}
+
 /// Rejects tokens that are not plain axis names.
 fn check_name(word: &str, pattern: &str) -> String {
-    let valid = !word.is_empty()
-        && word.chars().all(|current| current.is_ascii_alphanumeric() || current == '_')
-        && !word.chars().next().is_some_and(|current| current.is_ascii_digit());
-    if !valid {
+    if !valid_name(word) {
         panic!("einops pattern '{pattern}': '{word}' is not a valid axis name");
     }
     word.to_string()
@@ -404,5 +408,209 @@ impl Tensor {
         let permuted = permute_unless(&unsqueezed, permutation(&from, &rhs_flat, source));
         let full: Vec<usize> = rhs_flat.iter().map(|key| resolved[key.as_str()]).collect();
         reshape_unless(&permuted.broadcast(full), grouped_shape(&parsed.rhs, &resolved, source))
+    }
+}
+
+/// A parsed two-input contraction equation: `lhs, rhs -> out`.
+///
+/// Each side holds whitespace separated labels in the same alphabet as the
+/// einops axes. One token is one label, so a compact run such as `bhts`
+/// names a single axis and never four.
+struct Equation {
+    lhs: Vec<String>,
+    rhs: Vec<String>,
+    out: Vec<String>,
+    source: String,
+}
+
+/// Label roles for one single-contract batch matmul.
+///
+/// Validated once so the lowering reads positions instead of branching on
+/// labels: batch labels live in both inputs and the output, each input keeps
+/// exactly one label into the output, and the contracted label lives in both
+/// inputs but not the output.
+struct ContractPlan {
+    batch: Vec<String>,
+    keep_left: String,
+    keep_right: String,
+    contract: String,
+}
+
+/// Splits one equation side into labels.
+fn parse_equation_side(kind: &str, side: &str, pattern: &str) -> Vec<String> {
+    let labels: Vec<String> = side.split_whitespace().map(str::to_string).collect();
+    if labels.is_empty() {
+        panic!("einsum '{pattern}': {kind} side is empty");
+    }
+    for label in &labels {
+        if !valid_name(label) {
+            panic!("einsum '{pattern}': '{label}' is not a valid axis name");
+        }
+    }
+    let mut seen = Vec::new();
+    for label in &labels {
+        if seen.contains(label) {
+            panic!(
+                "einsum '{pattern}': duplicate label '{label}' in {kind} side; labels must be unique per side"
+            );
+        }
+        seen.push(label.clone());
+    }
+    labels
+}
+
+/// Parses `lhs, rhs -> out` into three label lists.
+fn parse_equation(pattern: &str) -> Equation {
+    let parts: Vec<&str> = pattern.split("->").collect();
+    if parts.len() != 2 {
+        panic!("einsum '{pattern}': pattern must contain exactly one '->'");
+    }
+    let inputs: Vec<&str> = parts[0].split(',').collect();
+    if inputs.len() != 2 {
+        panic!("einsum '{pattern}': pattern must contain exactly two inputs separated by ','");
+    }
+    Equation {
+        lhs: parse_equation_side("input side 1", inputs[0], pattern),
+        rhs: parse_equation_side("input side 2", inputs[1], pattern),
+        out: parse_equation_side("output", parts[1], pattern),
+        source: pattern.to_string(),
+    }
+}
+
+/// Sorts equation labels into batch, kept, and contracted roles.
+fn plan_contraction(eq: &Equation) -> ContractPlan {
+    let source = eq.source.as_str();
+    for label in &eq.out {
+        if !eq.lhs.contains(label) && !eq.rhs.contains(label) {
+            panic!("einsum '{source}': output label '{label}' is not present in either input");
+        }
+    }
+    for label in eq.lhs.iter().chain(eq.rhs.iter()) {
+        let in_both = eq.lhs.contains(label) && eq.rhs.contains(label);
+        if !eq.out.contains(label) && !in_both {
+            panic!(
+                "einsum '{source}': input label '{label}' is missing from the output; only the contracted axis may leave the output"
+            );
+        }
+    }
+    let contracted: Vec<&String> =
+        eq.lhs.iter().filter(|label| eq.rhs.contains(label) && !eq.out.contains(label)).collect();
+    let contract = match contracted.as_slice() {
+        [one] => (*one).clone(),
+        [] => panic!(
+            "einsum '{source}': no contracted axis; one label must appear in both inputs but not the output"
+        ),
+        many => panic!(
+            "einsum '{source}': axes {} are all contracted; only single-axis contraction is supported",
+            many.iter().map(|label| label.as_str()).collect::<Vec<_>>().join(", ")
+        ),
+    };
+    let kept_left: Vec<&String> =
+        eq.lhs.iter().filter(|label| eq.out.contains(label) && !eq.rhs.contains(label)).collect();
+    let keep_left = match kept_left.as_slice() {
+        [one] => (*one).clone(),
+        [] => panic!(
+            "einsum '{source}': left input keeps no axis into the output; each input must keep exactly one"
+        ),
+        many => panic!(
+            "einsum '{source}': left input keeps axes {}; each input must keep exactly one",
+            many.iter().map(|label| label.as_str()).collect::<Vec<_>>().join(", ")
+        ),
+    };
+    let kept_right: Vec<&String> =
+        eq.rhs.iter().filter(|label| eq.out.contains(label) && !eq.lhs.contains(label)).collect();
+    let keep_right = match kept_right.as_slice() {
+        [one] => (*one).clone(),
+        [] => panic!(
+            "einsum '{source}': right input keeps no axis into the output; each input must keep exactly one"
+        ),
+        many => panic!(
+            "einsum '{source}': right input keeps axes {}; each input must keep exactly one",
+            many.iter().map(|label| label.as_str()).collect::<Vec<_>>().join(", ")
+        ),
+    };
+    let batch: Vec<String> =
+        eq.lhs.iter().filter(|label| eq.rhs.contains(label) && eq.out.contains(label)).cloned().collect();
+    ContractPlan { batch, keep_left, keep_right, contract }
+}
+
+impl Tensor {
+    /// Contracts two tensors along one shared axis, written as an equation.
+    ///
+    /// The pattern is `left, right -> out` with whitespace separated labels.
+    /// One label appears in both inputs but not the output: the contracted
+    /// axis. Each input keeps exactly one label into the output. The rest are
+    /// batch labels, which must match in size. Both inputs permute into
+    /// `[batch, kept, contracted]` matmul form, [`Tensor::matmul`] runs, and
+    /// the product permutes into output order. Gradients flow through those
+    /// existing operators, so no separate backward exists.
+    ///
+    /// Three shapes cover the supported uses:
+    ///
+    /// ```ignore
+    /// let scores = Tensor::einsum("b h t d, b h s d -> b h t s", &q, &k);
+    /// let out = Tensor::einsum("b h t s, b h s d -> b h t d", &attn, &v);
+    /// let proj = Tensor::einsum("b t c, b c e -> b t e", &x, &w);
+    /// ```
+    pub fn einsum(pattern: &str, a: &Tensor, b: &Tensor) -> Tensor {
+        let equation = parse_equation(pattern);
+        let source = equation.source.as_str();
+        let shape_a: Vec<usize> = a.layout().shape().iter().copied().collect();
+        let shape_b: Vec<usize> = b.layout().shape().iter().copied().collect();
+        if equation.lhs.len() != shape_a.len() {
+            panic!(
+                "einsum '{source}': left side has {} labels but the first input is {}-d (shape {shape_a:?}); one label per dim",
+                equation.lhs.len(),
+                shape_a.len()
+            );
+        }
+        if equation.rhs.len() != shape_b.len() {
+            panic!(
+                "einsum '{source}': right side has {} labels but the second input is {}-d (shape {shape_b:?}); one label per dim",
+                equation.rhs.len(),
+                shape_b.len()
+            );
+        }
+        let plan = plan_contraction(&equation);
+        let size = |labels: &[String], shape: &[usize], label: &str| {
+            shape[labels.iter().position(|other| other == label).unwrap()]
+        };
+        let first = size(&equation.lhs, &shape_a, &plan.contract);
+        let second = size(&equation.rhs, &shape_b, &plan.contract);
+        if first != second {
+            panic!(
+                "einsum '{source}': contracted axis '{}' has size {first} in the first input but {second} in the second",
+                plan.contract
+            );
+        }
+        for label in &plan.batch {
+            let first = size(&equation.lhs, &shape_a, label);
+            let second = size(&equation.rhs, &shape_b, label);
+            if first != second {
+                panic!(
+                    "einsum '{source}': batch axis '{label}' has size {first} in the first input but {second} in the second"
+                );
+            }
+        }
+        let position =
+            |labels: &[String], label: &str| labels.iter().position(|other| other == label).unwrap();
+        let mut left_perm: Vec<usize> =
+            plan.batch.iter().map(|label| position(&equation.lhs, label)).collect();
+        left_perm.push(position(&equation.lhs, &plan.keep_left));
+        left_perm.push(position(&equation.lhs, &plan.contract));
+        let mut right_perm: Vec<usize> =
+            plan.batch.iter().map(|label| position(&equation.rhs, label)).collect();
+        right_perm.push(position(&equation.rhs, &plan.contract));
+        right_perm.push(position(&equation.rhs, &plan.keep_right));
+        let product = permute_unless(a, left_perm).matmul(&permute_unless(b, right_perm));
+        let order: Vec<String> = plan
+            .batch
+            .iter()
+            .cloned()
+            .chain([plan.keep_left.clone(), plan.keep_right.clone()])
+            .collect();
+        let out_perm: Vec<usize> =
+            equation.out.iter().map(|label| position(&order, label)).collect();
+        permute_unless(&product, out_perm)
     }
 }

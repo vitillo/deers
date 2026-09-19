@@ -405,3 +405,275 @@ fn rank_mismatch_panics() {
     // Act
     let _ = input.rearrange("b t -> b t", &[]);
 }
+
+#[test]
+fn einsum_scores_match_manual_matmul() {
+    // Arrange
+    let q = cpu(vec![1.0, 2.0, 3.0, 4.0], vec![1, 1, 2, 2]);
+    let k = cpu(vec![5.0, 6.0, 7.0, 8.0], vec![1, 1, 2, 2]);
+
+    // Act
+    let scores = Tensor::einsum("b h t d, b h s d -> b h t s", &q, &k);
+
+    // Assert
+    assert_eq!(shape_of(&scores), vec![1, 1, 2, 2]);
+    assert_eq!(values(&scores), vec![17.0, 23.0, 39.0, 53.0]);
+    assert_eq!(values(&scores), values(&q.matmul(&k.transpose(Some((2, 3))))));
+}
+
+#[test]
+fn einsum_values_match_manual_matmul() {
+    // Arrange
+    let attn = cpu(vec![1.0, 2.0, 3.0, 4.0], vec![1, 1, 2, 2]);
+    let v = cpu(vec![5.0, 6.0, 7.0, 8.0], vec![1, 1, 2, 2]);
+
+    // Act
+    let out = Tensor::einsum("b h t s, b h s d -> b h t d", &attn, &v);
+
+    // Assert
+    assert_eq!(shape_of(&out), vec![1, 1, 2, 2]);
+    assert_eq!(values(&out), vec![19.0, 22.0, 43.0, 50.0]);
+    assert_eq!(values(&out), values(&attn.matmul(&v)));
+}
+
+#[test]
+fn einsum_projection_matches_manual_matmul() {
+    // Arrange
+    let x = cpu(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let w = cpu(vec![1.0, 0.0, 1.0, 0.0, 1.0, 1.0], vec![2, 3]);
+
+    // Act
+    let proj = Tensor::einsum("t c, c e -> t e", &x, &w);
+
+    // Assert
+    assert_eq!(shape_of(&proj), vec![2, 3]);
+    assert_eq!(values(&proj), vec![1.0, 2.0, 3.0, 3.0, 4.0, 7.0]);
+    assert_eq!(values(&proj), values(&x.matmul(&w)));
+}
+
+#[test]
+fn einsum_output_order_permutes_the_product() {
+    // Arrange
+    let q = cpu(vec![1.0, 2.0, 3.0, 4.0], vec![1, 1, 2, 2]);
+    let k = cpu(vec![5.0, 6.0, 7.0, 8.0], vec![1, 1, 2, 2]);
+
+    // Act
+    let swapped = Tensor::einsum("b h t d, b h s d -> b h s t", &q, &k);
+
+    // Assert
+    assert_eq!(shape_of(&swapped), vec![1, 1, 2, 2]);
+    assert_eq!(values(&swapped), vec![17.0, 39.0, 23.0, 53.0]);
+    assert_eq!(
+        values(&swapped),
+        values(&q.matmul(&k.transpose(Some((2, 3)))).permute(vec![0, 1, 3, 2]))
+    );
+}
+
+#[test]
+fn einsum_scores_gradients_match_manual_path() {
+    // Arrange
+    let q_data = vec![1.0, 2.0, 3.0, 4.0];
+    let k_data = vec![5.0, 6.0, 7.0, 8.0];
+    let q_pattern = cpu(q_data.clone(), vec![1, 1, 2, 2]).attach();
+    let k_pattern = cpu(k_data.clone(), vec![1, 1, 2, 2]).attach();
+    let q_manual = cpu(q_data, vec![1, 1, 2, 2]).attach();
+    let k_manual = cpu(k_data, vec![1, 1, 2, 2]).attach();
+
+    // Act
+    let loss_pattern = Tensor::einsum("b h t d, b h s d -> b h t s", &q_pattern, &k_pattern)
+        .sum(vec![0, 1, 2, 3], false);
+    let loss_manual =
+        q_manual.matmul(&k_manual.transpose(Some((2, 3)))).sum(vec![0, 1, 2, 3], false);
+    let grads_pattern = loss_pattern.backward().unwrap();
+    let grads_manual = loss_manual.backward().unwrap();
+
+    // Assert
+    assert_eq!(
+        values(&grads_pattern.get(q_pattern.id()).unwrap()),
+        values(&grads_manual.get(q_manual.id()).unwrap())
+    );
+    assert_eq!(
+        values(&grads_pattern.get(k_pattern.id()).unwrap()),
+        values(&grads_manual.get(k_manual.id()).unwrap())
+    );
+    assert_eq!(values(&grads_pattern.get(q_pattern.id()).unwrap()), vec![12.0, 14.0, 12.0, 14.0]);
+    assert_eq!(values(&grads_pattern.get(k_pattern.id()).unwrap()), vec![4.0, 6.0, 4.0, 6.0]);
+}
+
+#[test]
+fn einsum_values_gradients_match_manual_path() {
+    // Arrange
+    let attn_data = vec![1.0, 2.0, 3.0, 4.0];
+    let v_data = vec![5.0, 6.0, 7.0, 8.0];
+    let attn_pattern = cpu(attn_data.clone(), vec![1, 1, 2, 2]).attach();
+    let v_pattern = cpu(v_data.clone(), vec![1, 1, 2, 2]).attach();
+    let attn_manual = cpu(attn_data, vec![1, 1, 2, 2]).attach();
+    let v_manual = cpu(v_data, vec![1, 1, 2, 2]).attach();
+
+    // Act
+    let loss_pattern =
+        Tensor::einsum("b h t s, b h s d -> b h t d", &attn_pattern, &v_pattern)
+            .sum(vec![0, 1, 2, 3], false);
+    let loss_manual = attn_manual.matmul(&v_manual).sum(vec![0, 1, 2, 3], false);
+    let grads_pattern = loss_pattern.backward().unwrap();
+    let grads_manual = loss_manual.backward().unwrap();
+
+    // Assert
+    assert_eq!(
+        values(&grads_pattern.get(attn_pattern.id()).unwrap()),
+        values(&grads_manual.get(attn_manual.id()).unwrap())
+    );
+    assert_eq!(
+        values(&grads_pattern.get(v_pattern.id()).unwrap()),
+        values(&grads_manual.get(v_manual.id()).unwrap())
+    );
+}
+
+#[test]
+fn einsum_projection_gradients_match_manual_path() {
+    // Arrange
+    let x_data = vec![1.0, 2.0, 3.0, 4.0];
+    let w_data = vec![1.0, 0.0, 1.0, 0.0, 1.0, 1.0];
+    let x_pattern = cpu(x_data.clone(), vec![2, 2]).attach();
+    let w_pattern = cpu(w_data.clone(), vec![2, 3]).attach();
+    let x_manual = cpu(x_data, vec![2, 2]).attach();
+    let w_manual = cpu(w_data, vec![2, 3]).attach();
+
+    // Act
+    let loss_pattern =
+        Tensor::einsum("t c, c e -> t e", &x_pattern, &w_pattern).sum(vec![0, 1], false);
+    let loss_manual = x_manual.matmul(&w_manual).sum(vec![0, 1], false);
+    let grads_pattern = loss_pattern.backward().unwrap();
+    let grads_manual = loss_manual.backward().unwrap();
+
+    // Assert
+    assert_eq!(
+        values(&grads_pattern.get(x_pattern.id()).unwrap()),
+        values(&grads_manual.get(x_manual.id()).unwrap())
+    );
+    assert_eq!(
+        values(&grads_pattern.get(w_pattern.id()).unwrap()),
+        values(&grads_manual.get(w_manual.id()).unwrap())
+    );
+}
+
+#[test]
+#[should_panic(expected = "output label 'x' is not present in either input")]
+fn einsum_unknown_output_label_panics() {
+    // Arrange
+    let q = cpu(vec![0.0; 8], vec![1, 1, 2, 2]);
+    let k = cpu(vec![0.0; 8], vec![1, 1, 2, 2]);
+
+    // Act
+    let _ = Tensor::einsum("b h t d, b h s d -> b h t x", &q, &k);
+}
+
+#[test]
+#[should_panic(expected = "left side has 4 labels but the first input is 3-d")]
+fn einsum_rank_mismatch_panics() {
+    // Arrange
+    let q = cpu(vec![0.0; 8], vec![1, 2, 4]);
+    let k = cpu(vec![0.0; 8], vec![1, 1, 2, 2]);
+
+    // Act
+    let _ = Tensor::einsum("b h t d, b h s d -> b h t s", &q, &k);
+}
+
+#[test]
+#[should_panic(expected = "contracted axis 'd' has size 2 in the first input but 3 in the second")]
+fn einsum_contract_size_mismatch_panics() {
+    // Arrange
+    let q = cpu(vec![0.0; 8], vec![1, 1, 2, 2]);
+    let k = cpu(vec![0.0; 12], vec![1, 1, 2, 3]);
+
+    // Act
+    let _ = Tensor::einsum("b h t d, b h s d -> b h t s", &q, &k);
+}
+
+#[test]
+#[should_panic(expected = "batch axis 'b' has size 1 in the first input but 2 in the second")]
+fn einsum_batch_size_mismatch_panics() {
+    // Arrange
+    let q = cpu(vec![0.0; 8], vec![1, 1, 2, 2]);
+    let k = cpu(vec![0.0; 16], vec![2, 1, 2, 2]);
+
+    // Act
+    let _ = Tensor::einsum("b h t d, b h s d -> b h t s", &q, &k);
+}
+
+#[test]
+#[should_panic(expected = "no contracted axis")]
+fn einsum_without_contraction_panics() {
+    // Arrange
+    let a = cpu(vec![0.0; 4], vec![2, 2]);
+    let b = cpu(vec![0.0; 4], vec![2, 2]);
+
+    // Act
+    let _ = Tensor::einsum("b t, b t -> b t", &a, &b);
+}
+
+#[test]
+#[should_panic(expected = "axes c, d are all contracted")]
+fn einsum_multi_axis_contraction_panics() {
+    // Arrange
+    let a = cpu(vec![0.0; 8], vec![2, 2, 2]);
+    let b = cpu(vec![0.0; 8], vec![2, 2, 2]);
+
+    // Act
+    let _ = Tensor::einsum("b c d, b c d -> b", &a, &b);
+}
+
+#[test]
+#[should_panic(expected = "input label 'e' is missing from the output")]
+fn einsum_dropped_input_label_panics() {
+    // Arrange
+    let a = cpu(vec![0.0; 8], vec![2, 2, 2]);
+    let b = cpu(vec![0.0; 8], vec![2, 2, 2]);
+
+    // Act
+    let _ = Tensor::einsum("b t c, b c e -> b t", &a, &b);
+}
+
+#[test]
+#[should_panic(expected = "left input keeps axes b, t")]
+fn einsum_two_kept_axes_panics() {
+    // Arrange
+    let a = cpu(vec![0.0; 24], vec![2, 3, 4]);
+    let b = cpu(vec![0.0; 20], vec![4, 5]);
+
+    // Act
+    let _ = Tensor::einsum("b t c, c e -> b t e", &a, &b);
+}
+
+#[test]
+#[should_panic(expected = "duplicate label 't' in input side 1")]
+fn einsum_duplicate_label_panics() {
+    // Arrange
+    let q = cpu(vec![0.0; 8], vec![1, 1, 2, 2]);
+    let k = cpu(vec![0.0; 8], vec![1, 1, 2, 2]);
+
+    // Act
+    let _ = Tensor::einsum("b h t t, b h s d -> b h t s", &q, &k);
+}
+
+#[test]
+#[should_panic(expected = "must contain exactly one '->'")]
+fn einsum_missing_arrow_panics() {
+    // Arrange
+    let a = cpu(vec![0.0; 4], vec![2, 2]);
+    let b = cpu(vec![0.0; 4], vec![2, 2]);
+
+    // Act
+    let _ = Tensor::einsum("b t, b t", &a, &b);
+}
+
+#[test]
+#[should_panic(expected = "must contain exactly two inputs separated by ','")]
+fn einsum_single_input_panics() {
+    // Arrange
+    let a = cpu(vec![0.0; 4], vec![2, 2]);
+    let b = cpu(vec![0.0; 4], vec![2, 2]);
+
+    // Act
+    let _ = Tensor::einsum("b t -> b t", &a, &b);
+}
