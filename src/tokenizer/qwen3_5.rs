@@ -34,6 +34,17 @@ const QWEN3_5_SPECIAL_TOKENS: &[(&str, u32)] = &[
     ("<|fim_pad|>", 248063),
     ("<|repo_name|>", 248064),
     ("<|file_sep|>", 248065),
+    ("<tool_response>", 248066),
+    ("</tool_response>", 248067),
+    ("<think>", 248068),
+    ("</think>", 248069),
+    ("<|audio_start|>", 248070),
+    ("<|audio_end|>", 248071),
+    ("<tts_pad>", 248072),
+    ("<tts_text_bos>", 248073),
+    ("<tts_text_eod>", 248074),
+    ("<tts_text_bos_single>", 248075),
+    ("<|audio_pad|>", 248076),
 ];
 
 /// Qwen3.5 byte-pair encoding.
@@ -45,10 +56,13 @@ impl Qwen3_5Tokenizer {
     /// Creates the Qwen3.5 byte-pair encoding with its instruction delimiters.
     ///
     /// The vocabulary comes from the published `tokenizer.json`: its
-    /// `model.vocab` table holds ids 0..248043, and the 22 added tokens above
-    /// bypass merges so control strings such as `<|im_start|>` remain one
-    /// token. The split pattern carries `\p{M}` so combining marks stay with
-    /// their base letter, unlike the Qwen3 pattern.
+    /// `model.vocab` table holds ids 0..248043. The 22 added tokens from that
+    /// file plus the 11 further added tokens from the published
+    /// `tokenizer_config.json` (ids 248066..248076, emitted by the chat
+    /// template yet absent from `tokenizer.json`) bypass merges so control
+    /// strings such as `<|im_start|>` and `<think>` remain one token. The
+    /// split pattern carries `\p{M}` so combining marks stay with their base
+    /// letter, unlike the Qwen3 pattern.
     pub fn new() -> Self {
         let mut json = String::new();
         GzDecoder::new(QWEN3_5_TOKENIZER_JSON)
@@ -264,11 +278,36 @@ mod tests {
             [
                 248045, 8678, 198, 3320, 61446, 13, 248046, 198, 248045, 846, 198, 3710, 369,
                 220, 17, 478, 220, 17, 30, 248046, 198, 248045, 74455, 198, 19, 248046, 198,
-                248045, 846, 198, 44240, 424, 1495, 13, 248046, 198, 248045, 74455, 198, 13314,
-                741, 29, 271, 510, 26003, 29, 271,
+                248045, 846, 198, 44240, 424, 1495, 13, 248046, 198, 248045, 74455, 198, 248068,
+                271, 248069, 271,
             ]
         );
         assert_eq!(tokenizer.decode(&tokens), prompt);
+    }
+
+    #[test]
+    fn qwen3_5_keeps_config_added_tokens_whole() {
+        // Arrange
+        let tokenizer = Qwen3_5Tokenizer::new();
+        let cases = [
+            ("<tool_response>", 248066),
+            ("</tool_response>", 248067),
+            ("<think>", 248068),
+            ("</think>", 248069),
+            ("<|audio_start|>", 248070),
+            ("<|audio_end|>", 248071),
+            ("<tts_pad>", 248072),
+            ("<tts_text_bos>", 248073),
+            ("<tts_text_eod>", 248074),
+            ("<tts_text_bos_single>", 248075),
+            ("<|audio_pad|>", 248076),
+        ];
+
+        // Act and Assert: each published extra stays one token and round-trips.
+        for (text, id) in cases {
+            assert_eq!(tokenizer.encode(text), [id], "splits {text:?}");
+            assert_eq!(tokenizer.decode(&[id]), text);
+        }
     }
 
     #[test]
@@ -281,9 +320,27 @@ mod tests {
             .expect("failed to decompress Qwen3.5 tokenizer");
         let reference_path = std::env::temp_dir().join("deers_qwen3_5_reference.json");
         std::fs::write(&reference_path, &json).expect("failed to stage reference tokenizer");
-        let reference = tokenizers::Tokenizer::from_file(&reference_path)
+        let mut reference = tokenizers::Tokenizer::from_file(&reference_path)
             .expect("failed to load published tokenizer");
         std::fs::remove_file(&reference_path).ok();
+        // Mirror what `from_pretrained` does with `tokenizer_config.json`:
+        // register its 11 added tokens missing from `tokenizer.json` so the
+        // reference treats `<think>` and its siblings as single tokens.
+        let config_extras = [
+            "<tool_response>",
+            "</tool_response>",
+            "<think>",
+            "</think>",
+            "<|audio_start|>",
+            "<|audio_end|>",
+            "<tts_pad>",
+            "<tts_text_bos>",
+            "<tts_text_eod>",
+            "<tts_text_bos_single>",
+            "<|audio_pad|>",
+        ]
+        .map(|content| tokenizers::AddedToken::from(content, true));
+        reference.add_special_tokens(config_extras).expect("reference must accept config tokens");
         let messages = [
             ChatMessage { role: "system", content: "Be concise." },
             ChatMessage { role: "user", content: "What is 2 + 2?" },
