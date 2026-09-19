@@ -157,8 +157,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
 
+    use half::bf16;
+
     use super::{load_tensors, save_tensors};
-    use crate::{Device, Tensor};
+    use crate::{DType, Device, Tensor};
 
     #[test]
     fn test_save_and_load_tensors_roundtrip() {
@@ -182,6 +184,42 @@ mod tests {
         // Assert
         assert_eq!(loaded["linear.weight"].to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
         assert_eq!(loaded["tokens"].to_vec::<i64>().unwrap(), vec![1, 2, 3]);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_save_and_load_bf16_tensors_roundtrip() {
+        // Arrange
+        let path = std::env::temp_dir().join(format!(
+            "deers-checkpoint-bf16-roundtrip-{}-{}.safetensors",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let weight = vec![bf16::from_f32(1.5), bf16::from_f32(-2.0), bf16::from_f32(3.140625)];
+        let mut tensors = BTreeMap::new();
+        tensors.insert(
+            "linear.weight".to_owned(),
+            Tensor::from_vec(weight.clone(), (3,), Device::Cpu),
+        );
+        tensors.insert(
+            "linear.bias".to_owned(),
+            Tensor::from_vec(vec![0.5f32], (1,), Device::Cpu),
+        );
+
+        // Act
+        save_tensors(&path, &tensors).unwrap();
+        let loaded = load_tensors(&path, Device::Cpu).unwrap();
+
+        // Assert: the BF16 file dtype maps back to BF16 with identical bits,
+        // and the F32 control tensor is untouched.
+        assert_eq!(loaded["linear.weight"].dtype(), DType::BF16);
+        assert_eq!(loaded["linear.weight"].to_vec::<bf16>().unwrap(), weight);
+        let as_f32: Vec<f32> =
+            loaded["linear.weight"].to_vec::<bf16>().unwrap().iter().map(|v| v.to_f32()).collect();
+        assert_eq!(as_f32, vec![1.5, -2.0, 3.140625]);
+        assert_eq!(loaded["linear.bias"].dtype(), DType::F32);
+        assert_eq!(loaded["linear.bias"].to_vec::<f32>().unwrap(), vec![0.5]);
 
         let _ = fs::remove_file(path);
     }
