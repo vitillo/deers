@@ -280,6 +280,7 @@ impl KvCache {
 /// each head at unit RMS, so scores stay bounded and training stays stable at scale.
 #[derive(Debug)]
 pub struct CausalSelfAttention {
+    n_embd: usize,
     n_q_heads: usize,
     n_kv_heads: usize,
     group_size: usize,
@@ -308,17 +309,34 @@ impl CausalSelfAttention {
         n_kv_heads: usize,
     ) -> Self {
         assert!(n_embd.is_multiple_of(n_q_heads), "n_embd must be divisible by n_q_heads");
+        Self::new_gqa_with_head_dim(builder, n_embd, n_q_heads, n_kv_heads, n_embd / n_q_heads)
+    }
+
+    /// Creates causal self-attention with an explicit per-head width.
+    ///
+    /// Same grouping as [`new_gqa`](Self::new_gqa), but the head width is
+    /// independent of the model width: queries project to `n_q_heads *
+    /// head_dim` and keys/values to `n_kv_heads * head_dim`. Qwen3 needs
+    /// this because its head width (128) exceeds `hidden / n_q_heads`.
+    pub fn new_gqa_with_head_dim(
+        builder: ParamBuilder,
+        n_embd: usize,
+        n_q_heads: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+    ) -> Self {
         assert!(n_q_heads.is_multiple_of(n_kv_heads), "n_q_heads must be divisible by n_kv_heads");
-        let head_dim = n_embd / n_q_heads;
+        assert!(head_dim > 0, "head_dim must be positive");
         Self {
+            n_embd,
             n_q_heads,
             n_kv_heads,
             group_size: n_q_heads / n_kv_heads,
             head_dim,
-            q_proj: Linear::no_bias(builder.pp("q_proj"), n_embd, n_embd),
+            q_proj: Linear::no_bias(builder.pp("q_proj"), n_embd, n_q_heads * head_dim),
             k_proj: Linear::no_bias(builder.pp("k_proj"), n_embd, n_kv_heads * head_dim),
             v_proj: Linear::no_bias(builder.pp("v_proj"), n_embd, n_kv_heads * head_dim),
-            out_proj: Linear::no_bias(builder.pp("out_proj"), n_embd, n_embd),
+            out_proj: Linear::no_bias(builder.pp("out_proj"), n_q_heads * head_dim, n_embd),
             q_norm: RMSNorm::new_affine(builder.pp("q_norm"), head_dim, QK_NORM_EPS),
             k_norm: RMSNorm::new_affine(builder.pp("k_norm"), head_dim, QK_NORM_EPS),
         }
@@ -341,11 +359,7 @@ impl CausalSelfAttention {
         let batch_size = shape[0];
         let seq_len = shape[1];
         let channels = shape[2];
-        assert_eq!(
-            channels,
-            self.n_q_heads * self.head_dim,
-            "input channel size must match attention width"
-        );
+        assert_eq!(channels, self.n_embd, "input channel size must match model width");
 
         let x_flat = x.reshape(vec![batch_size * seq_len, channels]); // [B*T, C]
         let q = self.q_proj.forward(&x_flat)?.rearrange(

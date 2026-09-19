@@ -259,3 +259,57 @@ fn shared_rope_heads_feed_each_query_identically() {
         ]
     );
 }
+
+#[test]
+fn decoupled_head_dim_widens_queries_beyond_model_width() {
+    // Arrange: head width 4 over model width 8 with 4 query heads, so the
+    // query projection (16 wide) exceeds the model width, as in Qwen3.
+    let (batch, seq, n_embd, n_q_heads, n_kv_heads, head_dim) = (1, 2, 8, 4, 2, 4);
+    let device = Device::Cpu;
+    let attn = CausalSelfAttention::new_gqa_with_head_dim(
+        ParamStore::new().root(),
+        n_embd,
+        n_q_heads,
+        n_kv_heads,
+        head_dim,
+    );
+    let params = attn.parameters();
+    let shapes: Vec<Vec<usize>> =
+        params.iter().map(|p| p.layout().shape().iter().copied().collect()).collect();
+    assert_eq!(shapes, vec![vec![8, 16], vec![8, 8], vec![8, 8], vec![16, 8], vec![4], vec![4]]);
+    let proj_shapes = [(8, 16), (8, 8), (8, 8), (16, 8)];
+    for (param, (rows, cols)) in params[..4].iter().zip(proj_shapes) {
+        param.set(&Tensor::from_vec(det_vec(rows * cols), vec![rows, cols], device)).unwrap();
+    }
+    for param in &params[4..] {
+        param.set(&Tensor::from_vec(det_vec(head_dim), vec![head_dim], device)).unwrap();
+    }
+    let x = Tensor::from_vec(det_vec(batch * seq * n_embd), vec![batch, seq, n_embd], device);
+    let (cos, sin) = rope(seq, head_dim, device);
+
+    // Act
+    let out = values(&attn.forward(&x, &cos, &sin).unwrap());
+
+    // Assert
+    assert_eq!(
+        out,
+        vec![
+            -0.048500005,
+            0.0016249971,
+            0.019250004,
+            0.019,
+            0.0041249883,
+            0.0038749953,
+            -0.019124996,
+            -0.035625007,
+            -0.039768513,
+            -0.047417056,
+            -0.0144929215,
+            0.033265375,
+            0.05182096,
+            0.011320258,
+            -0.0066204634,
+            -0.03235662
+        ]
+    );
+}
