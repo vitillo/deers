@@ -36,9 +36,9 @@ pub use device::Device;
 pub use dtype::DType;
 /// Re-exported profiling types and helper entrypoint.
 pub use profiler::{Profile, ProfileRow, Profiler, ProfilerConfig, profile};
-/// The core tensor type.
-pub use tensor::Tensor;
 /// RAII guard that disables gradient tracking within a scope.
 pub use tensor::NoGradGuard;
-/// Runs a closure with gradient tracking disabled (inference / eval).
+/// The core tensor type.
+pub use tensor::Tensor;
+/// Runs a closure with gradient tracking disabled.
 pub use tensor::no_grad;
