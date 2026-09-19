@@ -89,8 +89,23 @@ fn cached_decode_matches_full_recomputation() {
         let stitched = values(&decode_rest(&attn, &x, &cos, &sin, prompt_len, &mut cache));
 
         // Assert
-        assert_close(&stitched, &full, 1e-4);
+        assert_close(&stitched, &full, 1e-5);
         assert_eq!(cache.len(), seq);
+        if device == Device::Cpu {
+            assert_eq!(
+                stitched[..8].to_vec(),
+                vec![
+                    0.018874997,
+                    0.039125003,
+                    -0.005625005,
+                    0.014625002,
+                    0.0023749953,
+                    -0.042375006,
+                    -0.022125002,
+                    -0.03437501
+                ]
+            );
+        }
     }
 }
 
@@ -110,7 +125,7 @@ fn single_token_prompt_decodes() {
         let stitched = values(&decode_rest(&attn, &x, &cos, &sin, 1, &mut cache));
 
         // Assert
-        assert_close(&stitched, &full, 1e-4);
+        assert_close(&stitched, &full, 1e-5);
         assert_eq!(cache.len(), seq);
     }
 }
@@ -145,7 +160,7 @@ fn cache_grows_across_many_steps() {
     let full = values(&attn.forward(&x, &cos, &sin).unwrap());
 
     // Assert
-    assert_close(&stitched, &full, 1e-4);
+    assert_close(&stitched, &full, 1e-5);
     assert_eq!(cache.len(), seq);
 }
 
@@ -168,12 +183,17 @@ fn cached_gradients_match_full_recomputation() {
     let stitched_grads = stitched_loss.backward().unwrap();
 
     // Assert
-    for param in attn.parameters() {
-        let full = grad_of(&full_grads, &param);
-        let stitched = grad_of(&stitched_grads, &param);
-        assert_close(&stitched, &full, 1e-4);
+    let params = attn.parameters();
+    for param in &params {
+        let full = grad_of(&full_grads, param);
+        let stitched = grad_of(&stitched_grads, param);
+        assert_close(&stitched, &full, 1e-5);
         assert!(stitched.iter().any(|&entry| entry != 0.0), "a projection got no gradient");
     }
+    assert_eq!(
+        &grad_of(&stitched_grads, &params[0])[..4],
+        &[-0.010818105, 0.0063312226, -0.0007816993, -0.0025316612]
+    );
 }
 
 #[test]
