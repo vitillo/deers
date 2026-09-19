@@ -1,5 +1,11 @@
 //! Decoder-only GPT language model with multi-head self-attention, RoPE
 //! positional embeddings, RMSNorm, and a feed-forward MLP block.
+//!
+//! Attention uses grouped-query attention: key and value heads are fewer
+//! than query heads, and each key/value head is shared by a group of query
+//! heads. Sharing cuts the key/value projection weights and the runtime
+//! key/value memory by the group size while keeping one distinct query
+//! per head.
 
 use half::f16;
 
@@ -73,9 +79,14 @@ pub fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
 }
 
 /// Minimal causal self-attention with bias-free projections and RoPE on queries/keys.
+///
+/// `n_kv_head` key/value heads are shared across `n_head` query heads.
+/// Equal counts is plain multi-head attention.
 #[derive(Debug)]
 pub struct CausalSelfAttention {
     n_head: usize,
+    n_kv_head: usize,
+    n_group: usize,
     head_dim: usize,
     q_proj: Linear,
     k_proj: Linear,
@@ -86,14 +97,24 @@ pub struct CausalSelfAttention {
 impl CausalSelfAttention {
     /// Creates a causal self-attention module whose projections are registered under `builder`.
     pub fn new(builder: ParamBuilder, n_embd: usize, n_head: usize) -> Self {
+        Self::new_gqa(builder, n_embd, n_head, n_head)
+    }
+
+    /// Creates causal self-attention with `n_kv_head` key/value heads shared
+    /// across `n_head` query heads. Each key/value head serves `n_head /
+    /// n_kv_head` query heads. Pass `n_kv_head == n_head` for plain MHA.
+    pub fn new_gqa(builder: ParamBuilder, n_embd: usize, n_head: usize, n_kv_head: usize) -> Self {
         assert!(n_embd.is_multiple_of(n_head), "n_embd must be divisible by n_head");
+        assert!(n_head.is_multiple_of(n_kv_head), "n_head must be divisible by n_kv_head");
         let head_dim = n_embd / n_head;
         Self {
             n_head,
+            n_kv_head,
+            n_group: n_head / n_kv_head,
             head_dim,
             q_proj: Linear::no_bias(builder.pp("q_proj"), n_embd, n_embd),
-            k_proj: Linear::no_bias(builder.pp("k_proj"), n_embd, n_embd),
-            v_proj: Linear::no_bias(builder.pp("v_proj"), n_embd, n_embd),
+            k_proj: Linear::no_bias(builder.pp("k_proj"), n_embd, n_kv_head * head_dim),
+            v_proj: Linear::no_bias(builder.pp("v_proj"), n_embd, n_kv_head * head_dim),
             out_proj: Linear::no_bias(builder.pp("out_proj"), n_embd, n_embd),
         }
     }
@@ -119,15 +140,27 @@ impl CausalSelfAttention {
         );
         let k = self.k_proj.forward(&x_flat)?.rearrange(
             "(b t) (h d) -> b t h d",
-            &[("b", batch_size), ("t", seq_len), ("h", self.n_head)],
+            &[("b", batch_size), ("t", seq_len), ("h", self.n_kv_head)],
         );
         let v = self.v_proj.forward(&x_flat)?.rearrange(
             "(b t) (h d) -> b t h d",
-            &[("b", batch_size), ("t", seq_len), ("h", self.n_head)],
+            &[("b", batch_size), ("t", seq_len), ("h", self.n_kv_head)],
         );
 
+        // RoPE rotates each head independently, so one rotation serves the whole query group.
         let q = apply_rotary_emb(&q, cos, sin).rearrange("b t h d -> b h t d", &[]);
-        let k = apply_rotary_emb(&k, cos, sin).rearrange("b t h d -> b h t d", &[]);
+        let k = apply_rotary_emb(&k, cos, sin);
+        let k = if self.n_group == 1 {
+            k
+        } else {
+            k.repeat("b t kv d -> b t (kv g) d", &[("g", self.n_group)])
+        };
+        let k = k.rearrange("b t h d -> b h t d", &[]);
+        let v = if self.n_group == 1 {
+            v
+        } else {
+            v.repeat("b t kv d -> b t (kv g) d", &[("g", self.n_group)])
+        };
         let v = v.rearrange("b t h d -> b h t d", &[]);
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
