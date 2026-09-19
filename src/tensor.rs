@@ -25,8 +25,8 @@ fn no_grad_active() -> bool {
 /// Dropping the guard restores the previous nesting depth. Nested guards are
 /// supported: gradients stay off until the outermost guard is dropped.
 ///
-/// Prefer [`no_grad`] for short inference blocks; use this when a longer
-/// lexical scope is clearer (for example during [`Tensor::backward`]).
+/// Prefer [`no_grad`] for short scopes. Use this guard when a longer lexical
+/// scope is clearer.
 ///
 /// # Examples
 ///
@@ -38,13 +38,18 @@ fn no_grad_active() -> bool {
 /// let y = &x + &x;
 /// assert!(!y.requires_grad());
 /// ```
-pub struct NoGradGuard;
+pub struct NoGradGuard {
+    _private: (),
+}
 
 impl NoGradGuard {
     /// Disables autograd tracking until this guard is dropped.
     pub fn new() -> Self {
-        NO_GRAD_DEPTH.with(|depth| depth.set(depth.get() + 1));
-        NoGradGuard
+        NO_GRAD_DEPTH.with(|depth| {
+            let next = depth.get().checked_add(1).expect("no-grad nesting depth overflowed");
+            depth.set(next);
+        });
+        NoGradGuard { _private: () }
     }
 }
 
@@ -58,8 +63,8 @@ impl Drop for NoGradGuard {
     fn drop(&mut self) {
         NO_GRAD_DEPTH.with(|depth| {
             let current = depth.get();
-            debug_assert!(current > 0, "NoGradGuard dropped with zero nesting depth");
-            depth.set(current.saturating_sub(1));
+            assert!(current > 0, "NoGradGuard dropped with zero nesting depth");
+            depth.set(current - 1);
         });
     }
 }
@@ -67,8 +72,7 @@ impl Drop for NoGradGuard {
 /// Runs `f` with autograd tracking disabled, then restores the previous state.
 ///
 /// Operations inside `f` do not attach to the computation graph, even when
-/// their inputs were created with [`Tensor::attach`]. This matches PyTorch's
-/// `torch.no_grad()` and is the usual pattern for inference / eval.
+/// their inputs were created with [`Tensor::attach`].
 ///
 /// Nested calls are safe: gradients remain off until the outermost scope ends.
 ///
