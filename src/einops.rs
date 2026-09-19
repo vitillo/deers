@@ -60,7 +60,7 @@ fn parse_side(source: &str, pattern: &str) -> Side {
     let mut groups: Vec<Vec<Axis>> = Vec::new();
     let mut anon = 0;
     let mut token = String::new();
-    let mut chars = source.chars().peekable();
+    let mut chars = source.chars();
     let flush = |token: &mut String, groups: &mut Vec<Vec<Axis>>, anon: &mut usize| {
         let word = token.trim().to_string();
         token.clear();
@@ -87,9 +87,7 @@ fn parse_side(source: &str, pattern: &str) -> Side {
                     inner.push(inner_next);
                 }
                 if !closed {
-                    panic!(
-                        "einops pattern '{pattern}': '(' has no closing ')' in '{source}'"
-                    );
+                    panic!("einops pattern '{pattern}': '(' has no closing ')' in '{source}'");
                 }
                 let mut group = Vec::new();
                 for word in inner.split_whitespace() {
@@ -119,9 +117,7 @@ fn parse_side(source: &str, pattern: &str) -> Side {
 /// Rejects tokens that are not plain axis names.
 fn check_name(word: &str, pattern: &str) -> String {
     let valid = !word.is_empty()
-        && word
-            .chars()
-            .all(|current| current.is_ascii_alphanumeric() || current == '_')
+        && word.chars().all(|current| current.is_ascii_alphanumeric() || current == '_')
         && !word.chars().next().is_some_and(|current| current.is_ascii_digit());
     if !valid {
         panic!("einops pattern '{pattern}': '{word}' is not a valid axis name");
@@ -140,8 +136,10 @@ fn parse_pattern(pattern: &str) -> Pattern {
     }
     let lhs = parse_side(parts[0], pattern);
     let rhs = parse_side(parts[1], pattern);
-    let lhs_anons = lhs.groups.iter().flatten().filter(|axis| matches!(axis, Axis::Anon(_))).count();
-    let rhs_anons = rhs.groups.iter().flatten().filter(|axis| matches!(axis, Axis::Anon(_))).count();
+    let lhs_anons =
+        lhs.groups.iter().flatten().filter(|axis| matches!(axis, Axis::Anon(_))).count();
+    let rhs_anons =
+        rhs.groups.iter().flatten().filter(|axis| matches!(axis, Axis::Anon(_))).count();
     if lhs_anons != rhs_anons {
         panic!(
             "einops pattern '{pattern}': anonymous axis count differs with {lhs_anons} on lhs vs {rhs_anons} on rhs; '_' pairs positionally"
@@ -180,8 +178,7 @@ fn resolve_sizes(
     let source = pattern.source.as_str();
     if pattern.lhs.groups.len() != input_shape.len() {
         panic!(
-            "einops pattern '{source}': lhs has {} groups but input is {}-d (shape {input_shape:?}); one group per input dim"
-            ,
+            "einops pattern '{source}': lhs has {} groups but input is {}-d (shape {input_shape:?}); one group per input dim",
             pattern.lhs.groups.len(),
             input_shape.len()
         );
@@ -208,15 +205,11 @@ fn resolve_sizes(
             }
             continue;
         }
-        let unknown: Vec<String> = group
-            .iter()
-            .map(Axis::key)
-            .filter(|key| !sizes.contains_key(key))
-            .collect();
+        let unknown: Vec<String> =
+            group.iter().map(Axis::key).filter(|key| !sizes.contains_key(key)).collect();
         if unknown.len() > 1 {
             panic!(
-                "einops pattern '{source}': split of dim {dim} needs sizes for {}; pass them in sizes"
-                ,
+                "einops pattern '{source}': split of dim {dim} needs sizes for {}; pass them in sizes",
                 unknown.join(", ")
             );
         }
@@ -254,8 +247,7 @@ fn grouped_shape(side: &Side, sizes: &HashMap<String, usize>, source: &str) -> V
                 .map(|axis| {
                     *sizes.get(&axis.key()).unwrap_or_else(|| {
                         panic!(
-                            "einops pattern '{source}': no size for axis '{}'; pass it in sizes"
-                            ,
+                            "einops pattern '{source}': no size for axis '{}'; pass it in sizes",
                             axis.key()
                         )
                     })
@@ -280,11 +272,7 @@ fn permutation(base: &[String], order: &[String], source: &str) -> Vec<usize> {
 /// Reshapes only when the shape actually changes.
 fn reshape_unless(x: &Tensor, shape: Vec<usize>) -> Tensor {
     let current: Vec<usize> = x.layout().shape().iter().copied().collect();
-    if current == shape {
-        x.clone()
-    } else {
-        x.reshape(shape)
-    }
+    if current == shape { x.clone() } else { x.reshape(shape) }
 }
 
 /// Permutes only when the order actually changes.
@@ -313,13 +301,10 @@ impl Tensor {
         let rhs_flat = flat_keys(&parsed.rhs);
         for key in &rhs_flat {
             if !lhs_flat.contains(key) {
-                panic!(
-                    "einops rearrange '{source}': rhs axis '{key}' not present on lhs"
-                );
+                panic!("einops rearrange '{source}': rhs axis '{key}' not present on lhs");
             }
         }
-        if lhs_flat.len() != rhs_flat.len()
-        {
+        if lhs_flat.len() != rhs_flat.len() {
             panic!(
                 "einops rearrange '{source}': rearrange must preserve the axis multiset; use reduce or repeat"
             );
@@ -365,10 +350,7 @@ impl Tensor {
         let mut order = rhs_flat.clone();
         order.extend(dropped.clone());
         let permuted = permute_unless(
-            &reshape_unless(
-                self,
-                lhs_flat.iter().map(|key| resolved[key.as_str()]).collect(),
-            ),
+            &reshape_unless(self, lhs_flat.iter().map(|key| resolved[key.as_str()]).collect()),
             permutation(&lhs_flat, &order, source),
         );
         let axes: Vec<usize> = (rhs_flat.len()..order.len()).collect();
@@ -396,9 +378,7 @@ impl Tensor {
         let rhs_flat = flat_keys(&parsed.rhs);
         for key in &lhs_flat {
             if !rhs_flat.contains(key) {
-                panic!(
-                    "einops repeat '{source}': repeat drops lhs axis '{key}'; use reduce"
-                );
+                panic!("einops repeat '{source}': repeat drops lhs axis '{key}'; use reduce");
             }
         }
         let mut new_axes: Vec<String> =
@@ -420,13 +400,9 @@ impl Tensor {
         pre.extend(new_axes.iter().map(|_| 1));
         let unsqueezed = reshape_unless(self, flat_lhs_shape);
         let unsqueezed = reshape_unless(&unsqueezed, pre);
-        let from: Vec<String> =
-            lhs_flat.iter().cloned().chain(new_axes.iter().cloned()).collect();
+        let from: Vec<String> = lhs_flat.iter().cloned().chain(new_axes.iter().cloned()).collect();
         let permuted = permute_unless(&unsqueezed, permutation(&from, &rhs_flat, source));
         let full: Vec<usize> = rhs_flat.iter().map(|key| resolved[key.as_str()]).collect();
-        reshape_unless(
-            &permuted.broadcast(full),
-            grouped_shape(&parsed.rhs, &resolved, source),
-        )
+        reshape_unless(&permuted.broadcast(full), grouped_shape(&parsed.rhs, &resolved, source))
     }
 }
