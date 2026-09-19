@@ -13,8 +13,9 @@ use crate::error::Result;
 use crate::nn::{
     Embedding, Linear, Module, ParamBuilder, Parameter, RMSNorm, SwiGLU, functional,
 };
+use crate::sample::{SamplingConfig, sample_token};
 use crate::tensor::Tensor;
-use crate::{DType, Device};
+use crate::{DType, Device, no_grad};
 
 /// RoPE scaling applied when precomputing the rotary cache.
 ///
@@ -638,6 +639,38 @@ impl Qwen3Block {
         Ok(&x + &fed)
     }
 
+    /// Scores a prompt slice through the block and caches its keys and values.
+    pub fn prefill(
+        &self,
+        x: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        cache: &mut KvCache,
+    ) -> Result<Tensor> {
+        let normed = self.input_layernorm.forward(x)?;
+        let attended = self.attn.prefill(&normed, cos, sin, cache)?;
+        let x = x + &attended;
+        let post_normed = self.post_attention_layernorm.forward(&x)?;
+        let fed = self.mlp.forward(&post_normed)?;
+        Ok(&x + &fed)
+    }
+
+    /// Appends one token through the block and attends over its cache.
+    pub fn decode(
+        &self,
+        x: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        cache: &mut KvCache,
+    ) -> Result<Tensor> {
+        let normed = self.input_layernorm.forward(x)?;
+        let attended = self.attn.decode(&normed, cos, sin, cache)?;
+        let x = x + &attended;
+        let post_normed = self.post_attention_layernorm.forward(&x)?;
+        let fed = self.mlp.forward(&post_normed)?;
+        Ok(&x + &fed)
+    }
+
     /// Returns the trainable parameters owned by the block.
     pub fn parameters(&self) -> Vec<Parameter> {
         let mut parameters = self.input_layernorm.parameters();
@@ -945,8 +978,104 @@ impl Qwen3 {
         for layer in &self.layers {
             x = layer.forward(&x, &cos, &sin)?; // [B, T, C]
         }
-        x = self.norm.forward(&x)?; // [B, T, C]
+        self.head_logits(&x, batch_size, seq_len)
+    }
 
+    /// Scores the whole prompt at once, filling one cache per layer.
+    ///
+    /// Returns full logits shaped `[1, T, V]` for the proof-of-life read.
+    /// Each cache must be empty; following tokens arrive through `decode`.
+    pub fn prefill(&self, idx: &Tensor, caches: &mut [KvCache]) -> Result<Tensor> {
+        assert_eq!(
+            caches.len(),
+            self.layers.len(),
+            "Qwen3 prefill needs one cache per layer"
+        );
+        let shape = idx.layout().shape();
+        assert_eq!(shape.ndim(), 2, "Qwen3 expects token ids with shape [B, T]");
+        let batch_size = shape[0];
+        let seq_len = shape[1];
+        assert!(seq_len <= self.cos.layout().shape()[1], "sequence length exceeds rotary cache");
+
+        let cos = self.cos.narrow(1, 0, seq_len); // [1, T, 1, D/2]
+        let sin = self.sin.narrow(1, 0, seq_len); // [1, T, 1, D/2]
+
+        let mut x = self.embed_tokens.forward(idx)?; // [B, T, C]
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+            x = layer.prefill(&x, &cos, &sin, cache)?; // [B, T, C]
+        }
+        self.head_logits(&x, batch_size, seq_len)
+    }
+
+    /// Scores one token at absolute position `pos` against the filled caches.
+    ///
+    /// `token` holds one id shaped `[1, 1]`. Returns logits `[1, 1, V]`.
+    pub fn decode(
+        &self,
+        token: &Tensor,
+        pos: usize,
+        caches: &mut [KvCache],
+    ) -> Result<Tensor> {
+        assert_eq!(
+            caches.len(),
+            self.layers.len(),
+            "Qwen3 decode needs one cache per layer"
+        );
+        let cos = self.cos.narrow(1, pos, 1); // [1, 1, 1, D/2]
+        let sin = self.sin.narrow(1, pos, 1); // [1, 1, 1, D/2]
+
+        let mut x = self.embed_tokens.forward(token)?; // [1, 1, C]
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+            x = layer.decode(&x, &cos, &sin, cache)?; // [1, 1, C]
+        }
+        self.head_logits(&x, 1, 1)
+    }
+
+    /// Generates up to `max_tokens` ids after `prompt` without tracking grads.
+    ///
+    /// Prefill scores the prompt once, then each step decodes one token and
+    /// samples the last-position logits under `config`. Returns only the new
+    /// ids, without the prompt.
+    pub fn generate(
+        &self,
+        prompt: &[u32],
+        max_tokens: usize,
+        config: &SamplingConfig,
+    ) -> Result<Vec<u32>> {
+        no_grad(|| {
+            assert!(!prompt.is_empty(), "Qwen3 generate needs a non-empty prompt");
+            let mut caches: Vec<KvCache> =
+                (0..self.layers.len()).map(|_| KvCache::new()).collect();
+            let ids: Vec<i64> = prompt.iter().map(|&id| id as i64).collect();
+            let idx = Tensor::from_vec(ids, (1, prompt.len()), Device::Cpu);
+            let logits = self.prefill(&idx, &mut caches)?;
+            let mut generated = vec![self.sample_last(&logits, prompt.len(), config)?];
+
+            for _ in 1..max_tokens {
+                let last = *generated.last().expect("prompt produced one token");
+                let token = Tensor::from_vec(vec![last as i64], (1, 1), Device::Cpu);
+                let logits = self.decode(&token, prompt.len() + generated.len() - 1, &mut caches)?;
+                generated.push(self.sample_last(&logits, 1, config)?);
+            }
+            Ok(generated)
+        })
+    }
+
+    /// Samples the last position of `logits` shaped `[1, T, V]` under `config`.
+    fn sample_last(
+        &self,
+        logits: &Tensor,
+        seq_len: usize,
+        config: &SamplingConfig,
+    ) -> Result<u32> {
+        let row = logits.narrow(1, seq_len - 1, 1).reshape(vec![self.vocab_size]);
+        let probs = cast_tensor(&row, DType::F32)?.to_vec::<f32>()?;
+        Ok(sample_token(&probs, config))
+    }
+
+    /// Runs the final norm and tied head over `[B, T, C]` hidden states.
+    fn head_logits(&self, x: &Tensor, batch_size: usize, seq_len: usize) -> Result<Tensor> {
+        let x = self.norm.forward(x)?; // [B, T, C]
         let x_flat = x.rearrange("b t c -> (b t) c", &[]);
         let head = self.lm_head.transpose(None); // [C, V] view over [V, C]
         let logits = x_flat.matmul(&head); // [B*T, V]
