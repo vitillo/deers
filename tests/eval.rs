@@ -53,6 +53,9 @@ fn candle_rotate(x: &CTensor, cos: &CTensor, sin: &CTensor) -> CTensor {
     CTensor::cat(&[&y1, &y2], D::Minus1).unwrap()
 }
 
+/// Epsilon for the QK-Norm step. Mirrors the fixed `QK_NORM_EPS` in `gpt.rs`.
+const CANDLE_QK_NORM_EPS: f64 = 1e-6;
+
 fn candle_attention(
     x: &CTensor,
     weights: &[CTensor],
@@ -66,12 +69,16 @@ fn candle_attention(
     let project = |w: &CTensor| {
         flat.matmul(w).unwrap().reshape((batch_size, seq_len, n_head, head_dim)).unwrap()
     };
-    let q = candle_rotate(&project(&weights[0]), cos, sin)
+    let q = project(&weights[0]);
+    let q = candle_rms_norm(&q, CANDLE_QK_NORM_EPS).broadcast_mul(&weights[4]).unwrap();
+    let q = candle_rotate(&q, cos, sin)
         .transpose(1, 2)
         .unwrap()
         .contiguous()
         .unwrap();
-    let k = candle_rotate(&project(&weights[1]), cos, sin)
+    let k = project(&weights[1]);
+    let k = candle_rms_norm(&k, CANDLE_QK_NORM_EPS).broadcast_mul(&weights[5]).unwrap();
+    let k = candle_rotate(&k, cos, sin)
         .transpose(1, 2)
         .unwrap()
         .contiguous()
