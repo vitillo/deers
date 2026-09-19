@@ -18,8 +18,7 @@ use deers::dataset::TokenBinDataset;
 use deers::models::gpt::{GPT, GPTConfig};
 use deers::nn::{ParamStore, Parameter};
 use deers::optim::{AdamW, AdamWConfig, LrSchedule, WarmupWarmdown, clip_grad_norm};
-use deers::tokenizer::Tokenizer;
-use deers::tokenizer::{TokenBinPaths, prepare_text_token_bins};
+use deers::tokenizer::{Gpt2Tokenizer, TokenBinPaths, Tokenizer, prepare_text_token_bins};
 use deers::{Device, GradientStore, Tensor, loss};
 
 const DEFAULT_TEXT_PATH: &str = "data/TinyStoriesV2-GPT4-train.txt";
@@ -45,7 +44,7 @@ fn main() {
         }
     }
 
-    let tokenizer = Tokenizer::gpt2();
+    let tokenizer = Gpt2Tokenizer::new();
     println!("Tokenizer: gpt2 (vocab_size={})", tokenizer.vocab_size());
 
     let token_paths = resolve_token_bins(&options, &tokenizer);
@@ -249,7 +248,7 @@ fn evaluate(
 
 fn generate(
     model: &GPT,
-    tokenizer: &Tokenizer,
+    tokenizer: &impl Tokenizer,
     prompt: &str,
     max_new_tokens: usize,
     device: Device,
@@ -304,7 +303,7 @@ fn sample_token(logits: &[f32], temperature: f32, top_k: usize) -> usize {
     candidates.last().unwrap().0
 }
 
-fn resolve_token_bins(options: &TrainOptions, tokenizer: &Tokenizer) -> TokenBinPaths {
+fn resolve_token_bins(options: &TrainOptions, tokenizer: &impl Tokenizer) -> TokenBinPaths {
     let train = options.train_bin.clone().unwrap_or_else(|| options.bin_dir.join("train.bin"));
     let val = options.val_bin.clone().unwrap_or_else(|| options.bin_dir.join("val.bin"));
 
