@@ -182,14 +182,18 @@ pub fn discover_shard_files(dir: &Path) -> Result<Vec<PathBuf>> {
 
 /// Loads a sharded checkpoint directory onto `device`, keyed by deers names.
 ///
-/// Qwen3 tensor names map through [`map_qwen_name`]. Mapped projection
-/// weights transpose on the way in: Hugging Face stores `Linear` weights as
-/// `[out, in]` while deers multiplies `x @ weight` with `[in, out]`, so the
-/// boundary converts once and every consumer stays transposed-free.
-/// Embeddings, heads, and norms keep their layout. A tensor listed twice
-/// fails loudly with both shard files named. File dtypes convert to matching
-/// deers dtypes including BF16. See [`load_sharded_tracked`] for per-tensor
-/// file origins.
+/// Hugging Face tensor names map through [`map_qwen_name`]. Any mapped
+/// projection weight transposes on the way in: Hugging Face stores `Linear`
+/// weights as `[out, in]` while deers multiplies `x @ weight` with `[in,
+/// out]`, so the boundary converts once and every consumer stays
+/// transposed-free. The rule keys off the map, not the model: the next
+/// Hugging Face model reuses it by adding map entries, and any entry
+/// landing on `*proj.weight` transposes automatically. Deers-native names
+/// pass through unmapped and never transpose, keeping their exact round
+/// trip. Embeddings, heads, and norms keep their layout. A tensor listed
+/// twice fails loudly with both shard files named. File dtypes convert to
+/// matching deers dtypes including BF16. See [`load_sharded_tracked`] for
+/// per-tensor file origins.
 pub fn load_sharded(dir: &Path, device: Device) -> Result<BTreeMap<String, Tensor>> {
     Ok(load_sharded_tracked(dir, device)?.0)
 }
@@ -229,9 +233,12 @@ pub(crate) fn load_sharded_tracked(
             })?;
             // Hugging Face `Linear` weights arrive as `[out, in]`; deers
             // holds `[in, out]`. Only mapped projections transpose, so
-            // deers-native shards keep their exact round trip.
+            // deers-native shards keep their exact round trip. The transpose
+            // is a strided view over the same bytes, so compact it into
+            // logical order: `Parameter::set` copies physical storage, and
+            // a view would silently assign untransposed data.
             let tensor = if mapped.is_some() && deers_name.ends_with("proj.weight") {
-                tensor.transpose(None)
+                tensor.transpose(None).compact()
             } else {
                 tensor
             };
@@ -687,9 +694,12 @@ mod transpose_tests {
         let loaded = load_sharded(&dir, Device::Cpu).unwrap();
 
         // Assert: the projection arrives as `[in, out]` with transposed
-        // values while the embedding and norm are untouched.
+        // values while the embedding and norm are untouched. Compactness
+        // matters: `Parameter::set` copies physical storage, so a strided
+        // transpose view would assign untransposed data.
         let q = &loaded["blocks.0.attn.q_proj.weight"];
         assert_eq!(q.layout().shape().iter().copied().collect::<Vec<_>>(), vec![2, 3]);
+        assert!(q.is_compact());
         assert_eq!(q.to_vec::<f32>().unwrap(), vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]);
         assert_eq!(loaded["wte.weight"].to_vec::<f32>().unwrap(), vec![7.0, 8.0, 9.0, 10.0]);
         assert_eq!(loaded["norm.weight"].to_vec::<f32>().unwrap(), vec![0.5, 1.5]);
