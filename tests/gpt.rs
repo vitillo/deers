@@ -124,12 +124,17 @@ fn candle_causal_mask(batch_size: usize, seq_len: usize) -> CTensor {
     candle_tensor(mask, &[batch_size, 1, seq_len, seq_len])
 }
 
+/// Epsilon for the QK-Norm step. Mirrors the fixed `QK_NORM_EPS` in `gpt.rs`.
+const CANDLE_QK_NORM_EPS: f64 = 1e-6;
+
 fn candle_attention_forward(
     x: &CTensor,
     q_proj: &CTensor,
     k_proj: &CTensor,
     v_proj: &CTensor,
     out_proj: &CTensor,
+    q_norm: &CTensor,
+    k_norm: &CTensor,
     n_head: usize,
     cos: &CTensor,
     sin: &CTensor,
@@ -137,10 +142,18 @@ fn candle_attention_forward(
     let (batch_size, seq_len, channels) = x.dims3().unwrap();
     let head_dim = channels / n_head;
     let x_flat = x.reshape((batch_size * seq_len, channels)).unwrap(); // [B*T, C]
-    let q =
-        x_flat.matmul(q_proj).unwrap().reshape((batch_size, seq_len, n_head, head_dim)).unwrap(); // [B, T, H, D]
-    let k =
-        x_flat.matmul(k_proj).unwrap().reshape((batch_size, seq_len, n_head, head_dim)).unwrap(); // [B, T, H, D]
+    let q = x_flat
+        .matmul(q_proj)
+        .unwrap()
+        .reshape((batch_size, seq_len, n_head, head_dim))
+        .unwrap(); // [B, T, H, D]
+    let q = candle_rms_norm(&q, CANDLE_QK_NORM_EPS).broadcast_mul(q_norm).unwrap();
+    let k = x_flat
+        .matmul(k_proj)
+        .unwrap()
+        .reshape((batch_size, seq_len, n_head, head_dim))
+        .unwrap(); // [B, T, H, D]
+    let k = candle_rms_norm(&k, CANDLE_QK_NORM_EPS).broadcast_mul(k_norm).unwrap();
     let v =
         x_flat.matmul(v_proj).unwrap().reshape((batch_size, seq_len, n_head, head_dim)).unwrap(); // [B, T, H, D]
 
@@ -189,9 +202,11 @@ fn candle_gpt_forward(
     let k_proj = &weights[2];
     let v_proj = &weights[3];
     let out_proj = &weights[4];
-    let up_proj = &weights[5];
-    let down_proj = &weights[6];
-    let lm_head = &weights[7];
+    let q_norm = &weights[5];
+    let k_norm = &weights[6];
+    let up_proj = &weights[7];
+    let down_proj = &weights[8];
+    let lm_head = &weights[9];
 
     let ids = CTensor::from_vec(ids.to_vec(), &[batch_size * seq_len], &CDevice::Cpu).unwrap();
     let mut x = wte.embedding(&ids).unwrap().reshape((batch_size, seq_len, config.n_embd)).unwrap(); // [B, T, C]
@@ -205,6 +220,8 @@ fn candle_gpt_forward(
         k_proj,
         v_proj,
         out_proj,
+        q_norm,
+        k_norm,
         config.n_head,
         &cos,
         &sin,
