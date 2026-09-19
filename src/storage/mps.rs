@@ -4,6 +4,8 @@
 use std::borrow::Borrow;
 
 use half::f16;
+#[cfg(target_os = "macos")]
+use half::bf16;
 
 use crate::{
     dtype::{DType, WithDType},
@@ -405,6 +407,15 @@ mod imp {
             )
         }
 
+        fn buffer_from_bf16(&self, data: &[bf16]) -> Buffer {
+            let byte_len = std::mem::size_of_val(data) as u64;
+            self.device.new_buffer_with_data(
+                data.as_ptr().cast::<c_void>(),
+                byte_len,
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
+
         fn buffer_from_i64(&self, data: &[i64]) -> Buffer {
             let byte_len = std::mem::size_of_val(data) as u64;
             self.device.new_buffer_with_data(
@@ -565,6 +576,8 @@ mod imp {
             let ctx = MpsContext::shared();
             let buffer = match dtype {
                 DType::F16 => ctx.empty_f16_buffer(len),
+                // BF16 shares the 2-byte element layout, so the F16 buffer fits exactly.
+                DType::BF16 => ctx.empty_f16_buffer(len),
                 DType::F32 => ctx.empty_f32_buffer(len),
                 DType::I64 => ctx.empty_i64_buffer(len),
             };
@@ -577,6 +590,7 @@ mod imp {
                 MpsInner::Accelerated { buffer, len, dtype, .. } => {
                     let elem_size = match dtype {
                         DType::F16 => std::mem::size_of::<f16>(),
+                        DType::BF16 => std::mem::size_of::<bf16>(),
                         DType::F32 => std::mem::size_of::<f32>(),
                         DType::I64 => std::mem::size_of::<i64>(),
                     };
@@ -610,6 +624,12 @@ mod imp {
                         std::slice::from_raw_parts_mut(buffer.contents().cast::<i64>(), *len)
                     };
                     slice.fill(1);
+                }
+                MpsInner::Accelerated { buffer, len, dtype: DType::BF16, .. } => {
+                    let slice = unsafe {
+                        std::slice::from_raw_parts_mut(buffer.contents().cast::<bf16>(), *len)
+                    };
+                    slice.fill(bf16::ONE);
                 }
                 MpsInner::Cpu(_) => unreachable!(),
             }
@@ -654,6 +674,18 @@ mod imp {
                         },
                     }
                 }
+                CpuStorage::BF16(data) => {
+                    let ctx = MpsContext::shared();
+                    let buffer = ctx.buffer_from_bf16(&data);
+                    Self {
+                        inner: MpsInner::Accelerated {
+                            ctx,
+                            buffer,
+                            len: data.len(),
+                            dtype: DType::BF16,
+                        },
+                    }
+                }
             }
         }
 
@@ -668,11 +700,14 @@ mod imp {
             let ctx = MpsContext::shared();
             let elem_size = match dtype {
                 DType::F16 => std::mem::size_of::<f16>(),
+                DType::BF16 => std::mem::size_of::<bf16>(),
                 DType::F32 => std::mem::size_of::<f32>(),
                 DType::I64 => std::mem::size_of::<i64>(),
             };
             let out_buffer = match dtype {
                 DType::F16 => ctx.empty_f16_buffer(total_len),
+                // BF16 shares the 2-byte element layout, so the F16 buffer fits exactly.
+                DType::BF16 => ctx.empty_f16_buffer(total_len),
                 DType::F32 => ctx.empty_f32_buffer(total_len),
                 DType::I64 => ctx.empty_i64_buffer(total_len),
             };
@@ -720,6 +755,12 @@ mod imp {
                     let slice =
                         unsafe { std::slice::from_raw_parts(buffer.contents().cast::<i64>(), len) };
                     CpuStorage::I64(slice.to_vec())
+                }
+                MpsInner::Accelerated { ctx, buffer, len, dtype: DType::BF16 } => {
+                    ctx.synchronize();
+                    let slice =
+                        unsafe { std::slice::from_raw_parts(buffer.contents().cast::<bf16>(), len) };
+                    CpuStorage::BF16(slice.to_vec())
                 }
                 MpsInner::Cpu(storage) => storage,
             }
@@ -1694,6 +1735,15 @@ mod imp {
                     ctx.synchronize();
                     let data = read_i64(ctx, buffer, *len, layout);
                     D::to_vec(&CpuStorage::I64(data))
+                }
+                MpsInner::Accelerated { ctx, buffer, len, dtype: DType::BF16 } => {
+                    ctx.synchronize();
+                    // The buffer holds raw 2-byte elements, so read it with the F16
+                    // kernel path and reinterpret the bits as BF16.
+                    let data = read_f16(ctx, buffer, *len, layout);
+                    let data: Vec<bf16> =
+                        data.iter().map(|v| bf16::from_bits(v.to_bits())).collect();
+                    D::to_vec(&CpuStorage::BF16(data))
                 }
                 MpsInner::Cpu(storage) => storage.to_vec(layout),
             }
