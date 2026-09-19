@@ -181,14 +181,13 @@ impl Module for MLP {
 
         let batch_size = shape[0];
         let seq_len = shape[1];
-        let channels = shape[2];
 
-        let x_flat = x.reshape(vec![batch_size * seq_len, channels]); // [B*T, C]
+        let x_flat = x.rearrange("b t c -> (b t) c", &[]);
         let y = self.up_proj.forward(&x_flat)?; // [B*T, H]
         let y = y.relu(); // [B*T, H]
         let y = &y * &y; // [B*T, H]
         let y = self.down_proj.forward(&y)?; // [B*T, C]
-        Ok(y.reshape(vec![batch_size, seq_len, channels])) // [B, T, C]
+        Ok(y.rearrange("(b t) c -> b t c", &[("b", batch_size), ("t", seq_len)]))
     }
 
     fn parameters(&self) -> Vec<Parameter> {
@@ -340,10 +339,12 @@ impl GPT {
         }
         x = self.norm.forward(&x)?; // [B, T, C]
 
-        let channels = x.layout().shape()[2];
-        let x_flat = x.reshape(vec![batch_size * seq_len, channels]); // [B*T, C]
+        let x_flat = x.rearrange("b t c -> (b t) c", &[]);
         let logits = self.lm_head.forward(&x_flat)?; // [B*T, V]
-        Ok(logits.reshape(vec![batch_size, seq_len, self.vocab_size])) // [B, T, V]
+        Ok(logits.rearrange(
+            "(b t) v -> b t v",
+            &[("b", batch_size), ("t", seq_len), ("v", self.vocab_size)],
+        ))
     }
 
     /// Returns the trainable parameters owned by the model.
