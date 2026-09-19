@@ -185,6 +185,84 @@ pub fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
 /// reuses for its query/key norms.
 const QK_NORM_EPS: f64 = 1e-6;
 
+/// Key/value cache for incremental decoding.
+///
+/// Prefill scores the whole prompt once and stores its keys and values.
+/// Decode then appends one token's keys and values and attends over the
+/// cache instead of recomputing history. Without the cache, generating
+/// token `t` rescores all `t` past tokens, so a long run costs quadratic
+/// work in the prompt length. The cache keeps every past key and value,
+/// so each step only projects, norms, and rotates the new token and reads
+/// the stored history back. That is the whole game for long generation:
+/// per-step work stops paying recomputation and pays only the attention
+/// read over the cache.
+///
+/// The cache holds keys and values after QK-Norm, RoPE, and the
+/// grouped-query repeat, shaped `[B, H_q, T_cached, D]`. Norms are
+/// token-local, so caching their output is exact. RoPE runs at each
+/// token's absolute position before the append, so stored keys stay
+/// rotated correctly with no re-rotation. Repeating up front keeps decode
+/// a plain append plus attention, at the price of a cache `group_size`
+/// wider than the key/value heads.
+#[derive(Debug, Default)]
+pub struct KvCache {
+    kv: Option<(Tensor, Tensor)>,
+}
+
+impl KvCache {
+    /// Creates an empty cache. Fill it with `CausalSelfAttention::prefill`.
+    pub fn new() -> Self {
+        Self { kv: None }
+    }
+
+    /// Returns true while no tokens are cached yet.
+    pub fn is_empty(&self) -> bool {
+        self.kv.is_none()
+    }
+
+    /// Returns the number of cached tokens. Zero while empty.
+    pub fn len(&self) -> usize {
+        self.kv.as_ref().map(|(k, _)| k.layout().shape()[2]).unwrap_or(0)
+    }
+
+    /// Returns the cached keys shaped `[B, H_q, T_cached, D]`. Panics while empty.
+    fn keys(&self) -> &Tensor {
+        &self.kv.as_ref().expect("cache is empty; prefill the prompt first").0
+    }
+
+    /// Returns the cached values shaped `[B, H_q, T_cached, D]`. Panics while empty.
+    fn values(&self) -> &Tensor {
+        &self.kv.as_ref().expect("cache is empty; prefill the prompt first").1
+    }
+
+    /// Appends ready-to-attend keys and values shaped `[B, H_q, T_new, D]`.
+    ///
+    /// Batch, heads, head width, dtype, and device must match the stored
+    /// cache, so a stray tensor fails loudly instead of scoring garbage.
+    fn append(&mut self, k: Tensor, v: Tensor) {
+        assert_eq!(k.layout().shape(), v.layout().shape(), "cache keys and values must match");
+        let shape = k.layout().shape();
+        assert_eq!(shape.ndim(), 4, "cache entries must be shaped [B, H, T, D]");
+        match &self.kv {
+            None => {
+                self.kv = Some((k, v));
+            }
+            Some((prev_k, prev_v)) => {
+                assert_eq!(shape[0], prev_k.layout().shape()[0], "cache batch mismatch");
+                assert_eq!(shape[1], prev_k.layout().shape()[1], "cache head mismatch");
+                assert_eq!(shape[3], prev_k.layout().shape()[3], "cache head width mismatch");
+                assert_eq!(k.dtype(), prev_k.dtype(), "cache dtype mismatch");
+                assert_eq!(k.device(), prev_k.device(), "cache device mismatch");
+                assert_eq!(v.dtype(), prev_v.dtype(), "cache dtype mismatch");
+                assert_eq!(v.device(), prev_v.device(), "cache device mismatch");
+                let full_k = Tensor::cat(&[prev_k.clone(), k], 2);
+                let full_v = Tensor::cat(&[prev_v.clone(), v], 2);
+                self.kv = Some((full_k, full_v));
+            }
+        }
+    }
+}
+
 /// Minimal causal self-attention with bias-free projections and RoPE on queries/keys.
 ///
 /// `n_kv_heads` key/value heads are shared across `n_q_heads` query heads.
@@ -239,8 +317,17 @@ impl CausalSelfAttention {
         }
     }
 
-    /// Runs self-attention on `[B, T, C]` inputs using the provided RoPE caches.
-    pub fn forward(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+    /// Projects queries, keys, and values shaped `[B, H_q, T, D]`.
+    ///
+    /// QK-Norm, RoPE, and the grouped-query repeat all apply here, so cached
+    /// keys and values already carry them and decode never recomputes them.
+    /// Also returns the batch size and sequence length of `x`.
+    fn project_qkv(
+        &self,
+        x: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+    ) -> Result<(Tensor, Tensor, Tensor, usize, usize)> {
         let shape = x.layout().shape();
         assert_eq!(shape.ndim(), 3, "attention expects input shape [B, T, C]");
 
@@ -287,15 +374,73 @@ impl CausalSelfAttention {
             v.repeat("b t kv d -> b t (kv g) d", &[("g", self.group_size)])
         };
         let v = v.rearrange("b t h d -> b h t d", &[]);
+        Ok((q, k, v, batch_size, seq_len))
+    }
 
+    /// Attends queries over keys and values under `mask`, returning `[B, T, C]`.
+    fn attend(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        mask: Tensor,
+        batch_size: usize,
+        seq_len: usize,
+    ) -> Result<Tensor> {
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let scores = Tensor::einsum("b h t d, b h s d -> b h t s", &q, &k) * scale; // [B, H, T, T]
-        let mask = functional::causal_mask(batch_size, seq_len, 0, x.dtype(), x.device()); // [B, 1, T, T]
-        let attn = (&scores + &mask).softmax(3); // [B, H, T, T]
-        let y_flat = attn.matmul(&v).rearrange("b h t d -> (b t) (h d)", &[]);
+        let scores = Tensor::einsum("b h t d, b h s d -> b h t s", q, k) * scale;
+        let attn = (&scores + &mask).softmax(3);
+        let y_flat = attn.matmul(v).rearrange("b h t d -> (b t) (h d)", &[]);
 
         let out = self.out_proj.forward(&y_flat)?;
         Ok(out.rearrange("(b t) c -> b t c", &[("b", batch_size), ("t", seq_len)]))
+    }
+
+    /// Runs self-attention on `[B, T, C]` inputs using the provided RoPE caches.
+    pub fn forward(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+        let (q, k, v, batch_size, seq_len) = self.project_qkv(x, cos, sin)?;
+        let mask = functional::causal_mask(batch_size, seq_len, 0, x.dtype(), x.device());
+        self.attend(&q, &k, &v, mask, batch_size, seq_len)
+    }
+
+    /// Scores the whole prompt at once and stores its keys and values in `cache`.
+    ///
+    /// `cos` and `sin` cover the prompt positions starting at zero. The cache
+    /// must be empty; each following token arrives through `decode`.
+    pub fn prefill(
+        &self,
+        x: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        cache: &mut KvCache,
+    ) -> Result<Tensor> {
+        assert!(cache.is_empty(), "prefill expects an empty cache; decode appends to it");
+        let (q, k, v, batch_size, seq_len) = self.project_qkv(x, cos, sin)?;
+        let mask = functional::causal_mask(batch_size, seq_len, 0, x.dtype(), x.device());
+        let out = self.attend(&q, &k, &v, mask, batch_size, seq_len)?;
+        cache.append(k, v);
+        Ok(out)
+    }
+
+    /// Appends one token's keys and values, then attends over the whole cache.
+    ///
+    /// `x` holds exactly one token. `cos` and `sin` hold that token's absolute
+    /// position: narrow them from the full rotary cache at the cached length,
+    /// so the stored keys stay rotated correctly without re-rotation.
+    pub fn decode(
+        &self,
+        x: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        cache: &mut KvCache,
+    ) -> Result<Tensor> {
+        assert!(!cache.is_empty(), "decode expects a non-empty cache; prefill the prompt first");
+        let (q, k, v, batch_size, seq_len) = self.project_qkv(x, cos, sin)?;
+        assert_eq!(seq_len, 1, "decode expects a single token, got {seq_len}");
+        let offset = cache.len();
+        cache.append(k, v);
+        let mask = functional::causal_mask(batch_size, 1, offset, x.dtype(), x.device());
+        self.attend(&q, cache.keys(), cache.values(), mask, batch_size, 1)
     }
 
     /// Returns the trainable parameters owned by the attention module.
