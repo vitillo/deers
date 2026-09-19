@@ -12,6 +12,8 @@ pub mod checkpoint;
 pub mod dataset;
 mod device;
 mod dtype;
+/// Einops-style shape expressions over tensors.
+pub mod einops;
 mod error;
 mod layout;
 /// Built-in loss functions.
