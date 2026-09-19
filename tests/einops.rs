@@ -676,3 +676,492 @@ fn einsum_single_input_panics() {
     // Act
     let _ = Tensor::einsum("b t -> b t", &a, &b);
 }
+
+#[test]
+fn ellipsis_splits_the_last_dim_at_rank_three() {
+    // Arrange
+    let input = cpu((0..16).map(|v| v as f32).collect(), vec![2, 2, 4]);
+
+    // Act
+    let split = input.rearrange("... (h d) -> ... h d", &[("h", 2)]);
+
+    // Assert
+    assert_eq!(shape_of(&split), vec![2, 2, 2, 2]);
+    assert_eq!(values(&split), values(&input.reshape(vec![2, 2, 2, 2])));
+    assert_eq!(values(&split), (0..16).map(|v| v as f32).collect::<Vec<_>>());
+}
+
+#[test]
+fn ellipsis_binds_zero_dims_as_identity() {
+    // Arrange
+    let input = cpu(vec![1.0, 2.0, 3.0], vec![3]);
+
+    // Act
+    let same = input.rearrange("... c -> ... c", &[]);
+
+    // Assert
+    assert_eq!(shape_of(&same), vec![3]);
+    assert_eq!(values(&same), vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn rope_form_moves_a_split_block_past_the_batch() {
+    // Arrange
+    let input = cpu((0..8).map(|v| v as f32).collect(), vec![1, 2, 4]);
+
+    // Act
+    let rotated = input.rearrange("... (half_d xy) -> xy ... half_d", &[("half_d", 2)]);
+
+    // Assert
+    assert_eq!(shape_of(&rotated), vec![2, 1, 2, 2]);
+    assert_eq!(values(&rotated), vec![0.0, 2.0, 4.0, 6.0, 1.0, 3.0, 5.0, 7.0]);
+}
+
+#[test]
+fn rope_form_gradients_match_the_manual_path() {
+    // Arrange
+    let data: Vec<f32> = (0..8).map(|v| v as f32).collect();
+    let via_pattern = cpu(data.clone(), vec![1, 2, 4]).attach();
+    let via_manual = cpu(data.clone(), vec![1, 2, 4]).attach();
+
+    // Act
+    let loss_pattern = via_pattern
+        .rearrange("... (half_d xy) -> xy ... half_d", &[("half_d", 2)])
+        .sum(vec![0, 1, 2, 3], false);
+    let loss_manual = via_manual
+        .reshape(vec![1, 2, 2, 2])
+        .permute(vec![3, 0, 1, 2])
+        .sum(vec![0, 1, 2, 3], false);
+    let grads_pattern = loss_pattern.backward().unwrap();
+    let grads_manual = loss_manual.backward().unwrap();
+
+    // Assert
+    assert_eq!(values(&loss_pattern), values(&loss_manual));
+    assert_eq!(
+        values(&grads_pattern.get(via_pattern.id()).unwrap()),
+        values(&grads_manual.get(via_manual.id()).unwrap())
+    );
+    assert_eq!(values(&grads_pattern.get(via_pattern.id()).unwrap()), vec![1.0; 8]);
+}
+
+#[test]
+fn flatten_form_merges_the_batch_into_one_dim() {
+    // Arrange
+    let input = cpu((0..24).map(|v| v as f32).collect(), vec![2, 3, 4]);
+
+    // Act
+    let flat = input.rearrange("... d -> (...) d", &[]);
+
+    // Assert
+    assert_eq!(shape_of(&flat), vec![6, 4]);
+    assert_eq!(values(&flat), values(&input.reshape(vec![6, 4])));
+    assert_eq!(values(&flat), (0..24).map(|v| v as f32).collect::<Vec<_>>());
+}
+
+#[test]
+fn flatten_form_gradients_match_reshape() {
+    // Arrange
+    let data: Vec<f32> = (0..24).map(|v| v as f32).collect();
+    let via_pattern = cpu(data.clone(), vec![2, 3, 4]).attach();
+    let via_manual = cpu(data.clone(), vec![2, 3, 4]).attach();
+
+    // Act
+    let loss_pattern = via_pattern.rearrange("... d -> (...) d", &[]).sum(vec![0, 1], false);
+    let loss_manual = via_manual.reshape(vec![6, 4]).sum(vec![0, 1], false);
+    let grads_pattern = loss_pattern.backward().unwrap();
+    let grads_manual = loss_manual.backward().unwrap();
+
+    // Assert
+    assert_eq!(values(&loss_pattern), vec![276.0]);
+    assert_eq!(
+        values(&grads_pattern.get(via_pattern.id()).unwrap()),
+        values(&grads_manual.get(via_manual.id()).unwrap())
+    );
+    assert_eq!(values(&grads_pattern.get(via_pattern.id()).unwrap()), vec![1.0; 24]);
+}
+
+#[test]
+fn anonymous_axes_pair_across_an_ellipsis() {
+    // Arrange
+    let input = cpu((0..12).map(|v| v as f32).collect(), vec![2, 2, 3]);
+
+    // Act
+    let swapped = input.rearrange("... _ c -> ... c _", &[]);
+
+    // Assert
+    assert_eq!(shape_of(&swapped), vec![2, 3, 2]);
+    assert_eq!(values(&swapped), values(&input.permute(vec![0, 2, 1])));
+    assert_eq!(
+        values(&swapped),
+        vec![0.0, 3.0, 1.0, 4.0, 2.0, 5.0, 6.0, 9.0, 7.0, 10.0, 8.0, 11.0]
+    );
+}
+
+#[test]
+fn ellipsis_reduce_sums_inside_the_batch() {
+    // Arrange
+    let input = cpu((0..24).map(|v| v as f32).collect(), vec![2, 3, 4]);
+
+    // Act
+    let reduced = input.reduce("... t c -> ... c", "sum", &[]);
+
+    // Assert
+    assert_eq!(shape_of(&reduced), vec![2, 4]);
+    assert_eq!(values(&reduced), vec![12.0, 15.0, 18.0, 21.0, 48.0, 51.0, 54.0, 57.0]);
+}
+
+#[test]
+fn ellipsis_reduce_binds_zero_batch_dims() {
+    // Arrange
+    let input = cpu((0..12).map(|v| v as f32).collect(), vec![3, 4]);
+
+    // Act
+    let reduced = input.reduce("... t c -> ... c", "sum", &[]);
+
+    // Assert
+    assert_eq!(shape_of(&reduced), vec![4]);
+    assert_eq!(values(&reduced), vec![12.0, 15.0, 18.0, 21.0]);
+}
+
+#[test]
+fn ellipsis_reduce_gradients_match_manual_mean() {
+    // Arrange
+    let data: Vec<f32> = (0..24).map(|v| v as f32).collect();
+    let via_pattern = cpu(data.clone(), vec![2, 3, 4]).attach();
+    let via_manual = cpu(data.clone(), vec![2, 3, 4]).attach();
+
+    // Act
+    let loss_pattern =
+        via_pattern.reduce("... t c -> ... c", "mean", &[]).sum(vec![0, 1], false);
+    let loss_manual = via_manual.mean(vec![1], false).sum(vec![0, 1], false);
+    let grads_pattern = loss_pattern.backward().unwrap();
+    let grads_manual = loss_manual.backward().unwrap();
+
+    // Assert
+    assert_eq!(values(&loss_pattern), values(&loss_manual));
+    assert_eq!(
+        values(&grads_pattern.get(via_pattern.id()).unwrap()),
+        values(&grads_manual.get(via_manual.id()).unwrap())
+    );
+}
+
+#[test]
+fn ellipsis_repeat_tiles_inside_the_batch() {
+    // Arrange
+    let input = cpu(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+
+    // Act
+    let repeated = input.repeat("... c -> ... c h", &[("h", 2)]);
+
+    // Assert
+    assert_eq!(shape_of(&repeated), vec![2, 3, 2]);
+    assert_eq!(
+        values(&repeated),
+        vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 5.0, 5.0, 6.0, 6.0]
+    );
+}
+
+#[test]
+fn ellipsis_repeat_gradients_match_manual_broadcast() {
+    // Arrange
+    let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let via_pattern = cpu(data.clone(), vec![2, 3]).attach();
+    let via_manual = cpu(data.clone(), vec![2, 3]).attach();
+
+    // Act
+    let loss_pattern =
+        via_pattern.repeat("... c -> ... c h", &[("h", 2)]).sum(vec![0, 1, 2], false);
+    let loss_manual = via_manual
+        .reshape(vec![2, 3, 1])
+        .broadcast(vec![2, 3, 2])
+        .sum(vec![0, 1, 2], false);
+    let grads_pattern = loss_pattern.backward().unwrap();
+    let grads_manual = loss_manual.backward().unwrap();
+
+    // Assert
+    assert_eq!(values(&loss_pattern), vec![42.0]);
+    assert_eq!(
+        values(&grads_pattern.get(via_pattern.id()).unwrap()),
+        values(&grads_manual.get(via_manual.id()).unwrap())
+    );
+    assert_eq!(values(&grads_pattern.get(via_pattern.id()).unwrap()), vec![2.0; 6]);
+}
+
+#[test]
+fn ellipsis_attention_scores_match_named_einsum() {
+    // Arrange
+    let q = cpu(vec![1.0, 2.0, 3.0, 4.0], vec![1, 1, 2, 2]);
+    let k = cpu(vec![5.0, 6.0, 7.0, 8.0], vec![1, 1, 2, 2]);
+
+    // Act
+    let scores = Tensor::einsum("... q d, ... k d -> ... q k", &q, &k);
+
+    // Assert
+    assert_eq!(shape_of(&scores), vec![1, 1, 2, 2]);
+    assert_eq!(values(&scores), vec![17.0, 23.0, 39.0, 53.0]);
+}
+
+#[test]
+fn ellipsis_attention_binds_zero_batch_dims() {
+    // Arrange
+    let q = cpu(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]);
+    let k = cpu(vec![5.0, 6.0, 7.0, 8.0], vec![2, 2]);
+
+    // Act
+    let scores = Tensor::einsum("... q d, ... k d -> ... q k", &q, &k);
+
+    // Assert
+    assert_eq!(shape_of(&scores), vec![2, 2]);
+    assert_eq!(values(&scores), vec![17.0, 23.0, 39.0, 53.0]);
+}
+
+#[test]
+fn ellipsis_attention_gradients_match_manual_path() {
+    // Arrange
+    let q_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    let k_data = vec![8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
+    let q_pattern = cpu(q_data.clone(), vec![2, 2, 2]).attach();
+    let k_pattern = cpu(k_data.clone(), vec![2, 2, 2]).attach();
+    let q_manual = cpu(q_data, vec![2, 2, 2]).attach();
+    let k_manual = cpu(k_data, vec![2, 2, 2]).attach();
+
+    // Act
+    let loss_pattern = Tensor::einsum("... q d, ... k d -> ... q k", &q_pattern, &k_pattern)
+        .sum(vec![0, 1, 2], false);
+    let loss_manual =
+        q_manual.matmul(&k_manual.transpose(Some((1, 2)))).sum(vec![0, 1, 2], false);
+    let grads_pattern = loss_pattern.backward().unwrap();
+    let grads_manual = loss_manual.backward().unwrap();
+
+    // Assert
+    assert_eq!(
+        values(&grads_pattern.get(q_pattern.id()).unwrap()),
+        values(&grads_manual.get(q_manual.id()).unwrap())
+    );
+    assert_eq!(
+        values(&grads_pattern.get(k_pattern.id()).unwrap()),
+        values(&grads_manual.get(k_manual.id()).unwrap())
+    );
+}
+
+#[test]
+fn ellipsis_linear_broadcasts_the_weight_over_batch() {
+    // Arrange
+    let x = cpu(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+    let w = cpu(vec![1.0, 0.0, 1.0, 0.0, 1.0, 1.0], vec![2, 3]);
+
+    // Act
+    let y = Tensor::einsum("... d_in, d_out d_in -> ... d_out", &x, &w);
+
+    // Assert
+    assert_eq!(shape_of(&y), vec![2, 2]);
+    assert_eq!(values(&y), vec![4.0, 5.0, 10.0, 11.0]);
+}
+
+#[test]
+fn ellipsis_linear_keeps_extra_batch_dims() {
+    // Arrange
+    let x = cpu((0..12).map(|v| v as f32).collect(), vec![2, 2, 3]);
+    let w = cpu(vec![1.0, 0.0, 1.0, 0.0, 1.0, 1.0], vec![2, 3]);
+
+    // Act
+    let y = Tensor::einsum("... d_in, d_out d_in -> ... d_out", &x, &w);
+
+    // Assert
+    assert_eq!(shape_of(&y), vec![2, 2, 2]);
+    assert_eq!(values(&y), vec![2.0, 3.0, 8.0, 9.0, 14.0, 15.0, 20.0, 21.0]);
+}
+
+#[test]
+fn ellipsis_linear_gradients_match_manual_matmul() {
+    // Arrange
+    let x_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let w_data = vec![1.0, 0.0, 1.0, 0.0, 1.0, 1.0];
+    let x_pattern = cpu(x_data.clone(), vec![2, 3]).attach();
+    let w_pattern = cpu(w_data.clone(), vec![2, 3]).attach();
+    let x_manual = cpu(x_data, vec![2, 3]).attach();
+    let w_manual = cpu(w_data, vec![2, 3]).attach();
+
+    // Act
+    let loss_pattern =
+        Tensor::einsum("... d_in, d_out d_in -> ... d_out", &x_pattern, &w_pattern)
+            .sum(vec![0, 1], false);
+    let loss_manual = x_manual.matmul(&w_manual.transpose(None)).sum(vec![0, 1], false);
+    let grads_pattern = loss_pattern.backward().unwrap();
+    let grads_manual = loss_manual.backward().unwrap();
+
+    // Assert
+    assert_eq!(
+        values(&grads_pattern.get(x_pattern.id()).unwrap()),
+        values(&grads_manual.get(x_manual.id()).unwrap())
+    );
+    assert_eq!(
+        values(&grads_pattern.get(w_pattern.id()).unwrap()),
+        values(&grads_manual.get(w_manual.id()).unwrap())
+    );
+}
+
+#[test]
+#[should_panic(expected = "both sides must carry '...' together")]
+fn ellipsis_on_lhs_only_panics() {
+    // Arrange
+    let input = cpu(vec![0.0; 8], vec![2, 4]);
+
+    // Act
+    let _ = input.rearrange("... b c -> b c", &[]);
+}
+
+#[test]
+#[should_panic(expected = "both sides must carry '...' together")]
+fn ellipsis_on_rhs_only_panics() {
+    // Arrange
+    let input = cpu(vec![0.0; 8], vec![2, 4]);
+
+    // Act
+    let _ = input.rearrange("b c -> ... b c", &[]);
+}
+
+#[test]
+#[should_panic(expected = "at most one ellipsis per side")]
+fn two_ellipses_on_one_side_panics() {
+    // Arrange
+    let input = cpu(vec![0.0; 8], vec![2, 4]);
+
+    // Act
+    let _ = input.rearrange("... ... b -> ... b", &[]);
+}
+
+#[test]
+#[should_panic(expected = "only supported on the rhs")]
+fn flatten_on_lhs_panics() {
+    // Arrange
+    let input = cpu(vec![0.0; 8], vec![2, 4]);
+
+    // Act
+    let _ = input.rearrange("(...) d -> ... d", &[]);
+}
+
+#[test]
+#[should_panic(expected = "must match at least one dim to flatten")]
+fn flatten_binds_zero_dims_panics() {
+    // Arrange
+    let input = cpu(vec![0.0; 4], vec![4]);
+
+    // Act
+    let _ = input.rearrange("... d -> (...) d", &[]);
+}
+
+#[test]
+#[should_panic(expected = "binds zero or more dims")]
+fn ellipsis_with_too_many_named_groups_panics() {
+    // Arrange
+    let input = cpu(vec![0.0; 2], vec![2]);
+
+    // Act
+    let _ = input.rearrange("... a b -> ... a b", &[]);
+}
+
+#[test]
+#[should_panic(expected = "batch dims are preserved in the output")]
+fn einsum_ellipsis_missing_from_output_panics() {
+    // Arrange
+    let q = cpu(vec![0.0; 8], vec![2, 2, 2]);
+    let k = cpu(vec![0.0; 8], vec![2, 2, 2]);
+
+    // Act
+    let _ = Tensor::einsum("... q d, ... k d -> q k", &q, &k);
+}
+
+#[test]
+#[should_panic(expected = "batch rank must match")]
+fn einsum_ellipsis_rank_mismatch_panics() {
+    // Arrange
+    let q = cpu(vec![0.0; 16], vec![2, 2, 2, 2]);
+    let k = cpu(vec![0.0; 8], vec![2, 2, 2]);
+
+    // Act
+    let _ = Tensor::einsum("... q d, ... k d -> ... q k", &q, &k);
+}
+
+#[test]
+#[should_panic(expected = "batch '...' dim 0 has size 2 in the first input but 3 in the second")]
+fn einsum_ellipsis_size_mismatch_panics() {
+    // Arrange
+    let q = cpu(vec![0.0; 8], vec![2, 2, 2]);
+    let k = cpu(vec![0.0; 12], vec![3, 2, 2]);
+
+    // Act
+    let _ = Tensor::einsum("... q d, ... k d -> ... q k", &q, &k);
+}
+
+#[test]
+#[should_panic(expected = "must lead")]
+fn einsum_ellipsis_not_leading_panics() {
+    // Arrange
+    let q = cpu(vec![0.0; 8], vec![2, 2, 2]);
+    let k = cpu(vec![0.0; 8], vec![2, 2, 2]);
+
+    // Act
+    let _ = Tensor::einsum("q ... d, ... k d -> ... q k", &q, &k);
+}
+
+#[test]
+#[should_panic(expected = "neither input keeps an axis")]
+fn einsum_vector_dot_without_kept_axis_panics() {
+    // Arrange
+    let a = cpu(vec![1.0, 2.0], vec![2]);
+    let b = cpu(vec![3.0, 4.0], vec![2]);
+
+    // Act
+    let _ = Tensor::einsum("... d, ... d -> ...", &a, &b);
+}
+
+#[test]
+#[should_panic(expected = "duplicate axis 'b' on lhs")]
+fn duplicate_axis_with_ellipsis_panics() {
+    // Arrange
+    let input = cpu(vec![0.0; 8], vec![2, 2, 2]);
+
+    // Act
+    let _ = input.rearrange("... b b -> ... b", &[]);
+}
+
+#[test]
+#[should_panic(expected = "must preserve the axis multiset")]
+fn rearrange_drop_with_ellipsis_panics() {
+    // Arrange
+    let input = cpu(vec![0.0; 24], vec![2, 3, 4]);
+
+    // Act
+    let _ = input.rearrange("... b c -> ... b", &[]);
+}
+
+#[test]
+#[should_panic(expected = "drops no axis")]
+fn reduce_no_drop_with_ellipsis_panics() {
+    // Arrange
+    let input = cpu(vec![0.0; 24], vec![2, 3, 4]);
+
+    // Act
+    let _ = input.reduce("... b c -> ... c b", "sum", &[]);
+}
+
+#[test]
+#[should_panic(expected = "adds no axis")]
+fn repeat_no_add_with_ellipsis_panics() {
+    // Arrange
+    let input = cpu(vec![0.0; 24], vec![2, 3, 4]);
+
+    // Act
+    let _ = input.repeat("... b c -> ... c b", &[("h", 2)]);
+}
+
+#[test]
+#[should_panic(expected = "drops lhs axis 'c'")]
+fn repeat_drop_with_ellipsis_panics() {
+    // Arrange
+    let input = cpu(vec![0.0; 24], vec![2, 3, 4]);
+
+    // Act
+    let _ = input.repeat("... b c -> ... b h", &[("h", 2)]);
+}
