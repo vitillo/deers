@@ -150,10 +150,7 @@ fn multi_axis_reduce_gradients_match_manual_ops() {
         values(&grads_pattern.get(via_pattern.id()).unwrap()),
         values(&grads_manual.get(via_manual.id()).unwrap())
     );
-    assert_eq!(
-        values(&grads_pattern.get(via_pattern.id()).unwrap()),
-        vec![1.0; 8]
-    );
+    assert_eq!(values(&grads_pattern.get(via_pattern.id()).unwrap()), vec![1.0; 8]);
 }
 
 #[test]
@@ -250,9 +247,8 @@ fn repeat_gradients_match_manual_broadcast() {
     let via_manual = cpu(data.clone(), vec![1, 2, 2]).attach();
 
     // Act
-    let loss_pattern = via_pattern
-        .repeat("b t c -> b t (c h)", &[("h", 3)])
-        .sum(vec![0, 1, 2], false);
+    let loss_pattern =
+        via_pattern.repeat("b t c -> b t (c h)", &[("h", 3)]).sum(vec![0, 1, 2], false);
     let loss_manual = via_manual
         .reshape(vec![1, 2, 2, 1])
         .broadcast(vec![1, 2, 2, 3])
