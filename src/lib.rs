@@ -21,6 +21,8 @@ pub mod models;
 /// Neural-network layers, parameters, and functional helpers.
 pub mod nn;
 mod ops;
+/// Token sampling strategies for decoding.
+pub mod sample;
 /// Optimizers and learning-rate schedules.
 pub mod optim;
 /// Lightweight profiling utilities.
