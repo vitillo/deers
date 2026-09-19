@@ -77,12 +77,17 @@ impl Device {
             (Device::Cpu, DType::F16) => {
                 Storage::Cpu(CpuStorage::F16(vec![half::f16::from_f32(0.0); size]))
             }
+            (Device::Cpu, DType::BF16) => {
+                Storage::Cpu(CpuStorage::BF16(vec![half::bf16::ZERO; size]))
+            }
             (Device::Cpu, DType::F32) => Storage::Cpu(CpuStorage::F32(vec![0.0; size])),
             (Device::Cpu, DType::I64) => Storage::Cpu(CpuStorage::I64(vec![0; size])),
             (Device::Mps, DType::F16) => Storage::Mps(MpsStorage::zeros(size, DType::F16)),
+            (Device::Mps, DType::BF16) => Storage::Mps(MpsStorage::zeros(size, DType::BF16)),
             (Device::Mps, DType::F32) => Storage::Mps(MpsStorage::zeros(size, DType::F32)),
             (Device::Mps, DType::I64) => Storage::Mps(MpsStorage::zeros(size, DType::I64)),
             (Device::Cuda, DType::F16) => Storage::Cuda(CudaStorage::zeros(size, DType::F16)),
+            (Device::Cuda, DType::BF16) => panic!("cuda BF16 storage is not implemented"),
             (Device::Cuda, DType::F32) => Storage::Cuda(CudaStorage::zeros(size, DType::F32)),
             (Device::Cuda, DType::I64) => Storage::Cuda(CudaStorage::zeros(size, DType::I64)),
         }
@@ -94,12 +99,17 @@ impl Device {
             (Device::Cpu, DType::F16) => {
                 Storage::Cpu(CpuStorage::F16(vec![half::f16::from_f32(1.0); size]))
             }
+            (Device::Cpu, DType::BF16) => {
+                Storage::Cpu(CpuStorage::BF16(vec![half::bf16::ONE; size]))
+            }
             (Device::Cpu, DType::F32) => Storage::Cpu(CpuStorage::F32(vec![1.0; size])),
             (Device::Cpu, DType::I64) => Storage::Cpu(CpuStorage::I64(vec![1; size])),
             (Device::Mps, DType::F16) => Storage::Mps(MpsStorage::ones(size, DType::F16)),
+            (Device::Mps, DType::BF16) => Storage::Mps(MpsStorage::ones(size, DType::BF16)),
             (Device::Mps, DType::F32) => Storage::Mps(MpsStorage::ones(size, DType::F32)),
             (Device::Mps, DType::I64) => Storage::Mps(MpsStorage::ones(size, DType::I64)),
             (Device::Cuda, DType::F16) => Storage::Cuda(CudaStorage::ones(size, DType::F16)),
+            (Device::Cuda, DType::BF16) => panic!("cuda BF16 storage is not implemented"),
             (Device::Cuda, DType::F32) => Storage::Cuda(CudaStorage::ones(size, DType::F32)),
             (Device::Cuda, DType::I64) => Storage::Cuda(CudaStorage::ones(size, DType::I64)),
         }

@@ -8,7 +8,7 @@
 use std::sync::{Arc, RwLock};
 use std::{cmp::Ordering, fmt, iter};
 
-use half::f16;
+use half::{bf16, f16};
 
 use crate::backprop::GradientStore;
 use crate::error::{Error, Result};
@@ -1562,6 +1562,9 @@ fn check_select_dim(ndim: usize, dim: usize, op: &str) -> Result<()> {
 fn cond_mask(cond: &Tensor) -> Result<Vec<bool>> {
     match cond.dtype() {
         crate::DType::F16 => Ok(cond.to_vec::<f16>()?.iter().map(|v| v.to_f32() != 0.0).collect()),
+        crate::DType::BF16 => {
+            Ok(cond.to_vec::<bf16>()?.iter().map(|v| v.to_f32() != 0.0).collect())
+        }
         crate::DType::F32 => Ok(cond.to_vec::<f32>()?.iter().map(|v| *v != 0.0).collect()),
         crate::DType::I64 => Ok(cond.to_vec::<i64>()?.iter().map(|v| *v != 0).collect()),
     }
@@ -1612,6 +1615,23 @@ pub fn argmax_forward(arg: &Tensor, dim: usize, keep_dims: bool) -> Result<Tenso
         }
         crate::DType::F16 => {
             let vals = arg.to_vec::<f16>()?;
+            let mut idx = Vec::with_capacity(outer * inner);
+            for o in 0..outer {
+                for j in 0..inner {
+                    let base = (o * dim_size) * inner + j;
+                    let mut best = 0;
+                    for i in 1..dim_size {
+                        if vals[base + i * inner].to_f32() > vals[base + best * inner].to_f32() {
+                            best = i;
+                        }
+                    }
+                    idx.push(best as i64);
+                }
+            }
+            Tensor::from_vec(idx, out_shape, device)
+        }
+        crate::DType::BF16 => {
+            let vals = arg.to_vec::<bf16>()?;
             let mut idx = Vec::with_capacity(outer * inner);
             for o in 0..outer {
                 for j in 0..inner {
@@ -1708,6 +1728,21 @@ pub fn topk_forward(arg: &Tensor, k: usize, dim: usize) -> Result<(Tensor, Tenso
             let as_f32: Vec<f32> = vals.iter().map(|v| v.to_f32()).collect();
             let pos = topk_positions_f32(&as_f32, outer, dim_size, inner, k);
             let values: Vec<f16> = pos.iter().map(|&p| vals[p]).collect();
+            let mut idx = Vec::with_capacity(pos.len());
+            for &p in &pos {
+                let in_slice = p % (dim_size * inner);
+                idx.push((in_slice / inner) as i64);
+            }
+            Ok((
+                Tensor::from_vec(values, out_shape.clone(), device),
+                Tensor::from_vec(idx, out_shape, device),
+            ))
+        }
+        crate::DType::BF16 => {
+            let vals = arg.to_vec::<bf16>()?;
+            let as_f32: Vec<f32> = vals.iter().map(|v| v.to_f32()).collect();
+            let pos = topk_positions_f32(&as_f32, outer, dim_size, inner, k);
+            let values: Vec<bf16> = pos.iter().map(|&p| vals[p]).collect();
             let mut idx = Vec::with_capacity(pos.len());
             for &p in &pos {
                 let in_slice = p % (dim_size * inner);
@@ -1819,6 +1854,39 @@ pub fn sort_forward(arg: &Tensor, dim: usize, descending: bool) -> Result<(Tenso
                 Tensor::from_vec(idx, shape, device),
             ))
         }
+        crate::DType::BF16 => {
+            let vals = arg.to_vec::<bf16>()?;
+            let as_f32: Vec<f32> = vals.iter().map(|v| v.to_f32()).collect();
+            let mut values = vec![bf16::ZERO; vals.len()];
+            let mut idx = vec![0i64; vals.len()];
+            for o in 0..outer {
+                for j in 0..inner {
+                    let base = (o * dim_size) * inner + j;
+                    let mut order: Vec<usize> = (0..dim_size).collect();
+                    if descending {
+                        order.sort_by(|&a, &b| {
+                            as_f32[base + b * inner]
+                                .partial_cmp(&as_f32[base + a * inner])
+                                .unwrap_or(Ordering::Greater)
+                        });
+                    } else {
+                        order.sort_by(|&a, &b| {
+                            as_f32[base + a * inner]
+                                .partial_cmp(&as_f32[base + b * inner])
+                                .unwrap_or(Ordering::Greater)
+                        });
+                    }
+                    for (rank, &i) in order.iter().enumerate() {
+                        values[base + rank * inner] = vals[base + i * inner];
+                        idx[base + rank * inner] = i as i64;
+                    }
+                }
+            }
+            Ok((
+                Tensor::from_vec(values, shape.clone(), device),
+                Tensor::from_vec(idx, shape, device),
+            ))
+        }
         crate::DType::I64 => {
             let vals = arg.to_vec::<i64>()?;
             let mut values = vec![0i64; vals.len()];
@@ -1888,6 +1956,17 @@ impl TensorOp for Clamp {
                     device,
                 )
             }
+            crate::DType::BF16 => {
+                let vals = self.arg.to_vec::<bf16>()?;
+                let (lo, hi) = (self.min as f32, self.max as f32);
+                Tensor::from_vec(
+                    vals.iter()
+                        .map(|v| bf16::from_f32(v.to_f32().clamp(lo, hi)))
+                        .collect::<Vec<bf16>>(),
+                    shape,
+                    device,
+                )
+            }
             crate::DType::I64 => {
                 let vals = self.arg.to_vec::<i64>()?;
                 let (lo, hi) = (self.min as i64, self.max as i64);
@@ -1928,6 +2007,23 @@ impl TensorOp for Clamp {
                                 *g
                             } else {
                                 f16::from_f32(0.0)
+                            }
+                        })
+                        .collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+            crate::DType::BF16 => {
+                let vals = self.arg.to_vec::<bf16>()?;
+                let go = out_grad.to_vec::<bf16>()?;
+                let (lo, hi) = (self.min as f32, self.max as f32);
+                let grad: Vec<bf16> =
+                    vals.iter()
+                        .zip(go.iter())
+                        .map(|(v, g)| {
+                            if v.to_f32() >= lo && v.to_f32() <= hi {
+                                *g
+                            } else {
+                                bf16::ZERO
                             }
                         })
                         .collect();
@@ -2008,6 +2104,18 @@ impl TensorOp for WhereCond {
                     device,
                 )
             }
+            crate::DType::BF16 => {
+                let t = self.on_true.to_vec::<bf16>()?;
+                let f = self.on_false.to_vec::<bf16>()?;
+                Tensor::from_vec(
+                    mask.iter()
+                        .enumerate()
+                        .map(|(i, m)| if *m { t[i] } else { f[i] })
+                        .collect::<Vec<bf16>>(),
+                    shape,
+                    device,
+                )
+            }
             crate::DType::I64 => {
                 let t = self.on_true.to_vec::<i64>()?;
                 let f = self.on_false.to_vec::<i64>()?;
@@ -2046,6 +2154,18 @@ impl TensorOp for WhereCond {
                 let gt: Vec<f16> =
                     mask.iter().enumerate().map(|(i, m)| if *m { go[i] } else { zero }).collect();
                 let gf: Vec<f16> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { zero } else { go[i] }).collect();
+                let device = self.on_true.device();
+                grads.accumulate(&self.on_true, Tensor::from_vec(gt, shape.clone(), device));
+                let device = self.on_false.device();
+                grads.accumulate(&self.on_false, Tensor::from_vec(gf, shape, device));
+            }
+            crate::DType::BF16 => {
+                let go = out_grad.to_vec::<bf16>()?;
+                let zero = bf16::ZERO;
+                let gt: Vec<bf16> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { go[i] } else { zero }).collect();
+                let gf: Vec<bf16> =
                     mask.iter().enumerate().map(|(i, m)| if *m { zero } else { go[i] }).collect();
                 let device = self.on_true.device();
                 grads.accumulate(&self.on_true, Tensor::from_vec(gt, shape.clone(), device));
@@ -2117,6 +2237,18 @@ impl TensorOp for MaskedFill {
                     device,
                 )
             }
+            crate::DType::BF16 => {
+                let vals = self.arg.to_vec::<bf16>()?;
+                let v = bf16::from_f32(self.value as f32);
+                Tensor::from_vec(
+                    vals.iter()
+                        .enumerate()
+                        .map(|(i, x)| if mask[i] { v } else { *x })
+                        .collect::<Vec<bf16>>(),
+                    shape,
+                    device,
+                )
+            }
             crate::DType::I64 => {
                 let vals = self.arg.to_vec::<i64>()?;
                 let v = self.value as i64;
@@ -2150,6 +2282,15 @@ impl TensorOp for MaskedFill {
                     .iter()
                     .enumerate()
                     .map(|(i, g)| if mask[i] { f16::from_f32(0.0) } else { *g })
+                    .collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+            crate::DType::BF16 => {
+                let go = out_grad.to_vec::<bf16>()?;
+                let grad: Vec<bf16> = go
+                    .iter()
+                    .enumerate()
+                    .map(|(i, g)| if mask[i] { bf16::ZERO } else { *g })
                     .collect();
                 grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
             }
@@ -2233,6 +2374,17 @@ impl TensorOp for Tril {
                     device,
                 )
             }
+            crate::DType::BF16 => {
+                let vals = self.arg.to_vec::<bf16>()?;
+                Tensor::from_vec(
+                    vals.iter()
+                        .enumerate()
+                        .map(|(i, v)| if mask[i] { *v } else { bf16::ZERO })
+                        .collect::<Vec<bf16>>(),
+                    shape,
+                    device,
+                )
+            }
             crate::DType::I64 => {
                 let vals = self.arg.to_vec::<i64>()?;
                 Tensor::from_vec(
@@ -2265,6 +2417,15 @@ impl TensorOp for Tril {
                     .iter()
                     .enumerate()
                     .map(|(i, g)| if mask[i] { *g } else { f16::from_f32(0.0) })
+                    .collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+            crate::DType::BF16 => {
+                let go = out_grad.to_vec::<bf16>()?;
+                let grad: Vec<bf16> = go
+                    .iter()
+                    .enumerate()
+                    .map(|(i, g)| if mask[i] { *g } else { bf16::ZERO })
                     .collect();
                 grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
             }
@@ -2327,6 +2488,17 @@ impl TensorOp for Triu {
                     device,
                 )
             }
+            crate::DType::BF16 => {
+                let vals = self.arg.to_vec::<bf16>()?;
+                Tensor::from_vec(
+                    vals.iter()
+                        .enumerate()
+                        .map(|(i, v)| if mask[i] { *v } else { bf16::ZERO })
+                        .collect::<Vec<bf16>>(),
+                    shape,
+                    device,
+                )
+            }
             crate::DType::I64 => {
                 let vals = self.arg.to_vec::<i64>()?;
                 Tensor::from_vec(
@@ -2359,6 +2531,15 @@ impl TensorOp for Triu {
                     .iter()
                     .enumerate()
                     .map(|(i, g)| if mask[i] { *g } else { f16::from_f32(0.0) })
+                    .collect();
+                grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
+            }
+            crate::DType::BF16 => {
+                let go = out_grad.to_vec::<bf16>()?;
+                let grad: Vec<bf16> = go
+                    .iter()
+                    .enumerate()
+                    .map(|(i, g)| if mask[i] { *g } else { bf16::ZERO })
                     .collect();
                 grads.accumulate(&self.arg, Tensor::from_vec(grad, shape, device));
             }

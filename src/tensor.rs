@@ -94,7 +94,7 @@ where
     f()
 }
 
-use half::f16;
+use half::{bf16, f16};
 use rand::RngExt;
 
 use crate::device::Device;
@@ -268,6 +268,11 @@ impl Tensor {
                     (0..shape.size()).map(|_| f16::from_f32(rng.random::<f32>())).collect();
                 CpuStorage::from(data).to(device)
             }
+            DType::BF16 => {
+                let data: Vec<bf16> =
+                    (0..shape.size()).map(|_| bf16::from_f32(rng.random::<f32>())).collect();
+                CpuStorage::from(data).to(device)
+            }
             DType::F32 => {
                 let data: Vec<f32> = (0..shape.size()).map(|_| rng.random()).collect();
                 CpuStorage::from(data).to(device)
@@ -291,6 +296,18 @@ impl Tensor {
                         let z =
                             (-2.0f32 * u1.ln()).sqrt() * (2.0f32 * std::f32::consts::PI * u2).cos();
                         f16::from_f32(z)
+                    })
+                    .collect();
+                CpuStorage::from(data).to(device)
+            }
+            DType::BF16 => {
+                let data: Vec<bf16> = (0..shape.size())
+                    .map(|_| {
+                        let u1: f32 = rng.random();
+                        let u2: f32 = rng.random();
+                        let z =
+                            (-2.0f32 * u1.ln()).sqrt() * (2.0f32 * std::f32::consts::PI * u2).cos();
+                        bf16::from_f32(z)
                     })
                     .collect();
                 CpuStorage::from(data).to(device)
@@ -324,6 +341,7 @@ impl Tensor {
         let shape: Vec<usize> = self.layout().shape().iter().copied().collect();
         let out = match self.dtype() {
             DType::F16 => Tensor::from_vec(self.to_vec::<f16>()?, shape, device),
+            DType::BF16 => Tensor::from_vec(self.to_vec::<bf16>()?, shape, device),
             DType::F32 => Tensor::from_vec(self.to_vec::<f32>()?, shape, device),
             DType::I64 => Tensor::from_vec(self.to_vec::<i64>()?, shape, device),
         };
@@ -654,6 +672,9 @@ impl PartialEq for Tensor {
             && match (self.dtype(), other.dtype()) {
                 (DType::F16, DType::F16) => {
                     self.to_vec::<f16>().unwrap() == other.to_vec::<f16>().unwrap()
+                }
+                (DType::BF16, DType::BF16) => {
+                    self.to_vec::<bf16>().unwrap() == other.to_vec::<bf16>().unwrap()
                 }
                 (DType::F32, DType::F32) => {
                     self.to_vec::<f32>().unwrap() == other.to_vec::<f32>().unwrap()

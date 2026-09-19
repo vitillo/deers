@@ -7,7 +7,7 @@
 //! key/value memory by the group size while keeping one distinct query
 //! per head.
 
-use half::f16;
+use half::{bf16, f16};
 
 use crate::error::Result;
 use crate::nn::{Embedding, Linear, Module, ParamBuilder, Parameter, RMSNorm, functional};
@@ -148,6 +148,13 @@ pub fn precompute_rotary_embeddings_scaled(
         DType::F32 => {
             let cos: Vec<f32> = freqs.iter().map(|&x| x.cos() * attention_factor).collect();
             let sin: Vec<f32> = freqs.iter().map(|&x| x.sin() * attention_factor).collect();
+            (Tensor::from_vec(cos, shape.clone(), device), Tensor::from_vec(sin, shape, device))
+        }
+        DType::BF16 => {
+            let cos: Vec<bf16> =
+                freqs.iter().map(|&x| bf16::from_f32(x.cos() * attention_factor)).collect();
+            let sin: Vec<bf16> =
+                freqs.iter().map(|&x| bf16::from_f32(x.sin() * attention_factor)).collect();
             (Tensor::from_vec(cos, shape.clone(), device), Tensor::from_vec(sin, shape, device))
         }
         DType::I64 => panic!("RoPE requires a floating-point dtype"),

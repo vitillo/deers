@@ -2,7 +2,7 @@
 
 use std::borrow::Borrow;
 
-use half::f16;
+use half::{bf16, f16};
 
 use crate::{
     device::Device,
@@ -18,6 +18,7 @@ use super::ReduceOp;
 #[derive(Debug, Clone)]
 pub enum CpuStorage {
     F16(Vec<f16>),
+    BF16(Vec<bf16>),
     F32(Vec<f32>),
     I64(Vec<i64>),
 }
@@ -38,6 +39,7 @@ impl CpuStorage {
     pub fn len(&self) -> usize {
         match self {
             CpuStorage::F16(data) => data.len(),
+            CpuStorage::BF16(data) => data.len(),
             CpuStorage::F32(data) => data.len(),
             CpuStorage::I64(data) => data.len(),
         }
@@ -68,6 +70,15 @@ impl CpuStorage {
                     }
                 }
                 Ok(CpuStorage::F16(data))
+            }
+            DType::BF16 => {
+                let mut data = Vec::with_capacity(total_len);
+                for (storage, _) in parts {
+                    if let CpuStorage::BF16(v) = storage {
+                        data.extend_from_slice(v);
+                    }
+                }
+                Ok(CpuStorage::BF16(data))
             }
             DType::F32 => {
                 let mut data = Vec::with_capacity(total_len);
@@ -187,6 +198,12 @@ impl From<Vec<f16>> for CpuStorage {
     }
 }
 
+impl From<Vec<bf16>> for CpuStorage {
+    fn from(v: Vec<bf16>) -> Self {
+        Self::BF16(v)
+    }
+}
+
 impl From<Vec<f32>> for CpuStorage {
     fn from(v: Vec<f32>) -> Self {
         Self::F32(v)
@@ -206,6 +223,9 @@ impl BackendStorage for CpuStorage {
                 CpuStorage::F16(data) => Ok(CpuStorage::F16(
                     data.iter().map(|v| f16::from_f32(v.to_f32().powf(e as f32))).collect(),
                 )),
+                CpuStorage::BF16(data) => Ok(CpuStorage::BF16(
+                    data.iter().map(|v| bf16::from_f32(v.to_f32().powf(e as f32))).collect(),
+                )),
                 CpuStorage::F32(data) => {
                     let e = e as f32;
                     Ok(CpuStorage::F32(data.iter().map(|v| v.powf(e)).collect()))
@@ -224,6 +244,13 @@ impl BackendStorage for CpuStorage {
                 });
                 Ok(CpuStorage::F16(out))
             }
+            CpuStorage::BF16(data) => {
+                let mut out = vec![bf16::ZERO; l.size()];
+                strided_unary_op(data, l.offset, strides, &mut out, shape, |v| {
+                    bf16::from_f32(v.to_f32().powf(e as f32))
+                });
+                Ok(CpuStorage::BF16(out))
+            }
             CpuStorage::F32(data) => {
                 let e = e as f32;
                 let mut out = vec![0.0f32; l.size()];
@@ -240,6 +267,11 @@ impl BackendStorage for CpuStorage {
                 CpuStorage::F16(data) => {
                     Ok(CpuStorage::F16(data.iter().map(|v| op.f16(*v)).collect()))
                 }
+                // BF16 has no native scalar kernels: round-trip through F32,
+                // the same pattern the F16 transcendental ops use.
+                CpuStorage::BF16(data) => Ok(CpuStorage::BF16(
+                    data.iter().map(|v| bf16::from_f32(op.f32(v.to_f32()))).collect(),
+                )),
                 CpuStorage::F32(data) => {
                     Ok(CpuStorage::F32(data.iter().map(|v| op.f32(*v)).collect()))
                 }
@@ -254,6 +286,13 @@ impl BackendStorage for CpuStorage {
                 let mut out = vec![f16::from_f32(0.0); l.size()];
                 strided_unary_op(data, l.offset, strides, &mut out, shape, |v| op.f16(v));
                 Ok(CpuStorage::F16(out))
+            }
+            CpuStorage::BF16(data) => {
+                let mut out = vec![bf16::ZERO; l.size()];
+                strided_unary_op(data, l.offset, strides, &mut out, shape, |v| {
+                    bf16::from_f32(op.f32(v.to_f32()))
+                });
+                Ok(CpuStorage::BF16(out))
             }
             CpuStorage::F32(data) => {
                 let mut out = vec![0.0f32; l.size()];
@@ -274,6 +313,12 @@ impl BackendStorage for CpuStorage {
             return match (self, other) {
                 (CpuStorage::F16(a), CpuStorage::F16(b)) => Ok(CpuStorage::F16(
                     a.iter().zip(b.iter()).map(|(a, b)| O::f16(*a, *b)).collect(),
+                )),
+                (CpuStorage::BF16(a), CpuStorage::BF16(b)) => Ok(CpuStorage::BF16(
+                    a.iter()
+                        .zip(b.iter())
+                        .map(|(a, b)| bf16::from_f32(O::f32(a.to_f32(), b.to_f32())))
+                        .collect(),
                 )),
                 (CpuStorage::F32(a), CpuStorage::F32(b)) => Ok(CpuStorage::F32(
                     a.iter().zip(b.iter()).map(|(a, b)| O::f32(*a, *b)).collect(),
@@ -300,6 +345,17 @@ impl BackendStorage for CpuStorage {
                     O::f16,
                 );
                 Ok(CpuStorage::F16(out))
+            }
+            (CpuStorage::BF16(a), CpuStorage::BF16(b)) => {
+                let mut out = vec![bf16::ZERO; layout.size()];
+                strided_binary_op(
+                    StridedSlice { data: a, offset: layout.offset, strides: a_strides },
+                    StridedSlice { data: b, offset: other_layout.offset, strides: b_strides },
+                    &mut out,
+                    shape,
+                    |a: bf16, b: bf16| bf16::from_f32(O::f32(a.to_f32(), b.to_f32())),
+                );
+                Ok(CpuStorage::BF16(out))
             }
             (CpuStorage::F32(a), CpuStorage::F32(b)) => {
                 let mut out = vec![0.0f32; layout.size()];
@@ -339,6 +395,12 @@ impl BackendStorage for CpuStorage {
                     dst[i] = chunk.iter().copied().reduce(O::f16).expect("empty reduce chunk");
                 }
             }
+            (CpuStorage::BF16(src), CpuStorage::BF16(dst)) => {
+                for (i, chunk) in src.chunks(reduce_size).enumerate() {
+                    let sum = chunk.iter().map(|v| v.to_f32()).reduce(O::f32).expect("empty reduce chunk");
+                    dst[i] = bf16::from_f32(sum);
+                }
+            }
             (CpuStorage::F32(src), CpuStorage::F32(dst)) => {
                 for (i, chunk) in src.chunks(reduce_size).enumerate() {
                     dst[i] = chunk.iter().copied().reduce(O::f32).expect("empty reduce chunk");
@@ -359,6 +421,7 @@ impl BackendStorage for CpuStorage {
     fn dtype(&self) -> DType {
         match self {
             CpuStorage::F16(_) => DType::F16,
+            CpuStorage::BF16(_) => DType::BF16,
             CpuStorage::F32(_) => DType::F32,
             CpuStorage::I64(_) => DType::I64,
         }
@@ -375,6 +438,9 @@ impl BackendStorage for CpuStorage {
 
         match (self, dst) {
             (CpuStorage::F16(src), CpuStorage::F16(dst)) => {
+                copy_strided(src, dst, offset, &shape, &strides)
+            }
+            (CpuStorage::BF16(src), CpuStorage::BF16(dst)) => {
                 copy_strided(src, dst, offset, &shape, &strides)
             }
             (CpuStorage::F32(src), CpuStorage::F32(dst)) => {
@@ -450,6 +516,9 @@ impl BackendStorage for CpuStorage {
 
         match self {
             CpuStorage::F16(data) => Ok(CpuStorage::F16(gather_into(
+                data, left_len, src_dim, index_len, right_len, &indices,
+            ))),
+            CpuStorage::BF16(data) => Ok(CpuStorage::BF16(gather_into(
                 data, left_len, src_dim, index_len, right_len, &indices,
             ))),
             CpuStorage::F32(data) => Ok(CpuStorage::F32(gather_into(
@@ -539,6 +608,11 @@ impl BackendStorage for CpuStorage {
                 scatter_add_into(&mut out, data, left_len, dst_dim, index_len, right_len, &indices);
                 Ok(CpuStorage::F16(out))
             }
+            CpuStorage::BF16(data) => {
+                let mut out = vec![bf16::ZERO; dst_shape.iter().product()];
+                scatter_add_into(&mut out, data, left_len, dst_dim, index_len, right_len, &indices);
+                Ok(CpuStorage::BF16(out))
+            }
             CpuStorage::F32(data) => {
                 let mut out = vec![0.0f32; dst_shape.iter().product()];
                 scatter_add_into(&mut out, data, left_len, dst_dim, index_len, right_len, &indices);
@@ -599,6 +673,9 @@ impl BackendStorage for CpuStorage {
         match self {
             CpuStorage::F16(data) => {
                 Ok(CpuStorage::F16(index_select_into(data, left_len, src_dim, right_len, &indices)))
+            }
+            CpuStorage::BF16(data) => {
+                Ok(CpuStorage::BF16(index_select_into(data, left_len, src_dim, right_len, &indices)))
             }
             CpuStorage::F32(data) => {
                 Ok(CpuStorage::F32(index_select_into(data, left_len, src_dim, right_len, &indices)))
@@ -672,6 +749,11 @@ impl BackendStorage for CpuStorage {
                 index_add_into(&mut out, data, left_len, dst_dim, right_len, &indices);
                 Ok(CpuStorage::F16(out))
             }
+            CpuStorage::BF16(data) => {
+                let mut out = vec![bf16::ZERO; dst_shape.iter().product()];
+                index_add_into(&mut out, data, left_len, dst_dim, right_len, &indices);
+                Ok(CpuStorage::BF16(out))
+            }
             CpuStorage::F32(data) => {
                 let mut out = vec![0.0f32; dst_shape.iter().product()];
                 index_add_into(&mut out, data, left_len, dst_dim, right_len, &indices);
@@ -725,6 +807,17 @@ impl BackendStorage for CpuStorage {
                     );
                 }
                 Ok(CpuStorage::F16(out))
+            }
+            // No native BF16 GEMM: accumulate in F32 and round once on the way back.
+            (CpuStorage::BF16(left), CpuStorage::BF16(right)) => {
+                let left_f32: Vec<f32> = left.iter().map(|v| v.to_f32()).collect();
+                let right_f32: Vec<f32> = right.iter().map(|v| v.to_f32()).collect();
+                let out = CpuStorage::F32(left_f32)
+                    .matmul(layout, &CpuStorage::F32(right_f32), layout_other)?;
+                let CpuStorage::F32(out) = out else {
+                    unreachable!("F32 matmul returns F32 storage")
+                };
+                Ok(CpuStorage::BF16(out.into_iter().map(bf16::from_f32).collect()))
             }
             (CpuStorage::F32(left), CpuStorage::F32(right)) => {
                 let mut out = vec![0.0f32; batch * m * n];
@@ -786,6 +879,23 @@ impl BackendStorage for CpuStorage {
                     .collect();
                 Ok(CpuStorage::F16(out))
             }
+            CpuStorage::BF16(data) => {
+                let data = &data[layout.offset..];
+                let out: Vec<bf16> = (0..outer_size)
+                    .map(|row| {
+                        let start = row * reduce_size;
+                        let slice = &data[start..start + reduce_size];
+                        let max = slice
+                            .iter()
+                            .copied()
+                            .map(|v| v.to_f32())
+                            .fold(f32::NEG_INFINITY, f32::max);
+                        let sum: f32 = slice.iter().map(|v| (v.to_f32() - max).exp()).sum();
+                        bf16::from_f32(sum.ln() + max)
+                    })
+                    .collect();
+                Ok(CpuStorage::BF16(out))
+            }
             _ => Err(Error::DTypeMismatch("log_sum_exp: unsupported dtype".into())),
         }
     }
@@ -827,6 +937,20 @@ impl BackendStorage for CpuStorage {
                     })
                     .collect();
                 Ok(CpuStorage::F16(out))
+            }
+            CpuStorage::BF16(data) => {
+                let data = &data[layout.offset..];
+                let out: Vec<bf16> = (0..outer_size)
+                    .flat_map(|row| {
+                        let start = row * inner_size;
+                        let slice = &data[start..start + inner_size];
+                        let max = slice.iter().map(|v| v.to_f32()).fold(f32::NEG_INFINITY, f32::max);
+                        let sum: f32 = slice.iter().map(|v| (v.to_f32() - max).exp()).sum();
+                        let lse = sum.ln() + max;
+                        slice.iter().map(move |v| bf16::from_f32(v.to_f32() - lse))
+                    })
+                    .collect();
+                Ok(CpuStorage::BF16(out))
             }
             _ => Err(crate::error::Error::DTypeMismatch("log_softmax_fwd: unsupported dtype".into())),
         }
@@ -880,6 +1004,25 @@ impl BackendStorage for CpuStorage {
                     })
                     .collect();
                 Ok(CpuStorage::F16(out))
+            }
+            (CpuStorage::BF16(grad), CpuStorage::BF16(lsm_data)) => {
+                let grad = &grad[grad_layout.offset..];
+                let lsm_data = &lsm_data[lsm_layout.offset..];
+                let out: Vec<bf16> = (0..outer_size)
+                    .flat_map(|row| {
+                        let start = row * inner_size;
+                        let g_row = &grad[start..start + inner_size];
+                        let l_row = &lsm_data[start..start + inner_size];
+                        let sum_grad: f32 = g_row.iter().map(|v| v.to_f32()).sum();
+                        g_row
+                            .iter()
+                            .zip(l_row.iter())
+                            .map(move |(&g, &l)| {
+                                bf16::from_f32(g.to_f32() - l.to_f32().exp() * sum_grad)
+                            })
+                    })
+                    .collect();
+                Ok(CpuStorage::BF16(out))
             }
             _ => Err(crate::error::Error::DTypeMismatch(
                 "log_softmax_bwd: dtype mismatch".into(),

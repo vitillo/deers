@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use half::f16;
+use half::{bf16, f16};
 use safetensors::tensor::View;
 use safetensors::{Dtype as SafeDtype, SafeTensors, serialize_to_file};
 
@@ -74,6 +74,16 @@ fn read_tensor(tensors: &SafeTensors<'_>, name: &str, device: Device) -> Result<
                 .collect::<Vec<_>>();
             Tensor::from_vec(values, shape, device)
         }
+        SafeDtype::BF16 => {
+            let values = view
+                .data()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|chunk| bf16::from_bits(u16::from_le_bytes(*chunk)))
+                .collect::<Vec<_>>();
+            Tensor::from_vec(values, shape, device)
+        }
         SafeDtype::F32 => {
             let values = view
                 .data()
@@ -113,6 +123,14 @@ fn tensor_blob(tensor: &Tensor) -> Result<TensorBlob> {
                 .flat_map(|v| v.to_bits().to_le_bytes())
                 .collect();
             TensorBlob { dtype: SafeDtype::F16, shape, data }
+        }
+        DType::BF16 => {
+            let data = tensor
+                .to_vec::<bf16>()?
+                .iter()
+                .flat_map(|v| v.to_bits().to_le_bytes())
+                .collect();
+            TensorBlob { dtype: SafeDtype::BF16, shape, data }
         }
         DType::F32 => {
             let data = tensor
