@@ -34,9 +34,9 @@ fn candle_rotate(x: &CTensor, cos: &CTensor, sin: &CTensor) -> CTensor {
     let half_dim = head_dim / 2;
     let x1 = x.narrow(D::Minus1, 0, half_dim).unwrap();
     let x2 = x.narrow(D::Minus1, half_dim, half_dim).unwrap();
-    let y1 = x1.broadcast_mul(cos).unwrap().broadcast_add(&x2.broadcast_mul(sin).unwrap()).unwrap();
+    let y1 = x1.broadcast_mul(cos).unwrap().broadcast_sub(&x2.broadcast_mul(sin).unwrap()).unwrap();
     let y2 = x1
-        .broadcast_mul(&sin.neg().unwrap())
+        .broadcast_mul(sin)
         .unwrap()
         .broadcast_add(&x2.broadcast_mul(cos).unwrap())
         .unwrap();

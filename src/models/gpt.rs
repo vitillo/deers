@@ -184,10 +184,12 @@ pub fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
         "RoPE cache must match sequence length"
     );
 
+    // Hugging Face `rotate_half` direction, matching candle's `rotary_emb`:
+    // y1 = x1*cos - x2*sin, y2 = x1*sin + x2*cos.
     let x1 = x.narrow(3, 0, half_dim);
     let x2 = x.narrow(3, half_dim, half_dim);
-    let y1 = &x1 * cos + &x2 * sin;
-    let y2 = &x1 * &(sin * -1.0) + &x2 * cos;
+    let y1 = &x1 * cos - &x2 * sin;
+    let y2 = &x1 * sin + &x2 * cos;
     Tensor::cat(&[y1, y2], 3)
 }
 
