@@ -59,12 +59,54 @@ impl ParamStore {
     }
 
     /// Loads parameter values from a safetensors checkpoint onto `device`.
+    ///
+    /// Names, counts, shapes, and dtypes must match the registered parameters.
+    /// Every mismatch fails loudly with the file and tensor named.
     pub fn load(&self, path: &Path, device: Device) -> Result<()> {
         let loaded = checkpoint::load_tensors(path, device)?;
+        let origins = loaded
+            .keys()
+            .map(|name| (name.clone(), path.to_path_buf()))
+            .collect::<BTreeMap<_, _>>();
+        self.assign(loaded, &origins, &path.display().to_string())
+    }
+
+    /// Loads parameter values from a sharded checkpoint directory onto `device`.
+    ///
+    /// Shard files resolve through [`checkpoint::discover_shard_files`] and
+    /// Qwen3 tensor names map onto deers names. Validation matches [`load`].
+    pub fn load_sharded(&self, dir: &Path, device: Device) -> Result<()> {
+        let (loaded, origins) = checkpoint::load_sharded_tracked(dir, device)?;
+        self.assign(loaded, &origins, &dir.display().to_string())
+    }
+
+    /// Assigns loaded tensors to the registered parameters after validation.
+    ///
+    /// Unexpected names fail first so a stray tensor cannot hide behind the
+    /// count check. Counts, missing names, dtypes, and shapes follow in order.
+    /// `origins` maps each tensor to the shard file it came from. `source`
+    /// names the checkpoint file or directory for count-level errors.
+    fn assign(
+        &self,
+        loaded: BTreeMap<String, Tensor>,
+        origins: &BTreeMap<String, std::path::PathBuf>,
+        source: &str,
+    ) -> Result<()> {
         let params = self.params.borrow();
+        for name in loaded.keys() {
+            if !params.contains_key(name) {
+                let file = origins
+                    .get(name)
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| source.to_owned());
+                return Err(crate::error::Error::Checkpoint(format!(
+                    "unexpected tensor '{name}' in '{file}': no matching parameter"
+                )));
+            }
+        }
         if loaded.len() != params.len() {
             return Err(crate::error::Error::Checkpoint(format!(
-                "checkpoint tensor count mismatch: expected {}, found {}",
+                "checkpoint tensor count mismatch: expected {}, found {} in '{source}'",
                 params.len(),
                 loaded.len()
             )));
@@ -72,8 +114,26 @@ impl ParamStore {
 
         for (name, parameter) in params.iter() {
             let tensor = loaded.get(name).ok_or_else(|| {
-                crate::error::Error::Checkpoint(format!("missing parameter in checkpoint: {name}"))
+                crate::error::Error::Checkpoint(format!("missing parameter '{name}' in '{source}'"))
             })?;
+            let file = origins
+                .get(name)
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| source.to_owned());
+            if tensor.dtype() != parameter.dtype() {
+                return Err(crate::error::Error::Checkpoint(format!(
+                    "dtype mismatch for tensor '{name}' in '{file}': expected {}, found {}",
+                    parameter.dtype(),
+                    tensor.dtype()
+                )));
+            }
+            if tensor.layout().shape() != parameter.layout().shape() {
+                return Err(crate::error::Error::Checkpoint(format!(
+                    "shape mismatch for tensor '{name}' in '{file}': expected {}, found {}",
+                    parameter.layout().shape(),
+                    tensor.layout().shape()
+                )));
+            }
             parameter.set(tensor)?;
         }
 
@@ -576,10 +636,36 @@ pub fn seq() -> Sequential {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
+    use std::path::{Path, PathBuf};
 
-    use super::{Linear, Module, ParamStore};
+    use super::{Embedding, Linear, Module, ParamStore};
+    use crate::checkpoint::save_tensors;
     use crate::{Device, Tensor};
+
+    fn sharded_case(case: &str) -> (ParamStore, PathBuf) {
+        let store = ParamStore::new();
+        let root = store.root();
+        let _wte = Embedding::new(root.pp("wte"), 4, 2);
+        let _lm_head = Linear::no_bias(root.pp("lm_head"), 2, 3);
+        let dir =
+            std::env::temp_dir().join(format!("deers-param-sharded-{case}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        (store, dir)
+    }
+
+    fn write_shard(dir: &Path, filename: &str, tensors: &BTreeMap<String, Tensor>) {
+        save_tensors(&dir.join(filename), tensors).unwrap();
+    }
+
+    fn write_index(dir: &Path, entries: &[(&str, &str)]) {
+        let weight_map: BTreeMap<&str, &str> = entries.iter().copied().collect();
+        let index = serde_json::json!({"metadata": {"total_size": 0}, "weight_map": weight_map});
+        fs::write(dir.join("model.safetensors.index.json"), serde_json::to_vec(&index).unwrap())
+            .unwrap();
+    }
 
     #[test]
     fn test_param_store_registers_hierarchical_names() {
@@ -625,5 +711,172 @@ mod tests {
         assert_ne!(restored, original);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_param_store_load_sharded_maps_qwen_names() {
+        // Arrange: Qwen3 names split across two indexed shards.
+        let (store, dir) = sharded_case("mapped");
+        let mut first = BTreeMap::new();
+        first.insert(
+            "model.embed_tokens.weight".to_owned(),
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], (4, 2), Device::Cpu),
+        );
+        let mut second = BTreeMap::new();
+        second.insert(
+            "lm_head.weight".to_owned(),
+            Tensor::from_vec(vec![9.0f32, 10.0, 11.0, 12.0, 13.0, 14.0], (2, 3), Device::Cpu),
+        );
+        write_shard(&dir, "model-00001-of-00002.safetensors", &first);
+        write_shard(&dir, "model-00002-of-00002.safetensors", &second);
+        write_index(
+            &dir,
+            &[
+                ("model.embed_tokens.weight", "model-00001-of-00002.safetensors"),
+                ("lm_head.weight", "model-00002-of-00002.safetensors"),
+            ],
+        );
+
+        // Act
+        store.load_sharded(&dir, Device::Cpu).unwrap();
+
+        // Assert: values land on the deers-named parameters on the CPU.
+        let params: BTreeMap<_, _> = store.named_parameters().into_iter().collect();
+        assert_eq!(
+            params["wte.weight"].to_vec::<f32>().unwrap(),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        );
+        assert_eq!(
+            params["lm_head.weight"].to_vec::<f32>().unwrap(),
+            vec![9.0, 10.0, 11.0, 12.0, 13.0, 14.0]
+        );
+        assert_eq!(params["wte.weight"].device(), Device::Cpu);
+        assert_eq!(params["lm_head.weight"].device(), Device::Cpu);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_param_store_load_sharded_rejects_unexpected_name() {
+        // Arrange: a Qwen-only tensor with no deers counterpart next to a
+        // valid shard.
+        let (store, dir) = sharded_case("unexpected");
+        let mut first = BTreeMap::new();
+        first.insert(
+            "model.embed_tokens.weight".to_owned(),
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], (4, 2), Device::Cpu),
+        );
+        let mut second = BTreeMap::new();
+        second.insert(
+            "model.layers.0.mlp.gate_proj.weight".to_owned(),
+            Tensor::from_vec(vec![1.0f32, 2.0], (1, 2), Device::Cpu),
+        );
+        write_shard(&dir, "a.safetensors", &first);
+        write_shard(&dir, "b.safetensors", &second);
+
+        // Act
+        let error = store.load_sharded(&dir, Device::Cpu).unwrap_err().to_string();
+
+        // Assert
+        assert_eq!(
+            error,
+            format!(
+                "unexpected tensor 'model.layers.0.mlp.gate_proj.weight' in '{}': no matching parameter",
+                dir.join("b.safetensors").display()
+            )
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_param_store_load_sharded_rejects_count_mismatch() {
+        // Arrange: one shard while the store holds two parameters.
+        let (store, dir) = sharded_case("count");
+        let mut tensors = BTreeMap::new();
+        tensors.insert(
+            "model.embed_tokens.weight".to_owned(),
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], (4, 2), Device::Cpu),
+        );
+        write_shard(&dir, "model.safetensors", &tensors);
+
+        // Act
+        let error = store.load_sharded(&dir, Device::Cpu).unwrap_err().to_string();
+
+        // Assert
+        assert_eq!(
+            error,
+            format!("checkpoint tensor count mismatch: expected 2, found 1 in '{}'", dir.display())
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_param_store_load_sharded_rejects_shape_mismatch() {
+        // Arrange: the embedding shard carries the wrong second dimension.
+        let (store, dir) = sharded_case("shape");
+        let mut first = BTreeMap::new();
+        first.insert(
+            "model.embed_tokens.weight".to_owned(),
+            Tensor::from_vec(
+                vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                (4, 3),
+                Device::Cpu,
+            ),
+        );
+        let mut second = BTreeMap::new();
+        second.insert(
+            "lm_head.weight".to_owned(),
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu),
+        );
+        write_shard(&dir, "a.safetensors", &first);
+        write_shard(&dir, "b.safetensors", &second);
+
+        // Act
+        let error = store.load_sharded(&dir, Device::Cpu).unwrap_err().to_string();
+
+        // Assert
+        assert_eq!(
+            error,
+            format!(
+                "shape mismatch for tensor 'wte.weight' in '{}': expected [4, 2], found [4, 3]",
+                dir.join("a.safetensors").display()
+            )
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_param_store_load_sharded_rejects_dtype_mismatch() {
+        // Arrange: the embedding shard stores BF16 while the parameter is F32.
+        let (store, dir) = sharded_case("dtype");
+        let mut first = BTreeMap::new();
+        first.insert(
+            "model.embed_tokens.weight".to_owned(),
+            Tensor::from_vec(vec![half::bf16::from_f32(1.0); 8], (4, 2), Device::Cpu),
+        );
+        let mut second = BTreeMap::new();
+        second.insert(
+            "lm_head.weight".to_owned(),
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu),
+        );
+        write_shard(&dir, "a.safetensors", &first);
+        write_shard(&dir, "b.safetensors", &second);
+
+        // Act
+        let error = store.load_sharded(&dir, Device::Cpu).unwrap_err().to_string();
+
+        // Assert
+        assert_eq!(
+            error,
+            format!(
+                "dtype mismatch for tensor 'wte.weight' in '{}': expected f32, found bf16",
+                dir.join("a.safetensors").display()
+            )
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
