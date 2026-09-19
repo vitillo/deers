@@ -10,7 +10,9 @@
 use half::{bf16, f16};
 
 use crate::error::Result;
-use crate::nn::{Embedding, Linear, Module, ParamBuilder, Parameter, RMSNorm, functional};
+use crate::nn::{
+    Embedding, Linear, Module, ParamBuilder, Parameter, RMSNorm, SwiGLU, functional,
+};
 use crate::tensor::Tensor;
 use crate::{DType, Device};
 
@@ -280,6 +282,7 @@ impl KvCache {
 /// each head at unit RMS, so scores stay bounded and training stays stable at scale.
 #[derive(Debug)]
 pub struct CausalSelfAttention {
+    n_embd: usize,
     n_q_heads: usize,
     n_kv_heads: usize,
     group_size: usize,
@@ -308,17 +311,36 @@ impl CausalSelfAttention {
         n_kv_heads: usize,
     ) -> Self {
         assert!(n_embd.is_multiple_of(n_q_heads), "n_embd must be divisible by n_q_heads");
-        assert!(n_q_heads.is_multiple_of(n_kv_heads), "n_q_heads must be divisible by n_kv_heads");
-        let head_dim = n_embd / n_q_heads;
+        Self::new_gqa_with_head_dim(builder, n_embd, n_q_heads, n_kv_heads, n_embd / n_q_heads)
+    }
+
+    /// Creates causal self-attention with an explicit per-head width.
+    ///
+    /// Qwen3 decouples the head width from the residual width: the query
+    /// projection spans `n_q_heads * head_dim` channels while the residual
+    /// stays `n_embd` wide. Pass `head_dim == n_embd / n_q_heads` for the
+    /// tied-width layout that [`new_gqa`](Self::new_gqa) builds.
+    pub fn new_gqa_with_head_dim(
+        builder: ParamBuilder,
+        n_embd: usize,
+        n_q_heads: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+    ) -> Self {
+        assert!(
+            n_q_heads.is_multiple_of(n_kv_heads),
+            "n_q_heads must be divisible by n_kv_heads"
+        );
         Self {
+            n_embd,
             n_q_heads,
             n_kv_heads,
             group_size: n_q_heads / n_kv_heads,
             head_dim,
-            q_proj: Linear::no_bias(builder.pp("q_proj"), n_embd, n_embd),
+            q_proj: Linear::no_bias(builder.pp("q_proj"), n_embd, n_q_heads * head_dim),
             k_proj: Linear::no_bias(builder.pp("k_proj"), n_embd, n_kv_heads * head_dim),
             v_proj: Linear::no_bias(builder.pp("v_proj"), n_embd, n_kv_heads * head_dim),
-            out_proj: Linear::no_bias(builder.pp("out_proj"), n_embd, n_embd),
+            out_proj: Linear::no_bias(builder.pp("out_proj"), n_q_heads * head_dim, n_embd),
             q_norm: RMSNorm::new_affine(builder.pp("q_norm"), head_dim, QK_NORM_EPS),
             k_norm: RMSNorm::new_affine(builder.pp("k_norm"), head_dim, QK_NORM_EPS),
         }
@@ -342,9 +364,8 @@ impl CausalSelfAttention {
         let seq_len = shape[1];
         let channels = shape[2];
         assert_eq!(
-            channels,
-            self.n_q_heads * self.head_dim,
-            "input channel size must match attention width"
+            channels, self.n_embd,
+            "input channel size must match the residual width"
         );
 
         let x_flat = x.reshape(vec![batch_size * seq_len, channels]); // [B*T, C]
@@ -546,6 +567,79 @@ impl Block {
     /// Returns the trainable parameters owned by the block.
     pub fn parameters(&self) -> Vec<Parameter> {
         let mut parameters = self.attn.parameters();
+        parameters.extend(self.mlp.parameters());
+        parameters
+    }
+
+    /// Moves the block parameters to `device`.
+    pub fn to_device(&self, device: Device) -> Result<()> {
+        for parameter in self.parameters() {
+            parameter.to_device(device)?;
+        }
+        Ok(())
+    }
+}
+
+/// Pre-norm residual decoder block at Qwen3 dims: affine RMSNorms around
+/// grouped-query attention with QK-Norm and RoPE plus a SwiGLU feed-forward.
+///
+/// The residual stream stays `hidden` wide while attention heads run at an
+/// explicit `head_dim`, so Qwen3-0.6B layouts (hidden 1024, 16 query heads
+/// over 8 key/value heads at width 128, MLP width 3072) compose from the
+/// landed primitives without touching them.
+#[derive(Debug)]
+pub struct Qwen3Block {
+    input_layernorm: RMSNorm,
+    attn: CausalSelfAttention,
+    post_attention_layernorm: RMSNorm,
+    mlp: SwiGLU,
+}
+
+impl Qwen3Block {
+    /// Creates a Qwen3 decoder block whose weights register under `builder`.
+    pub fn new(
+        builder: ParamBuilder,
+        hidden: usize,
+        n_q_heads: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        mlp_hidden_dim: usize,
+        eps: f64,
+    ) -> Self {
+        Self {
+            input_layernorm: RMSNorm::new_affine(
+                builder.pp("input_layernorm"),
+                hidden,
+                eps,
+            ),
+            attn: CausalSelfAttention::new_gqa_with_head_dim(
+                builder.pp("attn"),
+                hidden,
+                n_q_heads,
+                n_kv_heads,
+                head_dim,
+            ),
+            post_attention_layernorm: RMSNorm::new_affine(
+                builder.pp("post_attention_layernorm"),
+                hidden,
+                eps,
+            ),
+            mlp: SwiGLU::new(builder.pp("mlp"), hidden, mlp_hidden_dim, hidden),
+        }
+    }
+
+    /// Runs the pre-norm attention and SwiGLU residual block.
+    pub fn forward(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+        let x = x + &self.attn.forward(&self.input_layernorm.forward(x)?, cos, sin)?;
+        let y = self.mlp.forward(&self.post_attention_layernorm.forward(&x)?)?;
+        Ok(&x + &y)
+    }
+
+    /// Returns the trainable parameters owned by the block.
+    pub fn parameters(&self) -> Vec<Parameter> {
+        let mut parameters = self.input_layernorm.parameters();
+        parameters.extend(self.attn.parameters());
+        parameters.extend(self.post_attention_layernorm.parameters());
         parameters.extend(self.mlp.parameters());
         parameters
     }
