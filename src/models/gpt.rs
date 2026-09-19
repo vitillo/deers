@@ -950,13 +950,6 @@ impl Qwen3 {
             DType::F32,
             Device::Cpu,
         );
-        // Hugging Face rotates half-split queries by +theta (`rotate_half`)
-        // while deers `apply_rotary_emb` rotates by -theta. Negating the
-        // sine cache converts the convention once at the boundary, the same
-        // way the checkpoint loader transposes `[out, in]` weights, so the
-        // shared attention math stays untouched for the GPT path.
-        let sin = sin * -1.0;
-
         Self { vocab_size: config.vocab_size, embed_tokens, layers, norm, lm_head, cos, sin }
     }
 
