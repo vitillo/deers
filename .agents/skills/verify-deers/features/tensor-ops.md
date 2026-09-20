@@ -2,16 +2,17 @@
 
 ## Sub-features
 
-Element-wise ops (add, mul, relu), matmul, reductions (sum, mean, softmax), shape ops (reshape, permute, narrow).
+Element-wise ops (add, mul, relu, silu, gelu, powf, log, sqrt, exp, sin, cos), matmul, reductions (sum, mean, max, softmax, log_sum_exp), shape ops (reshape, permute, narrow, broadcast, transpose, compact), indexing (gather, index_add, topk, argmax), and the einops dialect (rearrange, reduce, repeat, einsum in `src/einops.rs`).
 
 ## How to get to it (user POV)
 
-Call `deers::Tensor` constructors and methods from Rust code. Tests live in `tests/tensor.rs`.
+Call `deers::Tensor` constructors and methods from Rust code. Tests live in `tests/tensor.rs` (113 tests) and `tests/einops.rs` (80 tests).
 
 ## Driving it with cargo test
 
 ```sh
 cargo test --locked tensor 2>&1 | tail -20
+cargo test --locked --test einops 2>&1 | tail -20
 ```
 
 Proof is exit code 0 plus passing forward and backward candle parity

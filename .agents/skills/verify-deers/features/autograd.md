@@ -2,11 +2,11 @@
 
 ## Sub-features
 
-Forward graph construction, `.backward()`, gradient accumulation, `.attach()` and `Var`.
+Forward graph construction, `.backward()`, gradient accumulation, `.attach()`, `nn::Parameter`, and the `no_grad` scope / `NoGradGuard`. (`Var` is candle's handle in parity tests, not a deers type.)
 
 ## How to get to it (user POV)
 
-Build ops on a Tensor, call `.backward()`, read grads from the `GradientStore`.
+Build ops on an attached Tensor, call `.backward()`, read grads from the `GradientStore`. `Parameter::new` attaches for you. Tests live in `tests/tensor.rs` (`*_backward_conforms`), `tests/einops.rs` (`*_gradients_*`), and `tests/no_grad.rs`.
 
 ## Driving it with cargo test
 
