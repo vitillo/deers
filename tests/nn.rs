@@ -1,6 +1,7 @@
 use deers::nn::{self, Module};
 use deers::optim::SGD;
 use deers::{DType, Device, Tensor};
+use half::{bf16, f16};
 
 fn root() -> nn::ParamBuilder {
     nn::ParamStore::new().root()
@@ -188,6 +189,90 @@ fn test_rms_norm_normalizes() {
 fn test_rms_norm_parameters() {
     let norm = nn::RMSNorm::new(1e-5);
     assert!(norm.parameters().is_empty());
+}
+
+#[test]
+fn test_rms_norm_f16_massive_activations_match_f32_reference() {
+    // Arrange: F16 tops out at 65504, so these squares overflow a direct
+    // low-precision variance to infinity. The f64 reference is exact.
+    let values = [500.0f32, 1000.0, 1500.0, 2000.0];
+    let mean_sq =
+        values.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>() / values.len() as f64;
+    let rms = (mean_sq + 1e-5).sqrt();
+    let expected: Vec<f32> = values.iter().map(|v| (f64::from(*v) / rms) as f32).collect();
+    let devices: Vec<Device> =
+        [Device::Cpu, Device::Cuda].into_iter().filter(|device| device.is_available()).collect();
+    assert!(!devices.is_empty(), "needs at least the CPU backend");
+
+    for device in devices {
+        // Act
+        let norm = nn::RMSNorm::new(1e-5);
+        let x = Tensor::from_vec(
+            values.iter().map(|&v| f16::from_f32(v)).collect::<Vec<_>>(),
+            (1, 4),
+            device,
+        );
+        let out = norm.forward(&x).unwrap();
+
+        // Assert: F32-accumulated variance with the requested F16 dtype back.
+        assert_eq!(out.dtype(), DType::F16);
+        let actual: Vec<f32> = out.to_vec::<f16>().unwrap().iter().map(|v| v.to_f32()).collect();
+        assert!(actual.iter().all(|v| v.is_finite()));
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            assert!((a - e).abs() < 1e-2, "expected {e}, got {a}");
+        }
+    }
+}
+
+#[test]
+fn test_rms_norm_bf16_matches_f32_reference() {
+    // Arrange
+    let values = [0.5f32, -1.25, 2.0, 4.0];
+    let mean_sq = values.iter().map(|v| v * v).sum::<f32>() / values.len() as f32;
+    let rms = (mean_sq + 1e-5).sqrt();
+    let expected: Vec<f32> = values.iter().map(|v| v / rms).collect();
+    let devices: Vec<Device> =
+        [Device::Cpu, Device::Cuda].into_iter().filter(|device| device.is_available()).collect();
+    assert!(!devices.is_empty(), "needs at least the CPU backend");
+
+    for device in devices {
+        // Act
+        let norm = nn::RMSNorm::new(1e-5);
+        let x = Tensor::from_vec(
+            values.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+            (1, 4),
+            device,
+        );
+        let out = norm.forward(&x).unwrap();
+
+        // Assert: F32-accumulated variance with the requested BF16 dtype back.
+        assert_eq!(out.dtype(), DType::BF16);
+        let actual: Vec<f32> = out.to_vec::<bf16>().unwrap().iter().map(|v| v.to_f32()).collect();
+        assert!(actual.iter().all(|v| v.is_finite()));
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            assert!((a - e).abs() < 1e-2, "expected {e}, got {a}");
+        }
+    }
+}
+
+#[test]
+fn test_rms_norm_f16_backward_reaches_input() {
+    // Arrange: an overflowing-scale input that only flows through the F32 path.
+    let x =
+        Tensor::from_vec(vec![f16::from_f32(500.0), f16::from_f32(1000.0)], (1, 2), Device::Cpu)
+            .attach();
+    let norm = nn::RMSNorm::new(1e-5);
+
+    // Act
+    let loss = norm.forward(&x).unwrap().sum(vec![0, 1], false);
+    let grads = loss.backward().unwrap();
+
+    // Assert: the input carries a finite nonzero gradient in its own dtype.
+    let grad = grads.get(x.id()).expect("input must carry a gradient");
+    assert_eq!(grad.dtype(), DType::F16);
+    let values: Vec<f32> = grad.to_vec::<f16>().unwrap().iter().map(|v| v.to_f32()).collect();
+    assert!(values.iter().all(|v| v.is_finite()));
+    assert!(values.iter().any(|&v| v != 0.0));
 }
 
 #[test]

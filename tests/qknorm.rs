@@ -4,6 +4,9 @@ use deers::{DType, Device, Tensor};
 
 const QK_EPS: f64 = 1e-6;
 
+const CPU_TOL: f32 = 1e-4;
+const MPS_TOL: f32 = 2e-3;
+
 fn devices() -> Vec<Device> {
     [Device::Cpu, Device::Cuda, Device::Mps]
         .into_iter()
@@ -23,6 +26,15 @@ fn assert_close(actual: &[f32], expected: &[f32], tol: f32) {
     assert_eq!(actual.len(), expected.len(), "length mismatch");
     for (index, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
         assert!((a - e).abs() < tol, "[{index}]: got {a}, expected {e}");
+    }
+}
+
+/// Accelerator kernels reorder floating-point summation, so cross-backend
+/// goldens compare within tolerance: exact on CPU, looser on accelerators.
+fn tol_for(device: Device) -> f32 {
+    match device {
+        Device::Cpu => CPU_TOL,
+        _ => MPS_TOL,
     }
 }
 
@@ -106,14 +118,15 @@ fn qk_norm_matches_manual_reference() {
 
         // Act
         let actual = values(&attn.forward(&x, &cos, &sin).unwrap());
-        let expected =
-            values(&manual_mha_forward(&x, &q_w, &k_w, &v_w, &out_w, &qn_w, &kn_w, n_q_heads, &cos, &sin));
+        let expected = values(&manual_mha_forward(
+            &x, &q_w, &k_w, &v_w, &out_w, &qn_w, &kn_w, n_q_heads, &cos, &sin,
+        ));
 
         // Assert
         assert_eq!(actual, expected);
-        assert_eq!(
-            actual[..8].to_vec(),
-            vec![
+        assert_close(
+            &actual[..8],
+            &[
                 -0.043250006,
                 -0.030375006,
                 -0.025625005,
@@ -121,8 +134,9 @@ fn qk_norm_matches_manual_reference() {
                 -0.016124997,
                 -0.0129999975,
                 -0.00012499644,
-                0.037125003
-            ]
+                0.037125003,
+            ],
+            tol_for(device),
         );
     }
 }
@@ -178,9 +192,9 @@ fn grouped_qk_norm_matches_plain_reference() {
 
         // Assert
         assert_eq!(grouped_out, plain_out);
-        assert_eq!(
-            grouped_out[..8].to_vec(),
-            vec![
+        assert_close(
+            &grouped_out[..8],
+            &[
                 0.018874997,
                 0.039125003,
                 -0.005625005,
@@ -188,8 +202,9 @@ fn grouped_qk_norm_matches_plain_reference() {
                 0.0023749953,
                 -0.042375006,
                 -0.022125002,
-                -0.03437501
-            ]
+                -0.03437501,
+            ],
+            tol_for(device),
         );
     }
 }
@@ -226,9 +241,9 @@ fn qk_scale_leaves_output_unchanged() {
 
         // Assert
         assert_close(&scaled_out, &baseline_out, 1e-4);
-        assert_eq!(
-            baseline_out[..8].to_vec(),
-            vec![
+        assert_close(
+            &baseline_out[..8],
+            &[
                 -0.043250006,
                 -0.030375006,
                 -0.025625005,
@@ -236,8 +251,9 @@ fn qk_scale_leaves_output_unchanged() {
                 -0.016124997,
                 -0.0129999975,
                 -0.00012499644,
-                0.037125003
-            ]
+                0.037125003,
+            ],
+            tol_for(device),
         );
     }
 }

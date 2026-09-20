@@ -10,9 +10,7 @@
 use half::{bf16, f16};
 
 use crate::error::Result;
-use crate::nn::{
-    Embedding, Linear, Module, ParamBuilder, Parameter, RMSNorm, SwiGLU, functional,
-};
+use crate::nn::{Embedding, Linear, Module, ParamBuilder, Parameter, RMSNorm, SwiGLU, functional};
 use crate::sample::{SamplingConfig, sample_token};
 use crate::tensor::Tensor;
 use crate::{DType, Device, no_grad};
@@ -50,21 +48,15 @@ pub enum RopeScaling {
 impl RopeScaling {
     /// YaRN scaling with the reference band defaults (`beta_fast` 32, `beta_slow` 1).
     pub fn yarn(factor: f32, original_max_position_embeddings: usize) -> Self {
-        Self::Yarn {
-            factor,
-            original_max_position_embeddings,
-            beta_fast: 32.0,
-            beta_slow: 1.0,
-        }
+        Self::Yarn { factor, original_max_position_embeddings, beta_fast: 32.0, beta_slow: 1.0 }
     }
 }
 
 /// Derives RoPE inverse frequencies plus the cos/sin multiplier for a scaling choice.
 fn rope_inv_freq(head_dim: usize, base: f32, scaling: RopeScaling) -> (Vec<f32>, f32) {
     let half_dim = head_dim / 2;
-    let default: Vec<f32> = (0..half_dim)
-        .map(|i| 1.0 / base.powf((2 * i) as f32 / head_dim as f32))
-        .collect();
+    let default: Vec<f32> =
+        (0..half_dim).map(|i| 1.0 / base.powf((2 * i) as f32 / head_dim as f32)).collect();
 
     match scaling {
         RopeScaling::None => (default, 1.0),
@@ -83,9 +75,10 @@ fn rope_inv_freq(head_dim: usize, base: f32, scaling: RopeScaling) -> (Vec<f32>,
             let low = find_correction_dim(beta_fast, dim, base, original_max_position_embeddings)
                 .floor()
                 .max(0.0);
-            let mut high = find_correction_dim(beta_slow, dim, base, original_max_position_embeddings)
-                .ceil()
-                .min(dim - 1.0);
+            let mut high =
+                find_correction_dim(beta_slow, dim, base, original_max_position_embeddings)
+                    .ceil()
+                    .min(dim - 1.0);
             if low == high {
                 // A zero-width band would divide by zero in the ramp below.
                 high += 0.001;
@@ -98,8 +91,7 @@ fn rope_inv_freq(head_dim: usize, base: f32, scaling: RopeScaling) -> (Vec<f32>,
                     freq / factor * ramp + freq * (1.0 - ramp)
                 })
                 .collect();
-            let attention_factor =
-                if factor <= 1.0 { 1.0 } else { 0.1 * factor.ln() + 1.0 };
+            let attention_factor = if factor <= 1.0 { 1.0 } else { 0.1 * factor.ln() + 1.0 };
             (inv_freq, attention_factor)
         }
     }
@@ -330,10 +322,7 @@ impl CausalSelfAttention {
         n_kv_heads: usize,
         head_dim: usize,
     ) -> Self {
-        assert!(
-            n_q_heads.is_multiple_of(n_kv_heads),
-            "n_q_heads must be divisible by n_kv_heads"
-        );
+        assert!(n_q_heads.is_multiple_of(n_kv_heads), "n_q_heads must be divisible by n_kv_heads");
         Self {
             n_embd,
             n_q_heads,
@@ -366,10 +355,7 @@ impl CausalSelfAttention {
         let batch_size = shape[0];
         let seq_len = shape[1];
         let channels = shape[2];
-        assert_eq!(
-            channels, self.n_embd,
-            "input channel size must match the residual width"
-        );
+        assert_eq!(channels, self.n_embd, "input channel size must match the residual width");
 
         let x_flat = x.reshape(vec![batch_size * seq_len, channels]); // [B*T, C]
         let q = self.q_proj.forward(&x_flat)?.rearrange(
@@ -610,11 +596,7 @@ impl Qwen3Block {
         eps: f64,
     ) -> Self {
         Self {
-            input_layernorm: RMSNorm::new_affine(
-                builder.pp("input_layernorm"),
-                hidden,
-                eps,
-            ),
+            input_layernorm: RMSNorm::new_affine(builder.pp("input_layernorm"), hidden, eps),
             attn: CausalSelfAttention::new_gqa_with_head_dim(
                 builder.pp("attn"),
                 hidden,
@@ -987,11 +969,7 @@ impl Qwen3 {
     /// Returns full logits shaped `[1, T, V]` for the proof-of-life read.
     /// Each cache must be empty; following tokens arrive through `decode`.
     pub fn prefill(&self, idx: &Tensor, caches: &mut [KvCache]) -> Result<Tensor> {
-        assert_eq!(
-            caches.len(),
-            self.layers.len(),
-            "Qwen3 prefill needs one cache per layer"
-        );
+        assert_eq!(caches.len(), self.layers.len(), "Qwen3 prefill needs one cache per layer");
         let shape = idx.layout().shape();
         assert_eq!(shape.ndim(), 2, "Qwen3 expects token ids with shape [B, T]");
         let batch_size = shape[0];
@@ -1011,17 +989,8 @@ impl Qwen3 {
     /// Scores one token at absolute position `pos` against the filled caches.
     ///
     /// `token` holds one id shaped `[1, 1]`. Returns logits `[1, 1, V]`.
-    pub fn decode(
-        &self,
-        token: &Tensor,
-        pos: usize,
-        caches: &mut [KvCache],
-    ) -> Result<Tensor> {
-        assert_eq!(
-            caches.len(),
-            self.layers.len(),
-            "Qwen3 decode needs one cache per layer"
-        );
+    pub fn decode(&self, token: &Tensor, pos: usize, caches: &mut [KvCache]) -> Result<Tensor> {
+        assert_eq!(caches.len(), self.layers.len(), "Qwen3 decode needs one cache per layer");
         let cos = self.cos.narrow(1, pos, 1); // [1, 1, 1, D/2]
         let sin = self.sin.narrow(1, pos, 1); // [1, 1, 1, D/2]
 
@@ -1045,17 +1014,20 @@ impl Qwen3 {
     ) -> Result<Vec<u32>> {
         no_grad(|| {
             assert!(!prompt.is_empty(), "Qwen3 generate needs a non-empty prompt");
-            let mut caches: Vec<KvCache> =
-                (0..self.layers.len()).map(|_| KvCache::new()).collect();
+            let mut caches: Vec<KvCache> = (0..self.layers.len()).map(|_| KvCache::new()).collect();
+            // The rotary cache moves with `to_device`, so it marks the model
+            // device: index tensors must live there too, not on the host.
+            let device = self.cos.device();
             let ids: Vec<i64> = prompt.iter().map(|&id| id as i64).collect();
-            let idx = Tensor::from_vec(ids, (1, prompt.len()), Device::Cpu);
+            let idx = Tensor::from_vec(ids, (1, prompt.len()), device);
             let logits = self.prefill(&idx, &mut caches)?;
             let mut generated = vec![self.sample_last(&logits, prompt.len(), config)?];
 
             for _ in 1..max_tokens {
                 let last = *generated.last().expect("prompt produced one token");
-                let token = Tensor::from_vec(vec![last as i64], (1, 1), Device::Cpu);
-                let logits = self.decode(&token, prompt.len() + generated.len() - 1, &mut caches)?;
+                let token = Tensor::from_vec(vec![last as i64], (1, 1), device);
+                let logits =
+                    self.decode(&token, prompt.len() + generated.len() - 1, &mut caches)?;
                 generated.push(self.sample_last(&logits, 1, config)?);
             }
             Ok(generated)
@@ -1063,12 +1035,7 @@ impl Qwen3 {
     }
 
     /// Samples the last position of `logits` shaped `[1, T, V]` under `config`.
-    fn sample_last(
-        &self,
-        logits: &Tensor,
-        seq_len: usize,
-        config: &SamplingConfig,
-    ) -> Result<u32> {
+    fn sample_last(&self, logits: &Tensor, seq_len: usize, config: &SamplingConfig) -> Result<u32> {
         let row = logits.narrow(1, seq_len - 1, 1).reshape(vec![self.vocab_size]);
         let probs = cast_tensor(&row, DType::F32)?.to_vec::<f32>()?;
         Ok(sample_token(&probs, config))

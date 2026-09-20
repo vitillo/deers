@@ -1,10 +1,11 @@
-use candle_core::{D, Device as CDevice, Tensor as CTensor};
+use candle_core::{D, Device as CDevice, Tensor as CTensor, Var};
 use candle_nn::ops as candle_ops;
 use deers::eval::{ParityCheck, check_close, sample_token_ids, score_model};
 use deers::models::gpt::{self, GPTConfig, RopeScaling};
 use deers::nn::{Module, ParamStore, Parameter, RMSNorm};
 use deers::tokenizer::{Gpt2Tokenizer, Tokenizer};
 use deers::{DType, Device, Tensor};
+use half::f16;
 
 const TOL: f32 = 1e-4;
 
@@ -45,11 +46,7 @@ fn candle_rotate(x: &CTensor, cos: &CTensor, sin: &CTensor) -> CTensor {
     let x1 = x.narrow(D::Minus1, 0, half_dim).unwrap();
     let x2 = x.narrow(D::Minus1, half_dim, half_dim).unwrap();
     let y1 = x1.broadcast_mul(cos).unwrap().broadcast_sub(&x2.broadcast_mul(sin).unwrap()).unwrap();
-    let y2 = x1
-        .broadcast_mul(sin)
-        .unwrap()
-        .broadcast_add(&x2.broadcast_mul(cos).unwrap())
-        .unwrap();
+    let y2 = x1.broadcast_mul(sin).unwrap().broadcast_add(&x2.broadcast_mul(cos).unwrap()).unwrap();
     CTensor::cat(&[&y1, &y2], D::Minus1).unwrap()
 }
 
@@ -71,18 +68,10 @@ fn candle_attention(
     };
     let q = project(&weights[0]);
     let q = candle_rms_norm(&q, CANDLE_QK_NORM_EPS).broadcast_mul(&weights[4]).unwrap();
-    let q = candle_rotate(&q, cos, sin)
-        .transpose(1, 2)
-        .unwrap()
-        .contiguous()
-        .unwrap();
+    let q = candle_rotate(&q, cos, sin).transpose(1, 2).unwrap().contiguous().unwrap();
     let k = project(&weights[1]);
     let k = candle_rms_norm(&k, CANDLE_QK_NORM_EPS).broadcast_mul(&weights[5]).unwrap();
-    let k = candle_rotate(&k, cos, sin)
-        .transpose(1, 2)
-        .unwrap()
-        .contiguous()
-        .unwrap();
+    let k = candle_rotate(&k, cos, sin).transpose(1, 2).unwrap().contiguous().unwrap();
     let v = project(&weights[2]).transpose(1, 2).unwrap().contiguous().unwrap();
 
     let scale = 1.0 / (head_dim as f64).sqrt();
@@ -137,6 +126,57 @@ fn rmsnorm_block_matches_candle() {
 
     // Assert
     assert_passed(&check_close("rmsnorm", &actual, &expected, TOL));
+}
+
+#[test]
+fn rmsnorm_f16_matches_candle_forward_and_backward() {
+    // Arrange: F16 inputs whose squares fit (no overflow here); the F32
+    // accumulation path must still agree with candle's F16 reference.
+    let values: Vec<f32> = vec![0.5, -1.0, 2.0, 0.25, 1.5, 3.0, -0.5, 1.0];
+    let norm = RMSNorm::new(1e-5);
+    let x = Tensor::from_vec(
+        values.iter().map(|&v| f16::from_f32(v)).collect::<Vec<_>>(),
+        (1, 2, 4),
+        Device::Cpu,
+    )
+    .attach();
+    let var = Var::from_tensor(
+        &candle_tensor(values.clone(), &[1, 2, 4]).to_dtype(candle_core::DType::F16).unwrap(),
+    )
+    .unwrap();
+    let cx = var.as_tensor();
+
+    // Act
+    let actual_fwd: Vec<f32> =
+        norm.forward(&x).unwrap().to_vec::<f16>().unwrap().iter().map(|v| v.to_f32()).collect();
+    let cy = candle_rms_norm(cx, 1e-5);
+    let expected_fwd: Vec<f32> =
+        cy.to_dtype(candle_core::DType::F32).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+    let loss = norm.forward(&x).unwrap().sum(vec![0, 1, 2], false);
+    let grads = loss.backward().unwrap();
+    let actual_bwd: Vec<f32> = grads
+        .get(x.id())
+        .expect("input must carry a gradient")
+        .to_vec::<f16>()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_f32())
+        .collect();
+    let closs = cy.sum_all().unwrap();
+    let cgrads = closs.backward().unwrap();
+    let expected_bwd: Vec<f32> = cgrads
+        .get(cx)
+        .expect("candle input must carry a gradient")
+        .to_dtype(candle_core::DType::F32)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1()
+        .unwrap();
+
+    // Assert: F16 comparisons use the half-precision tolerance.
+    assert_passed(&check_close("rmsnorm-f16-forward", &actual_fwd, &expected_fwd, 1e-2));
+    assert_passed(&check_close("rmsnorm-f16-backward", &actual_bwd, &expected_bwd, 1e-2));
 }
 
 #[test]

@@ -17,6 +17,25 @@ fn values(tensor: &Tensor) -> Vec<f32> {
     tensor.to_vec::<f32>().unwrap()
 }
 
+const CPU_TOL: f32 = 1e-4;
+const MPS_TOL: f32 = 2e-3;
+
+fn assert_close(actual: &[f32], expected: &[f32], tol: f32) {
+    assert_eq!(actual.len(), expected.len(), "length mismatch");
+    for (index, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!((a - e).abs() < tol, "[{index}]: got {a}, expected {e}");
+    }
+}
+
+/// Accelerator kernels reorder floating-point summation, so cross-backend
+/// goldens compare within tolerance: exact on CPU, looser on accelerators.
+fn tol_for(device: Device) -> f32 {
+    match device {
+        Device::Cpu => CPU_TOL,
+        _ => MPS_TOL,
+    }
+}
+
 /// Builds grouped-query attention with deterministic weights on every parameter.
 fn gqa(n_embd: usize, n_q_heads: usize, n_kv_heads: usize, device: Device) -> CausalSelfAttention {
     let head_dim = n_embd / n_q_heads;
@@ -91,9 +110,9 @@ fn gqa_matches_naive_repeated_heads() {
 
         // Assert
         assert_eq!(grouped_out, naive_out);
-        assert_eq!(
-            grouped_out[..8].to_vec(),
-            vec![
+        assert_close(
+            &grouped_out[..8],
+            &[
                 0.018874997,
                 0.039125003,
                 -0.005625005,
@@ -101,8 +120,9 @@ fn gqa_matches_naive_repeated_heads() {
                 0.0023749953,
                 -0.042375006,
                 -0.022125002,
-                -0.03437501
-            ]
+                -0.03437501,
+            ],
+            tol_for(device),
         );
     }
 }
@@ -134,9 +154,9 @@ fn mha_constructor_matches_gqa_with_equal_heads() {
 
         // Assert
         assert_eq!(grouped_out, plain_out);
-        assert_eq!(
-            plain_out,
-            vec![
+        assert_close(
+            &plain_out,
+            &[
                 -0.01575,
                 -0.0127500035,
                 -0.0016250028,
@@ -144,8 +164,9 @@ fn mha_constructor_matches_gqa_with_equal_heads() {
                 -0.015338032,
                 -0.012801903,
                 -0.0054932944,
-                0.0018153149
-            ]
+                0.0018153149,
+            ],
+            tol_for(device),
         );
     }
 }

@@ -11,6 +11,7 @@ use std::{cmp::Ordering, fmt, iter};
 use half::{bf16, f16};
 
 use crate::backprop::GradientStore;
+use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::layout::{Layout, Shape};
 use crate::profiler;
@@ -685,6 +686,82 @@ impl TensorOp for ScalarPowf {
     }
 }
 
+/// Converts `tensor` to `dtype` through an F32 host round trip.
+///
+/// `to_vec` syncs any backend to the host and `from_vec` copies back, so this
+/// works on every device without dedicated cast kernels. Integer tensors only
+/// convert onto themselves; anything else fails loudly instead of silently
+/// requantizing ids.
+fn cast_via_f32(tensor: &Tensor, dtype: DType) -> Result<Tensor> {
+    if tensor.dtype() == dtype {
+        return Ok(tensor.clone());
+    }
+    let shape: Vec<usize> = tensor.layout().shape().iter().copied().collect();
+    let device = tensor.device();
+    let as_f32: Vec<f32> = match tensor.dtype() {
+        DType::F16 => tensor.to_vec::<f16>()?.iter().map(|v| v.to_f32()).collect(),
+        DType::BF16 => tensor.to_vec::<bf16>()?.iter().map(|v| v.to_f32()).collect(),
+        DType::F32 => tensor.to_vec::<f32>()?,
+        DType::I64 => {
+            assert_eq!(dtype, DType::I64, "refusing to quantize integer tensor");
+            return Ok(tensor.clone());
+        }
+    };
+    Ok(match dtype {
+        DType::F16 => Tensor::from_vec(
+            as_f32.iter().map(|&v| f16::from_f32(v)).collect::<Vec<_>>(),
+            shape,
+            device,
+        ),
+        DType::BF16 => Tensor::from_vec(
+            as_f32.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+            shape,
+            device,
+        ),
+        DType::F32 => Tensor::from_vec(as_f32, shape, device),
+        DType::I64 => panic!("refusing to quantize float tensor to integer"),
+    })
+}
+
+/// Differentiable dtype conversion.
+///
+/// Forward converts through an F32 host round trip; backward converts the
+/// output gradient back to the input dtype, so low-precision paths like
+/// RMSNorm keep gradient flow instead of severing the graph.
+#[derive(Debug)]
+pub struct Cast {
+    arg: Tensor,
+    dtype: DType,
+}
+
+impl Cast {
+    pub fn new(arg: Tensor, dtype: DType) -> Result<Self> {
+        Ok(Self { arg, dtype })
+    }
+}
+
+impl TensorOp for Cast {
+    fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("cast", &self.arg);
+        let converted = cast_via_f32(&self.arg, self.dtype)?;
+        Ok(Tensor::new(
+            converted.storage_clone(),
+            converted.layout().clone(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        grads.accumulate(&self.arg, cast_via_f32(out_grad, self.arg.dtype())?);
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
 #[derive(Debug)]
 pub struct Permute {
     arg: Tensor,
@@ -1207,12 +1284,8 @@ impl TensorOp for FusedLogSoftmax {
         let compact = self.arg.compact();
         let out_storage =
             compact.storage().log_softmax_fwd(compact.layout(), outer_size, inner_size)?;
-        let output = Tensor::new(
-            Arc::new(RwLock::new(out_storage)),
-            self.arg.layout().clone(),
-            false,
-            None,
-        );
+        let output =
+            Tensor::new(Arc::new(RwLock::new(out_storage)), self.arg.layout().clone(), false, None);
         self.lsm_output = Some(output.clone());
         Ok(Tensor::new(
             output.storage_clone(),

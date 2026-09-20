@@ -8,10 +8,13 @@ use deers::checkpoint::map_qwen_name;
 use deers::models::gpt::{Qwen3, Qwen3Config};
 use deers::nn::ParamStore;
 use deers::tokenizer::{ChatMessage, Qwen3Tokenizer, Tokenizer};
-use deers::{Device, Tensor, no_grad};
+use deers::{DType, Device, Tensor, no_grad};
+use half::bf16;
 
 const GREEDY_STEPS: usize = 8;
 const LOGIT_TOL: f32 = 1e-2;
+/// Cross-backend tolerance for same-dtype CPU/CUDA comparisons.
+const ACCEL_TOL: f32 = 2e-3;
 
 fn fixture_dir() -> PathBuf {
     std::env::var("QWEN3_06B_DIR")
@@ -177,9 +180,15 @@ fn load_candle(dir: &std::path::Path, cfg: &CandleQwen3Config) -> ModelForCausal
 }
 
 fn deers_prefill_logits(model: &Qwen3, ids: &[u32]) -> Vec<Vec<f32>> {
+    deers_prefill_logits_on(model, ids, Device::Cpu)
+}
+
+/// F32 prefill logits as rows with index tensors on `device`, so a moved
+/// model scores without tripping its rotary-cache device assertion.
+fn deers_prefill_logits_on(model: &Qwen3, ids: &[u32], device: Device) -> Vec<Vec<f32>> {
     no_grad(|| {
         let flat: Vec<i64> = ids.iter().map(|&id| i64::from(id)).collect();
-        let idx = Tensor::from_vec(flat, (1, ids.len()), Device::Cpu);
+        let idx = Tensor::from_vec(flat, (1, ids.len()), device);
         let logits = model.forward(&idx).expect("deers forward");
         let vocab = logits.layout().shape()[2];
         (0..ids.len())
@@ -223,6 +232,39 @@ fn top1(logits: &[f32]) -> u32 {
         .max_by(|(_, a), (_, b)| a.total_cmp(b))
         .map(|(id, _)| id as u32)
         .expect("non-empty logits")
+}
+
+/// BF16 prefill logits as F32 rows on `device`: the same prompt scores on
+/// CPU and CUDA from identical weights, so cross-backend diffs isolate the
+/// accelerator kernels from weight conversion.
+fn bf16_prefill_logits(model: &Qwen3, ids: &[u32], device: Device) -> Vec<Vec<f32>> {
+    no_grad(|| {
+        let flat: Vec<i64> = ids.iter().map(|&id| i64::from(id)).collect();
+        let idx = Tensor::from_vec(flat, (1, ids.len()), device);
+        let logits = model.forward(&idx).expect("deers bf16 forward");
+        assert_eq!(logits.dtype(), DType::BF16);
+        let vocab = logits.layout().shape()[2];
+        (0..ids.len())
+            .map(|pos| {
+                logits
+                    .narrow(1, pos, 1)
+                    .reshape(vec![vocab])
+                    .to_vec::<bf16>()
+                    .expect("read deers bf16 logits")
+                    .iter()
+                    .map(|v| v.to_f32())
+                    .collect()
+            })
+            .collect()
+    })
+}
+
+fn max_abs_diff(rows_a: &[Vec<f32>], rows_b: &[Vec<f32>]) -> f32 {
+    rows_a
+        .iter()
+        .zip(rows_b.iter())
+        .flat_map(|(a, b)| a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()))
+        .fold(0.0f32, f32::max)
 }
 
 fn greedy_deers(model: &Qwen3, prompt: &[u32]) -> Vec<u32> {
@@ -299,20 +341,13 @@ fn qwen3_06b_candle_parity_prefill_and_greedy() {
     let candle_greedy = greedy_candle(&mut candle_model, &ids);
 
     // Assert: per-position top predictions agree and logits sit within tolerance.
-    // NOTE (differential outcome, 2026-09-19): this currently FAILS by design.
-    // Root cause with evidence: deers `apply_rotary_emb` (src/models/gpt.rs)
-    // computes y1 = x1*cos + x2*sin, y2 = -x1*sin + x2*cos, i.e. HF/candle
-    // RoPE with a flipped sin sign (candle 0.9.2 `RotaryEmb` kernel and HF
-    // `modeling_qwen3.py::apply_rotary_pos_emb` both compute
-    // y1 = x1*cos - x2*sin, y2 = x1*sin + x2*cos). A weight-free probe
-    // (random [1,4,2,8] input, matched tables) measured
-    // max|deers - candle_rope| = 10.48 but max|deers - candle_rope(-sin)| = 0
-    // exactly, so the sign is the whole RoPE story. Position 0 agrees
-    // because sin(0) = 0; positions >= 1 diverge. Fixing `apply_rotary_emb`
-    // is a follow-up (it is shared with the deers-native GPT path, whose
-    // from-scratch training is self-consistent under either sign); re-run
-    // this ignored test to prove the fix. Divergences are never averaged
-    // away: the report below prints first, the assertions second.
+    // NOTE (differential outcome, 2026-09-20): this PASSES. The RoPE sin-sign
+    // divergence it used to document was fixed upstream: shared
+    // `apply_rotary_emb` now computes the HF/candle direction
+    // (y1 = x1*cos - x2*sin, y2 = x1*sin + x2*cos), so deers F32/CPU and
+    // candle F32/CPU agree to max_abs_diff ~1e-4 with identical greedy
+    // continuations. Divergences are never averaged away: the report below
+    // prints first, the assertions second.
     assert_eq!(deers_logits.len(), ids.len());
     assert_eq!(candle_logits.len(), ids.len());
     let mut max_abs = 0.0f32;
@@ -350,6 +385,81 @@ fn qwen3_06b_candle_parity_prefill_and_greedy() {
     assert_eq!(deers_greedy, candle_greedy, "greedy generations diverge");
 }
 
+/// Real-weights CUDA proof: the accelerator backend scores the published
+/// checkpoint and must match CPU behavior plus agree with candle.
+///
+/// Same-dtype F32 logits compare within the accelerator tolerance (CUDA
+/// kernels reorder summation but F32 carries no quantization noise). BF16
+/// compares at decision level: saturating softmax amplifies quantization
+/// noise into O(1) mid-logit diffs, so a top-1 flip is allowed only when both
+/// sides score it a near-tie within BF16 noise.
+///
+/// Needs `model.safetensors` + `config.json` (see `missing_fixture`) and a
+/// CUDA device; stays ignored so the CPU-only suite needs neither.
+#[ignore]
+#[test]
+fn qwen3_06b_cuda_matches_cpu_and_candle() {
+    // Arrange: one model walks every backend/dtype; candle loads F32/CPU.
+    if !Device::Cuda.is_available() {
+        return;
+    }
+    let dir = fixture_dir();
+    assert!(dir.join("model.safetensors").exists(), "{}", missing_fixture(&dir));
+    let (_prompt, ids) = chat_prompt();
+    let (mut model, _) = load_deers(&dir);
+    let cfg = candle_config(&dir);
+    let mut candle_model = load_candle(&dir, &cfg);
+
+    // Act
+    let f32_cpu = deers_prefill_logits(&model, &ids);
+    model.to_device(Device::Cuda).expect("model must move to CUDA");
+    let f32_cuda = deers_prefill_logits_on(&model, &ids, Device::Cuda);
+    model.to_dtype(DType::BF16).expect("BF16 conversion must succeed");
+    let bf16_cuda = bf16_prefill_logits(&model, &ids, Device::Cuda);
+    model.to_device(Device::Cpu).expect("model must move back to CPU");
+    let bf16_cpu = bf16_prefill_logits(&model, &ids, Device::Cpu);
+    let candle = candle_prefix_logits(&mut candle_model, &ids);
+
+    // Assert: F32 within the accelerator tolerance with agreeing top-1s.
+    let f32_diff = max_abs_diff(&f32_cuda, &f32_cpu);
+    println!("f32 cpu-vs-cuda max_abs_diff={f32_diff:.6} tol={ACCEL_TOL}");
+    assert!(f32_diff <= ACCEL_TOL, "f32 cuda logits diverge by {f32_diff}");
+    for (pos, (a, b)) in f32_cuda.iter().zip(f32_cpu.iter()).enumerate() {
+        assert_eq!(top1(a), top1(b), "f32 top-1 diverges at position {pos}");
+    }
+
+    // Assert: BF16 decisions agree up to near-tie flips; the absolute diff
+    // only prints (see the doc comment for why it cannot hold 2e-3).
+    let bf16_diff = max_abs_diff(&bf16_cuda, &bf16_cpu);
+    println!("bf16 cpu-vs-cuda max_abs_diff={bf16_diff:.6} (informational)");
+    for (pos, (a, b)) in bf16_cuda.iter().zip(bf16_cpu.iter()).enumerate() {
+        assert!(tops_agree(a, b, BF16_NOISE), "bf16 cpu/cuda decision diverges at position {pos}");
+    }
+
+    // Assert: CPU BF16 agrees with candle F32 under the same near-tie rule,
+    // isolating quantization from the backend; then CUDA inherits it.
+    let quant_diff = max_abs_diff(&bf16_cpu, &candle);
+    println!("bf16 cpu-vs-candle-f32 max_abs_diff={quant_diff:.6} (informational)");
+    for (pos, (b, c)) in bf16_cpu.iter().zip(candle.iter()).enumerate() {
+        assert!(tops_agree(b, c, BF16_NOISE), "bf16/candle decision diverges at position {pos}");
+    }
+}
+
+/// BF16 noise scale for decision agreement: observed BF16 top-logit diffs
+/// stay under 1.0 while genuine top margins run to tens.
+const BF16_NOISE: f32 = 2.0;
+
+/// Returns true when both rows pick the same winner, or both score the flip
+/// a near-tie within `noise`.
+fn tops_agree(a: &[f32], b: &[f32], noise: f32) -> bool {
+    let ta = top1(a) as usize;
+    let tb = top1(b) as usize;
+    if ta == tb {
+        return true;
+    }
+    (a[ta] - a[tb]).abs() < noise && (b[ta] - b[tb]).abs() < noise
+}
+
 fn top_k(logits: &[f32], k: usize) -> Vec<(u32, f32)> {
     let mut indexed: Vec<(u32, f32)> =
         logits.iter().enumerate().map(|(id, &v)| (id as u32, v)).collect();
@@ -361,11 +471,11 @@ fn top_k(logits: &[f32], k: usize) -> Vec<(u32, f32)> {
 #[test]
 fn qwen3_06b_agreed_outputs_are_pinned() {
     // Arrange: the fixed chat prompt both differential sides share.
-    // The live `qwen3_06b_candle_parity_prefill_and_greedy` test currently
-    // documents a RoPE sin-sign divergence (see its NOTE), so the only
-    // outputs both sides agree on today are the prompt rendering and its
-    // token ids. When the follow-up fix lands, extend these literals with
-    // the agreed greedy ids and spot logits from the green live run.
+    // The live `qwen3_06b_candle_parity_prefill_and_greedy` test now passes
+    // (the RoPE sin-sign divergence it documented is fixed), so the only
+    // outputs pinned here are the prompt rendering and its token ids.
+    // When extending coverage, take agreed greedy ids and spot logits from
+    // a green live run.
     let (prompt, ids) = chat_prompt();
     let agreed_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWhat is 2 plus 2?<|im_end|>\n<|im_start|>assistant\n";
     let agreed_ids: Vec<u32> = vec![

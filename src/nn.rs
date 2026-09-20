@@ -12,6 +12,7 @@ use std::rc::Rc;
 
 use crate::checkpoint;
 use crate::error::Result;
+use crate::ops::{self, TensorOp};
 use crate::tensor::Tensor;
 use crate::{DType, Device};
 pub use parameter::Parameter;
@@ -352,9 +353,22 @@ impl RMSNorm {
 impl Module for RMSNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let last_axis = x.layout().ndim() - 1;
-        let mean_sq = (x * x).mean(vec![last_axis], true);
-        let inv_norm = (mean_sq + self.eps).scalar_powf(-0.5);
-        let normed = x * &inv_norm;
+        let requested = x.dtype();
+        // F16 tops out at 65504, so squaring large activations overflows to
+        // infinity before the mean runs. Accumulate the variance in F32 and
+        // convert back to the requested dtype; the casts stay in the graph so
+        // low-precision training keeps gradient flow. Other dtypes keep the
+        // direct path.
+        let normed = if matches!(requested, DType::F16 | DType::BF16) {
+            let acc = ops::Cast::new((*x).clone(), DType::F32)?.forward()?;
+            let mean_sq = (&acc * &acc).mean(vec![last_axis], true);
+            let inv_norm = (mean_sq + self.eps).scalar_powf(-0.5);
+            ops::Cast::new(&acc * &inv_norm, requested)?.forward()?
+        } else {
+            let mean_sq = (x * x).mean(vec![last_axis], true);
+            let inv_norm = (mean_sq + self.eps).scalar_powf(-0.5);
+            x * &inv_norm
+        };
         match &self.weight {
             Some(weight) => Ok(&normed * &**weight),
             None => Ok(normed),
