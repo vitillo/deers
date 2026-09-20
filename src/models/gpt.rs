@@ -339,12 +339,7 @@ impl CausalSelfAttention {
         head_dim: usize,
     ) -> Self {
         Self::new_gqa_with_head_dim_and_output_gate(
-            builder,
-            n_embd,
-            n_q_heads,
-            n_kv_heads,
-            head_dim,
-            false,
+            builder, n_embd, n_q_heads, n_kv_heads, head_dim, false,
         )
     }
 
@@ -363,10 +358,7 @@ impl CausalSelfAttention {
         head_dim: usize,
         output_gate: bool,
     ) -> Self {
-        assert!(
-            n_q_heads.is_multiple_of(n_kv_heads),
-            "n_q_heads must be divisible by n_kv_heads"
-        );
+        assert!(n_q_heads.is_multiple_of(n_kv_heads), "n_q_heads must be divisible by n_kv_heads");
         let q_width = if output_gate { 2 * n_q_heads * head_dim } else { n_q_heads * head_dim };
         Self {
             n_embd,
