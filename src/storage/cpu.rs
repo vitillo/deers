@@ -435,6 +435,24 @@ impl BackendStorage for CpuStorage {
         self.iter(layout.borrow()).copied().collect()
     }
 
+    fn cast(&self, layout: &Layout, dtype: DType) -> Result<Self> {
+        let as_f32: Vec<f32> = match self {
+            CpuStorage::F16(_) => self.iter::<f16>(layout).map(|v| v.to_f32()).collect(),
+            CpuStorage::BF16(_) => self.iter::<bf16>(layout).map(|v| v.to_f32()).collect(),
+            CpuStorage::F32(_) => self.iter::<f32>(layout).copied().collect(),
+            CpuStorage::I64(_) => {
+                assert_eq!(dtype, DType::I64, "refusing to quantize integer tensor");
+                return Ok(CpuStorage::I64(self.iter::<i64>(layout).copied().collect()));
+            }
+        };
+        Ok(match dtype {
+            DType::F16 => CpuStorage::F16(as_f32.iter().map(|&v| f16::from_f32(v)).collect()),
+            DType::BF16 => CpuStorage::BF16(as_f32.iter().map(|&v| bf16::from_f32(v)).collect()),
+            DType::F32 => CpuStorage::F32(as_f32),
+            DType::I64 => panic!("refusing to quantize float tensor to integer"),
+        })
+    }
+
     fn copy_compact(&self, src_layout: &Layout, dst: &mut CpuStorage) -> Result<()> {
         let strides: Vec<usize> = src_layout.strides.0.iter().map(|&s| s as usize).collect();
         let shape: Vec<usize> = (0..src_layout.ndim()).map(|i| src_layout.shape[i]).collect();

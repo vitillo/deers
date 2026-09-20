@@ -159,6 +159,17 @@ mod imp {
     DEFINE_UNARY_BF16(relu, fmaxf(x, 0.0f))
     DEFINE_UNARY_BF16(relu_backward, x > 0.0f ? 1.0f : 0.0f)
 
+    template <typename SRC, typename DST>
+    __device__ __forceinline__ void cast_kernel(const SRC* src, DST* dst, unsigned int size) {
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < size) { dst[idx] = from_float<DST>(to_float<SRC>(src[idx])); }
+    }
+
+    extern "C" __global__ void cast_f16_to_f32(const half* src, float* dst, unsigned int size) { cast_kernel<half, float>(src, dst, size); }
+    extern "C" __global__ void cast_bf16_to_f32(const __nv_bfloat16* src, float* dst, unsigned int size) { cast_kernel<__nv_bfloat16, float>(src, dst, size); }
+    extern "C" __global__ void cast_f32_to_f16(const float* src, half* dst, unsigned int size) { cast_kernel<float, half>(src, dst, size); }
+    extern "C" __global__ void cast_f32_to_bf16(const float* src, __nv_bfloat16* dst, unsigned int size) { cast_kernel<float, __nv_bfloat16>(src, dst, size); }
+
     #define DEFINE_SCALAR_F32(name, expr) \
     extern "C" __global__ void name##_f32(const float* src, float* dst, unsigned int size, ScalarMeta meta) { \
         unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x; \
@@ -2000,6 +2011,41 @@ mod imp {
                 _ => Err(Error::DTypeMismatch("copy_compact: dtype mismatch".into())),
             }
         }
+
+        fn cast(&self, layout: &Layout, dtype: DType) -> Result<Self> {
+            let compact = self.compact(layout)?;
+            let len = compact.len();
+            let n = len as u32;
+            match (&compact.inner, dtype) {
+                (CudaInner::F16(_), DType::F16)
+                | (CudaInner::BF16(_), DType::BF16)
+                | (CudaInner::F32(_), DType::F32)
+                | (CudaInner::I64(_), DType::I64) => Ok(compact),
+                (CudaInner::F16(src), DType::F32) => {
+                    let out = unsafe { alloc_uninit::<f32>(&compact.runtime, len) }?;
+                    launch_1d!(&compact.runtime, "cast_f16_to_f32", len, src, &out, &n);
+                    Ok(Self { inner: CudaInner::F32(out), runtime: compact.runtime.clone() })
+                }
+                (CudaInner::BF16(src), DType::F32) => {
+                    let out = unsafe { alloc_uninit::<f32>(&compact.runtime, len) }?;
+                    launch_1d!(&compact.runtime, "cast_bf16_to_f32", len, src, &out, &n);
+                    Ok(Self { inner: CudaInner::F32(out), runtime: compact.runtime.clone() })
+                }
+                (CudaInner::F32(src), DType::F16) => {
+                    let out = unsafe { alloc_uninit::<f16>(&compact.runtime, len) }?;
+                    launch_1d!(&compact.runtime, "cast_f32_to_f16", len, src, &out, &n);
+                    Ok(Self { inner: CudaInner::F16(out), runtime: compact.runtime.clone() })
+                }
+                (CudaInner::F32(src), DType::BF16) => {
+                    let out = unsafe { alloc_uninit::<bf16>(&compact.runtime, len) }?;
+                    launch_1d!(&compact.runtime, "cast_f32_to_bf16", len, src, &out, &n);
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: compact.runtime.clone() })
+                }
+                (CudaInner::I64(_), _) => panic!("refusing to quantize integer tensor"),
+                (_, DType::I64) => panic!("refusing to quantize float tensor to integer"),
+                _ => Err(Error::NotImplemented("cuda cast: unsupported dtype pair")),
+            }
+        }
     }
 
     pub fn synchronize() {
@@ -2107,6 +2153,9 @@ mod imp {
             panic!("cuda backend is unavailable")
         }
         fn copy_compact(&self, _: &Layout, _: &mut Self) -> Result<()> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn cast(&self, _: &Layout, _: DType) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
     }

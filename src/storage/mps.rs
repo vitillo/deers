@@ -1796,6 +1796,11 @@ mod imp {
             *dst = Self::from_cpu_storage(cpu_dst);
             Ok(())
         }
+
+        fn cast(&self, layout: &Layout, dtype: DType) -> Result<Self> {
+            let inner = self.as_cpu_storage().cast(layout, dtype)?;
+            Ok(Self::from_cpu_storage(inner))
+        }
     }
 
     fn read_f16(ctx: &Arc<MpsContext>, buffer: &Buffer, len: usize, layout: &Layout) -> Vec<f16> {
@@ -2016,6 +2021,9 @@ mod imp {
             Self::unavailable()
         }
         fn copy_compact(&self, _: &Layout, _: &mut Self) -> Result<()> {
+            Self::unavailable()
+        }
+        fn cast(&self, _: &Layout, _: DType) -> Result<Self> {
             Self::unavailable()
         }
     }

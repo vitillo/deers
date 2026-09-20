@@ -303,6 +303,9 @@ pub trait BackendStorage: Sized {
     fn dtype(&self) -> DType;
     fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D>;
     fn copy_compact(&self, src_layout: &Layout, dst: &mut Self) -> Result<()>;
+    /// Converts `layout`'s view of `self` to `dtype`, staying on-device where the
+    /// backend has native cast kernels. Returns a fresh compact storage.
+    fn cast(&self, layout: &Layout, dtype: DType) -> Result<Self>;
 }
 
 /// Backend-agnostic storage wrapper.
@@ -430,6 +433,14 @@ impl BackendStorage for Storage {
             Storage::Cpu(cpu_storage) => cpu_storage.to_vec(layout),
             Storage::Cuda(cuda_storage) => cuda_storage.to_vec(layout),
             Storage::Mps(mps_storage) => mps_storage.to_vec(layout),
+        }
+    }
+
+    fn cast(&self, layout: &Layout, dtype: DType) -> Result<Self> {
+        match self {
+            Storage::Cpu(storage) => Ok(Self::Cpu(storage.cast(layout, dtype)?)),
+            Storage::Cuda(storage) => Ok(Self::Cuda(storage.cast(layout, dtype)?)),
+            Storage::Mps(storage) => Ok(Self::Mps(storage.cast(layout, dtype)?)),
         }
     }
 
