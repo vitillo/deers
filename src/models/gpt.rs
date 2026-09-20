@@ -283,6 +283,13 @@ impl KvCache {
 /// Queries and keys pass through a per-head RMSNorm before RoPE. Large models let
 /// attention logits grow until softmax saturates and gradients vanish. QK-Norm caps
 /// each head at unit RMS, so scores stay bounded and training stays stable at scale.
+///
+/// With the output gate enabled, the query projection doubles to `2 * n_q_heads *
+/// head_dim` channels. Each head's extra width is a per-token gate, not a second
+/// query: it bypasses QK-Norm, RoPE, and attention, and instead scales the head's
+/// attended output through `sigmoid` before the output projection. This is the
+/// Qwen3.5 full-attention layout, where the gate lets each token throttle how much
+/// of the mixed context reaches the residual stream.
 #[derive(Debug)]
 pub struct CausalSelfAttention {
     n_embd: usize,
@@ -296,6 +303,7 @@ pub struct CausalSelfAttention {
     out_proj: Linear,
     q_norm: RMSNorm,
     k_norm: RMSNorm,
+    output_gate: bool,
 }
 
 impl CausalSelfAttention {
@@ -330,22 +338,41 @@ impl CausalSelfAttention {
         n_kv_heads: usize,
         head_dim: usize,
     ) -> Self {
-        assert!(
-            n_q_heads.is_multiple_of(n_kv_heads),
-            "n_q_heads must be divisible by n_kv_heads"
-        );
+        Self::new_gqa_with_head_dim_and_output_gate(
+            builder, n_embd, n_q_heads, n_kv_heads, head_dim, false,
+        )
+    }
+
+    /// Creates causal self-attention with an explicit per-head width and an
+    /// optional Qwen3.5-style output gate.
+    ///
+    /// With `output_gate`, the query projection spans `2 * n_q_heads *
+    /// head_dim` channels: each head's first half is its query, each head's
+    /// second half is its output gate. Without it, the layout matches
+    /// [`new_gqa_with_head_dim`](Self::new_gqa_with_head_dim) exactly.
+    pub fn new_gqa_with_head_dim_and_output_gate(
+        builder: ParamBuilder,
+        n_embd: usize,
+        n_q_heads: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        output_gate: bool,
+    ) -> Self {
+        assert!(n_q_heads.is_multiple_of(n_kv_heads), "n_q_heads must be divisible by n_kv_heads");
+        let q_width = if output_gate { 2 * n_q_heads * head_dim } else { n_q_heads * head_dim };
         Self {
             n_embd,
             n_q_heads,
             n_kv_heads,
             group_size: n_q_heads / n_kv_heads,
             head_dim,
-            q_proj: Linear::no_bias(builder.pp("q_proj"), n_embd, n_q_heads * head_dim),
+            q_proj: Linear::no_bias(builder.pp("q_proj"), n_embd, q_width),
             k_proj: Linear::no_bias(builder.pp("k_proj"), n_embd, n_kv_heads * head_dim),
             v_proj: Linear::no_bias(builder.pp("v_proj"), n_embd, n_kv_heads * head_dim),
             out_proj: Linear::no_bias(builder.pp("out_proj"), n_q_heads * head_dim, n_embd),
             q_norm: RMSNorm::new_affine(builder.pp("q_norm"), head_dim, QK_NORM_EPS),
             k_norm: RMSNorm::new_affine(builder.pp("k_norm"), head_dim, QK_NORM_EPS),
+            output_gate,
         }
     }
 
@@ -354,12 +381,18 @@ impl CausalSelfAttention {
     /// QK-Norm, RoPE, and the grouped-query repeat all apply here, so cached
     /// keys and values already carry them and decode never recomputes them.
     /// Also returns the batch size and sequence length of `x`.
+    ///
+    /// With the output gate enabled, the query projection carries each head's
+    /// gate in its second half, so this also returns the raw gate shaped
+    /// `[B*T, H_q*D]`; without the gate it returns `None` in that slot. The
+    /// gate derives from the current input tokens only, like queries, so the
+    /// key/value cache never stores it.
     fn project_qkv(
         &self,
         x: &Tensor,
         cos: &Tensor,
         sin: &Tensor,
-    ) -> Result<(Tensor, Tensor, Tensor, usize, usize)> {
+    ) -> Result<(Tensor, Tensor, Tensor, Option<Tensor>, usize, usize)> {
         let shape = x.layout().shape();
         assert_eq!(shape.ndim(), 3, "attention expects input shape [B, T, C]");
 
@@ -372,10 +405,22 @@ impl CausalSelfAttention {
         );
 
         let x_flat = x.reshape(vec![batch_size * seq_len, channels]); // [B*T, C]
-        let q = self.q_proj.forward(&x_flat)?.rearrange(
-            "(b t) (h d) -> b t h d",
+        let q_or_qg = self.q_proj.forward(&x_flat)?.rearrange(
+            "(b t) (h w) -> b t h w",
             &[("b", batch_size), ("t", seq_len), ("h", self.n_q_heads)],
         );
+        // The doubled projection lays each head out as `[query | gate]`:
+        // narrowing the head axis keeps the halves per-head, where a flat
+        // split of the projection width would mix heads across halves.
+        let (q, gate) = if self.output_gate {
+            let q = q_or_qg.narrow(3, 0, self.head_dim);
+            let gate = q_or_qg
+                .narrow(3, self.head_dim, self.head_dim)
+                .rearrange("b t h d -> (b t) (h d)", &[]);
+            (q, Some(gate))
+        } else {
+            (q_or_qg, None)
+        };
         let k = self.k_proj.forward(&x_flat)?.rearrange(
             "(b t) (h d) -> b t h d",
             &[("b", batch_size), ("t", seq_len), ("h", self.n_kv_heads)],
@@ -405,15 +450,20 @@ impl CausalSelfAttention {
             v.repeat("b t kv d -> b t (kv g) d", &[("g", self.group_size)])
         };
         let v = v.rearrange("b t h d -> b h t d", &[]);
-        Ok((q, k, v, batch_size, seq_len))
+        Ok((q, k, v, gate, batch_size, seq_len))
     }
 
     /// Attends queries over keys and values under `mask`, returning `[B, T, C]`.
+    ///
+    /// A present `gate` scales each attended head output through `sigmoid`
+    /// before the output projection, so a closed gate throttles its head's
+    /// contribution to the residual stream without touching the scores.
     fn attend(
         &self,
         q: &Tensor,
         k: &Tensor,
         v: &Tensor,
+        gate: Option<&Tensor>,
         mask: Tensor,
         batch_size: usize,
         seq_len: usize,
@@ -422,6 +472,10 @@ impl CausalSelfAttention {
         let scores = Tensor::einsum("b h t d, b h s d -> b h t s", q, k) * scale;
         let attn = (&scores + &mask).softmax(3);
         let y_flat = attn.matmul(v).rearrange("b h t d -> (b t) (h d)", &[]);
+        let y_flat = match gate {
+            Some(gate) => &y_flat * &gate.sigmoid(),
+            None => y_flat,
+        };
 
         let out = self.out_proj.forward(&y_flat)?;
         Ok(out.rearrange("(b t) c -> b t c", &[("b", batch_size), ("t", seq_len)]))
@@ -429,9 +483,9 @@ impl CausalSelfAttention {
 
     /// Runs self-attention on `[B, T, C]` inputs using the provided RoPE caches.
     pub fn forward(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
-        let (q, k, v, batch_size, seq_len) = self.project_qkv(x, cos, sin)?;
+        let (q, k, v, gate, batch_size, seq_len) = self.project_qkv(x, cos, sin)?;
         let mask = functional::causal_mask(batch_size, seq_len, 0, x.dtype(), x.device());
-        self.attend(&q, &k, &v, mask, batch_size, seq_len)
+        self.attend(&q, &k, &v, gate.as_ref(), mask, batch_size, seq_len)
     }
 
     /// Scores the whole prompt at once and stores its keys and values in `cache`.
@@ -446,9 +500,9 @@ impl CausalSelfAttention {
         cache: &mut KvCache,
     ) -> Result<Tensor> {
         assert!(cache.is_empty(), "prefill expects an empty cache; decode appends to it");
-        let (q, k, v, batch_size, seq_len) = self.project_qkv(x, cos, sin)?;
+        let (q, k, v, gate, batch_size, seq_len) = self.project_qkv(x, cos, sin)?;
         let mask = functional::causal_mask(batch_size, seq_len, 0, x.dtype(), x.device());
-        let out = self.attend(&q, &k, &v, mask, batch_size, seq_len)?;
+        let out = self.attend(&q, &k, &v, gate.as_ref(), mask, batch_size, seq_len)?;
         cache.append(k, v);
         Ok(out)
     }
@@ -466,12 +520,12 @@ impl CausalSelfAttention {
         cache: &mut KvCache,
     ) -> Result<Tensor> {
         assert!(!cache.is_empty(), "decode expects a non-empty cache; prefill the prompt first");
-        let (q, k, v, batch_size, seq_len) = self.project_qkv(x, cos, sin)?;
+        let (q, k, v, gate, batch_size, seq_len) = self.project_qkv(x, cos, sin)?;
         assert_eq!(seq_len, 1, "decode expects a single token, got {seq_len}");
         let offset = cache.len();
         cache.append(k, v);
         let mask = functional::causal_mask(batch_size, 1, offset, x.dtype(), x.device());
-        self.attend(&q, cache.keys(), cache.values(), mask, batch_size, 1)
+        self.attend(&q, cache.keys(), cache.values(), gate.as_ref(), mask, batch_size, 1)
     }
 
     /// Returns the trainable parameters owned by the attention module.
