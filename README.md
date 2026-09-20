@@ -112,7 +112,7 @@ Views (permute, broadcast, reshape) only change the layout metadata without copy
 
 `Tensor::to_device(...)` moves tensor data between backends. At the module level, `Module::to_device(...)` moves all trainable parameters, keeping the API close to `model.to(device)` in PyTorch.
 
-The accelerator backends (MPS, CUDA) are intentionally small and explicit. They accelerate the `f32` training path with hand-written kernels for element-wise ops, reductions, and tiled matmul, plus cuBLAS/Metal for GEMM.
+The accelerator backends (MPS, CUDA) are intentionally small and explicit. They accelerate the `f32` training path with hand-written kernels for element-wise ops, reductions, and tiled matmul, plus cuBLAS/Metal for GEMM. CUDA also has native `f16`/`bf16` kernels for element-wise ops, reductions, gather/scatter, casts, and cuBLAS GEMM, so inference can run in half precision without leaving the device.
 
 ## Building
 

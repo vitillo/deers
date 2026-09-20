@@ -23,7 +23,7 @@ Ready signal is a successful build with exit code 0. When doctor reports a GPU t
 cargo build --locked --features cuda
 ```
 
-If the CUDA build fails inside `cudarc`'s build script with `Unsupported cuda toolkit version`, the pinned `cudarc` is older than the host toolkit (seen with toolkit 13.3 vs cudarc 0.19.3; 0.19.9 builds). That is a dependency pin gap, not a code failure: either bump the pin or fall back to the default build plus `cargo clippy --lib --locked`, and report the GPU path as not proven rather than forcing `--all-features` (which pulls in the same `cudarc` build).
+If the CUDA build fails inside `cudarc`'s build script with `Unsupported cuda toolkit version`, the pinned `cudarc` is older than the host toolkit (the pin now tracks 0.19.9, which builds against toolkit 13.3). That is a dependency pin gap, not a code failure: either bump the pin further or fall back to the default build plus `cargo clippy --lib --locked`, and report the GPU path as not proven rather than forcing `--all-features` (which pulls in the same `cudarc` build).
 
 On macOS the default build already includes Metal.
 
