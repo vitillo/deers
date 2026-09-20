@@ -14,7 +14,9 @@ use crate::backprop::GradientStore;
 use crate::error::{Error, Result};
 use crate::layout::{Layout, Shape};
 use crate::profiler;
-use crate::storage::{self, BackendStorage, MpsStorage, ReduceMax, ReduceSum, Storage};
+use crate::storage::{
+    self, BackendStorage, CpuStorage, MpsStorage, ReduceMax, ReduceSum, Storage,
+};
 use crate::tensor::Tensor;
 
 fn allocated_bytes(elements: usize, dtype: crate::DType) -> usize {
@@ -1493,7 +1495,16 @@ impl Cat {
                 }
             }
         }
-        let args: Vec<Tensor> = args.into_iter().map(|a| a.compact()).collect();
+        // Inference tensors on CPU keep strided views: forward copies strided
+        // inputs directly into the output, so intermediate temps buy nothing.
+        // Training keeps the compact temps so Compact grad nodes stay in the graph.
+        let cpu_infer = matches!(args[0].device(), crate::Device::Cpu)
+            && args.iter().all(|a| !a.requires_grad());
+        let args: Vec<Tensor> = if cpu_infer {
+            args
+        } else {
+            args.into_iter().map(|a| a.compact()).collect()
+        };
         Ok(Self { args })
     }
 }
@@ -1510,12 +1521,26 @@ impl TensorOp for Cat {
 
         let storage = {
             let guards: Vec<_> = self.args.iter().map(|a| a.storage()).collect();
-            let parts: Vec<(&Storage, usize)> = guards
-                .iter()
-                .zip(self.args.iter())
-                .map(|(g, a)| (&**g, a.layout().size()))
-                .collect();
-            Storage::cat(&parts)?
+            if matches!(self.args[0].device(), crate::Device::Cpu)
+                && self.args.iter().any(|a| !a.layout().is_compact())
+            {
+                let parts: Vec<(&CpuStorage, &Layout)> = guards
+                    .iter()
+                    .zip(self.args.iter())
+                    .map(|(g, a)| match &**g {
+                        Storage::Cpu(cpu) => (cpu, a.layout()),
+                        _ => panic!("mixed devices in cat"),
+                    })
+                    .collect();
+                Storage::Cpu(CpuStorage::cat_strided(&parts)?)
+            } else {
+                let parts: Vec<(&Storage, usize)> = guards
+                    .iter()
+                    .zip(self.args.iter())
+                    .map(|(g, a)| (&**g, a.layout().size()))
+                    .collect();
+                Storage::cat(&parts)?
+            }
         };
 
         Ok(Tensor::new(

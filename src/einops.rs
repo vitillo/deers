@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 
 use crate::Tensor;
+use crate::layout::Layout;
 
 /// One flat axis inside a pattern group.
 #[derive(Debug, Clone, PartialEq)]
@@ -525,6 +526,29 @@ fn reshape_unless(x: &Tensor, shape: Vec<usize>) -> Tensor {
     if current == shape { x.clone() } else { x.reshape(shape) }
 }
 
+/// Views `x` with one extra size-1 dim at `axis` without copying.
+///
+/// A size-1 dim addresses a single element, so stride 0 reads the same
+/// element the copying reshape would expose. Training tensors keep the
+/// copying reshape so the Reshape grad node stays in the graph.
+fn view_insert_size1(x: &Tensor, axis: usize) -> Tensor {
+    let mut shape: Vec<usize> = x.layout().shape().iter().copied().collect();
+    shape.insert(axis, 1);
+    let mut strides: Vec<isize> = x.layout().strides().iter().copied().collect();
+    strides.insert(axis, 0);
+    Tensor::new(x.storage_clone(), Layout::new(shape, strides, x.layout().offset), false, None)
+}
+
+/// Views `x` with the size-1 dim at `axis` removed without copying.
+fn view_remove_size1(x: &Tensor, axis: usize) -> Tensor {
+    let mut shape: Vec<usize> = x.layout().shape().iter().copied().collect();
+    assert_eq!(shape[axis], 1);
+    shape.remove(axis);
+    let mut strides: Vec<isize> = x.layout().strides().iter().copied().collect();
+    strides.remove(axis);
+    Tensor::new(x.storage_clone(), Layout::new(shape, strides, x.layout().offset), false, None)
+}
+
 /// Permutes only when the order actually changes.
 fn permute_unless(tensor: &Tensor, axes: Vec<usize>) -> Tensor {
     if axes.iter().enumerate().all(|(index, &axis)| index == axis) {
@@ -996,7 +1020,7 @@ fn unsqueeze_vector(tensor: Tensor, vector: bool, left: bool) -> Tensor {
     let mut shape: Vec<usize> = tensor.layout().shape().iter().copied().collect();
     let axis = if left { shape.len() - 1 } else { shape.len() };
     shape.insert(axis, 1);
-    tensor.reshape(shape)
+    if tensor.requires_grad() { tensor.reshape(shape) } else { view_insert_size1(&tensor, axis) }
 }
 
 /// Drops the size 1 dims grown for vector sides after the product.
@@ -1004,18 +1028,32 @@ fn squeeze_vector(tensor: Tensor, left_vector: bool, right_vector: bool) -> Tens
     if !left_vector && !right_vector {
         return tensor;
     }
-    let shape: Vec<usize> = tensor.layout().shape().iter().copied().collect();
-    let rank = shape.len();
-    let mut squeezed = shape.clone();
+    if tensor.requires_grad() {
+        let shape: Vec<usize> = tensor.layout().shape().iter().copied().collect();
+        let rank = shape.len();
+        let mut squeezed = shape.clone();
+        if left_vector {
+            assert_eq!(squeezed[rank - 2], 1);
+            squeezed.remove(rank - 2);
+        }
+        if right_vector {
+            assert_eq!(squeezed[squeezed.len() - 1], 1);
+            squeezed.pop();
+        }
+        return tensor.reshape(squeezed);
+    }
+    let mut out = tensor;
     if left_vector {
-        assert_eq!(squeezed[rank - 2], 1);
-        squeezed.remove(rank - 2);
+        let rank = out.layout().shape().ndim();
+        assert_eq!(out.layout().shape()[rank - 2], 1);
+        out = view_remove_size1(&out, rank - 2);
     }
     if right_vector {
-        assert_eq!(squeezed[squeezed.len() - 1], 1);
-        squeezed.pop();
+        let rank = out.layout().shape().ndim();
+        assert_eq!(out.layout().shape()[rank - 1], 1);
+        out = view_remove_size1(&out, rank - 1);
     }
-    tensor.reshape(squeezed)
+    out
 }
 
 /// Binds one equation side: explicit labels plus leading batch dims.
@@ -1058,9 +1096,16 @@ fn expand_batch(tensor: Tensor, batch_shape: &[usize]) -> Tensor {
     {
         return tensor;
     }
-    let mut grown = vec![1; full_rank - shape.len()];
-    grown.extend(shape.iter().copied());
     let mut full = batch_shape.to_vec();
     full.extend_from_slice(&shape[shape.len() - 2..]);
-    reshape_unless(&tensor, grown).broadcast(full)
+    if tensor.requires_grad() {
+        let mut grown = vec![1; full_rank - shape.len()];
+        grown.extend(shape.iter().copied());
+        return reshape_unless(&tensor, grown).broadcast(full);
+    }
+    let mut out = tensor;
+    for _ in shape.len()..full_rank {
+        out = view_insert_size1(&out, 0);
+    }
+    out.broadcast(full)
 }

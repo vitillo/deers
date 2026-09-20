@@ -101,6 +101,95 @@ impl CpuStorage {
         }
     }
 
+    /// Concatenates strided storages in row-major order without intermediate temps.
+    ///
+    /// Each part copies its logical elements (per its layout) into the output
+    /// in order, so transpose views land directly in the cat output.
+    pub(crate) fn cat_strided(parts: &[(&CpuStorage, &Layout)]) -> Result<CpuStorage> {
+        if parts.is_empty() {
+            return Err(Error::LayoutMismatch("cat: empty parts".into()));
+        }
+        let expected = parts[0].0.dtype();
+        let total_len: usize = parts.iter().map(|(_, layout)| layout.size()).sum();
+        for (storage, _) in &parts[1..] {
+            if storage.dtype() != expected {
+                return Err(Error::DTypeMismatch(format!(
+                    "cat: expected {:?} but got {:?}",
+                    expected,
+                    storage.dtype()
+                )));
+            }
+        }
+        let part_view = |layout: &Layout| {
+            let shape: Vec<usize> =
+                (0..layout.ndim()).map(|i| layout.shape[i]).collect();
+            let strides: Vec<usize> = layout
+                .strides
+                .0
+                .iter()
+                .map(|&s| {
+                    debug_assert!(s >= 0, "cat: negative stride");
+                    s as usize
+                })
+                .collect();
+            (shape, strides)
+        };
+        match expected {
+            DType::F16 => {
+                let mut data = vec![f16::from_f32(0.0); total_len];
+                let mut off = 0;
+                for (storage, layout) in parts {
+                    if let CpuStorage::F16(src) = storage {
+                        let (shape, strides) = part_view(layout);
+                        let len = layout.size();
+                        copy_strided(src, &mut data[off..off + len], layout.offset, &shape, &strides);
+                        off += len;
+                    }
+                }
+                Ok(CpuStorage::F16(data))
+            }
+            DType::BF16 => {
+                let mut data = vec![bf16::ZERO; total_len];
+                let mut off = 0;
+                for (storage, layout) in parts {
+                    if let CpuStorage::BF16(src) = storage {
+                        let (shape, strides) = part_view(layout);
+                        let len = layout.size();
+                        copy_strided(src, &mut data[off..off + len], layout.offset, &shape, &strides);
+                        off += len;
+                    }
+                }
+                Ok(CpuStorage::BF16(data))
+            }
+            DType::F32 => {
+                let mut data = vec![0.0f32; total_len];
+                let mut off = 0;
+                for (storage, layout) in parts {
+                    if let CpuStorage::F32(src) = storage {
+                        let (shape, strides) = part_view(layout);
+                        let len = layout.size();
+                        copy_strided(src, &mut data[off..off + len], layout.offset, &shape, &strides);
+                        off += len;
+                    }
+                }
+                Ok(CpuStorage::F32(data))
+            }
+            DType::I64 => {
+                let mut data = vec![0i64; total_len];
+                let mut off = 0;
+                for (storage, layout) in parts {
+                    if let CpuStorage::I64(src) = storage {
+                        let (shape, strides) = part_view(layout);
+                        let len = layout.size();
+                        copy_strided(src, &mut data[off..off + len], layout.offset, &shape, &strides);
+                        off += len;
+                    }
+                }
+                Ok(CpuStorage::I64(data))
+            }
+        }
+    }
+
     fn gemm_strided<T: 'static>(
         left: &[T],
         lhs_rs: isize,
