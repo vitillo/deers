@@ -76,7 +76,7 @@ See [`examples/mnist_train.rs`](examples/mnist_train.rs) for a simpler MNIST cla
 
 **Devices** — CPU, MPS (Metal on macOS), and CUDA (Linux, behind `cuda` feature flag)
 
-**DTypes** — `f16`, `f32`, and `i64`
+**DTypes** — `f16`, `bf16`, `f32`, and `i64`
 
 **Tensor ops** — neg, add, sub, mul, div, powf, log, exp, sqrt, sin, cos, relu, sigmoid, tanh, matmul, gather, index_select, cat, clamp, where_cond, masked_fill, tril, triu
 

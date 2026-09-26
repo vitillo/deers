@@ -537,10 +537,7 @@ mod imp {
         env_roots
             .chain(standard_roots)
             .flat_map(|root| {
-                [
-                    root.join("include"),
-                    root.join("targets").join("x86_64-linux").join("include"),
-                ]
+                [root.join("include"), root.join("targets").join("x86_64-linux").join("include")]
             })
             .filter(|path| path.join("cuda.h").is_file())
             .map(|path| path.display().to_string())
@@ -1223,10 +1220,17 @@ mod imp {
 
             // Try to use each operand directly (CUBLAS_OP_T for transposed layouts) to avoid
             // copying. Fall back to compact for layouts with non-standard strides.
-            let lhs_compact: Option<CudaStorage> =
-                if try_gemm_params(layout, m, k).is_none() { Some(self.compact(layout)?) } else { None };
-            let rhs_compact: Option<CudaStorage> =
-                if try_gemm_params(layout_other, k, n).is_none() { Some(other.compact(layout_other)?) } else { None };
+            let lhs_compact: Option<CudaStorage> = if try_gemm_params(layout, m, k).is_none() {
+                Some(self.compact(layout)?)
+            } else {
+                None
+            };
+            let rhs_compact: Option<CudaStorage> = if try_gemm_params(layout_other, k, n).is_none()
+            {
+                Some(other.compact(layout_other)?)
+            } else {
+                None
+            };
             let lhs_storage: &CudaStorage = lhs_compact.as_ref().unwrap_or(self);
             let rhs_storage: &CudaStorage = rhs_compact.as_ref().unwrap_or(other);
             // If we compacted, the result is always normal row-major (CUBLAS_OP_N, offset=0).
@@ -1588,7 +1592,9 @@ mod imp {
             let right_len: usize = layout.shape().iter().skip(dim + 1).product();
             match (&src.inner, &indices.inner) {
                 (CudaInner::F16(src), CudaInner::I64(indices)) => {
-                    let out = unsafe { alloc_uninit::<f16>(&self.runtime, left_len * index_len * right_len) }?;
+                    let out = unsafe {
+                        alloc_uninit::<f16>(&self.runtime, left_len * index_len * right_len)
+                    }?;
                     let left = left_len as u32;
                     let index_len_u32 = index_len as u32;
                     let src_dim_u32 = src_dim as u32;
@@ -1632,7 +1638,9 @@ mod imp {
                     Ok(Self { inner: CudaInner::BF16(out), runtime: self.runtime.clone() })
                 }
                 (CudaInner::F32(src), CudaInner::I64(indices)) => {
-                    let out = unsafe { alloc_uninit::<f32>(&self.runtime, left_len * index_len * right_len) }?;
+                    let out = unsafe {
+                        alloc_uninit::<f32>(&self.runtime, left_len * index_len * right_len)
+                    }?;
                     let left = left_len as u32;
                     let index_len_u32 = index_len as u32;
                     let src_dim_u32 = src_dim as u32;
@@ -1785,10 +1793,19 @@ mod imp {
             let src = self.compact(layout)?;
             match &src.inner {
                 CudaInner::F16(s) => {
-                    let out = unsafe { alloc_uninit::<f16>(&src.runtime, outer_size * inner_size) }?;
+                    let out =
+                        unsafe { alloc_uninit::<f16>(&src.runtime, outer_size * inner_size) }?;
                     let outer = outer_size as u32;
                     let inner = inner_size as u32;
-                    launch_reduce!(&src.runtime, "log_softmax_fwd_f16", outer_size, s, &out, &outer, &inner);
+                    launch_reduce!(
+                        &src.runtime,
+                        "log_softmax_fwd_f16",
+                        outer_size,
+                        s,
+                        &out,
+                        &outer,
+                        &inner
+                    );
                     Ok(Self { inner: CudaInner::F16(out), runtime: src.runtime.clone() })
                 }
                 CudaInner::BF16(s) => {
@@ -1808,10 +1825,19 @@ mod imp {
                     Ok(Self { inner: CudaInner::BF16(out), runtime: src.runtime.clone() })
                 }
                 CudaInner::F32(s) => {
-                    let out = unsafe { alloc_uninit::<f32>(&src.runtime, outer_size * inner_size) }?;
+                    let out =
+                        unsafe { alloc_uninit::<f32>(&src.runtime, outer_size * inner_size) }?;
                     let outer = outer_size as u32;
                     let inner = inner_size as u32;
-                    launch_reduce!(&src.runtime, "log_softmax_fwd_f32", outer_size, s, &out, &outer, &inner);
+                    launch_reduce!(
+                        &src.runtime,
+                        "log_softmax_fwd_f32",
+                        outer_size,
+                        s,
+                        &out,
+                        &outer,
+                        &inner
+                    );
                     Ok(Self { inner: CudaInner::F32(out), runtime: src.runtime.clone() })
                 }
                 CudaInner::I64(_) => {
@@ -1835,10 +1861,20 @@ mod imp {
             let lsm = lsm.compact(lsm_layout)?;
             match (&grad.inner, &lsm.inner) {
                 (CudaInner::F16(g), CudaInner::F16(l)) => {
-                    let out = unsafe { alloc_uninit::<f16>(&grad.runtime, outer_size * inner_size) }?;
+                    let out =
+                        unsafe { alloc_uninit::<f16>(&grad.runtime, outer_size * inner_size) }?;
                     let outer = outer_size as u32;
                     let inner = inner_size as u32;
-                    launch_reduce!(&grad.runtime, "log_softmax_bwd_f16", outer_size, g, l, &out, &outer, &inner);
+                    launch_reduce!(
+                        &grad.runtime,
+                        "log_softmax_bwd_f16",
+                        outer_size,
+                        g,
+                        l,
+                        &out,
+                        &outer,
+                        &inner
+                    );
                     Ok(Self { inner: CudaInner::F16(out), runtime: grad.runtime.clone() })
                 }
                 (CudaInner::BF16(g), CudaInner::BF16(l)) => {
@@ -1859,13 +1895,25 @@ mod imp {
                     Ok(Self { inner: CudaInner::BF16(out), runtime: grad.runtime.clone() })
                 }
                 (CudaInner::F32(g), CudaInner::F32(l)) => {
-                    let out = unsafe { alloc_uninit::<f32>(&grad.runtime, outer_size * inner_size) }?;
+                    let out =
+                        unsafe { alloc_uninit::<f32>(&grad.runtime, outer_size * inner_size) }?;
                     let outer = outer_size as u32;
                     let inner = inner_size as u32;
-                    launch_reduce!(&grad.runtime, "log_softmax_bwd_f32", outer_size, g, l, &out, &outer, &inner);
+                    launch_reduce!(
+                        &grad.runtime,
+                        "log_softmax_bwd_f32",
+                        outer_size,
+                        g,
+                        l,
+                        &out,
+                        &outer,
+                        &inner
+                    );
                     Ok(Self { inner: CudaInner::F32(out), runtime: grad.runtime.clone() })
                 }
-                _ => Err(Error::DTypeMismatch("log_softmax_bwd: dtype mismatch between grad and lsm".into())),
+                _ => Err(Error::DTypeMismatch(
+                    "log_softmax_bwd: dtype mismatch between grad and lsm".into(),
+                )),
             }
         }
 
@@ -2037,7 +2085,14 @@ mod imp {
         fn log_softmax_fwd(&self, _: &Layout, _: usize, _: usize) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
-        fn log_softmax_bwd(&self, _: &Layout, _: &Self, _: &Layout, _: usize, _: usize) -> Result<Self> {
+        fn log_softmax_bwd(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: usize,
+            _: usize,
+        ) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn dtype(&self) -> DType {
