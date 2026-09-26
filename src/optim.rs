@@ -304,7 +304,9 @@ impl AdamW {
 
 /// Clips the global gradient norm across `parameters` to `max_norm`.
 ///
-/// Returns the norm before clipping so callers can log it.
+/// Returns the norm before clipping so callers can log it. F16 norms are
+/// accumulated in f32 on the host so they cannot overflow the F16 range.
+/// Panics if `max_norm` is not positive or the parameters are not floats.
 pub fn clip_grad_norm(
     parameters: &[Parameter],
     grads: &mut GradientStore,
