@@ -106,12 +106,13 @@ pub fn accuracy(logits: &Tensor, targets: &Tensor) -> f64 {
 
 /// Fraction of batch positions whose target ranks among the top `k` scores.
 ///
-/// Same shapes as [`accuracy`]. Selection reuses the existing `topk`
-/// selector on the host copy of the logits: the top `k` are the `k` largest scores in descending order with
-/// ties broken toward the lowest class index, so a target tied at the cutoff
-/// counts only when its index orders within the first `k`. `k` equal to the
-/// class count always returns 1.0 for valid targets. Panics when `k` is zero
-/// or exceeds the class count, plus the [`accuracy`] panics.
+/// Same shapes as [`accuracy`]. Selection reuses the existing `topk` selector
+/// on the host copy of the logits: the top `k` are the `k` largest scores in
+/// descending order with ties broken toward the lowest class index, so a
+/// target tied at the cutoff counts only when its index orders within the
+/// first `k`. `k` equal to the class count always returns 1.0 for valid
+/// targets. Panics when `k` is zero or exceeds the class count, plus the
+/// [`accuracy`] panics.
 pub fn top_k_accuracy(logits: &Tensor, targets: &Tensor, k: usize) -> f64 {
     let (n, num_classes) = check_classification_inputs(logits, targets);
     assert!(k >= 1, "top-k needs k >= 1, got {k}");
