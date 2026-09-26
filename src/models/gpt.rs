@@ -871,6 +871,9 @@ pub struct GPT {
     rope_scaling: RopeScaling,
 }
 
+/// Initial standard deviation of the tied token embedding / output head weight.
+const TIED_EMBEDDING_STD: f64 = 0.02;
+
 /// The GPT output head: a separate projection, or the tied embedding weight.
 #[derive(Debug)]
 enum LmHead {
@@ -883,7 +886,13 @@ impl GPT {
     pub fn new(config: GPTConfig, builder: ParamBuilder) -> Self {
         assert!(config.n_embd.is_multiple_of(config.n_head), "n_embd must be divisible by n_head");
 
-        let wte = Embedding::new(builder.pp("wte"), config.vocab_size, config.n_embd);
+        let wte = if config.tie_embeddings {
+            let shape = (config.vocab_size, config.n_embd);
+            let weight = Tensor::randn(shape, DType::F32, Device::Cpu) * TIED_EMBEDDING_STD;
+            Embedding::from_weight(builder.pp("wte").param("weight", weight))
+        } else {
+            Embedding::new(builder.pp("wte"), config.vocab_size, config.n_embd)
+        };
         let blocks = (0..config.n_layer)
             .map(|index| {
                 Block::new_with(

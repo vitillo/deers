@@ -250,3 +250,38 @@ fn test_tied_embeddings_optimizer_step_keeps_weights_in_sync() {
     assert_eq!(wte, head, "embedding and head diverged after the step");
     assert!(wte.iter().all(|v| v.is_finite()));
 }
+
+fn weight_std(parameter: &Parameter) -> f32 {
+    let values = parameter.to_vec::<f32>().unwrap();
+    let mean = values.iter().sum::<f32>() / values.len() as f32;
+    let var = values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32;
+    var.sqrt()
+}
+
+#[test]
+fn test_tied_embeddings_start_with_small_logit_scale() {
+    // Arrange
+    let store = ParamStore::new();
+    let config = GPTConfig { tie_embeddings: true, vocab_size: 64, n_embd: 32, ..tiny_config() };
+
+    // Act
+    gpt::GPT::new(config, store.root());
+    let std = weight_std(&named(&store)["wte.weight"]);
+
+    // Assert: the shared weight uses a GPT-2 style small init, not N(0, 1).
+    assert!((0.015..0.025).contains(&std), "tied weight std was {std}");
+}
+
+#[test]
+fn test_untied_embeddings_keep_standard_normal_init() {
+    // Arrange
+    let store = ParamStore::new();
+    let config = GPTConfig { vocab_size: 64, n_embd: 32, ..tiny_config() };
+
+    // Act
+    gpt::GPT::new(config, store.root());
+    let std = weight_std(&named(&store)["wte.weight"]);
+
+    // Assert
+    assert!((0.9..1.1).contains(&std), "untied embedding std was {std}");
+}
