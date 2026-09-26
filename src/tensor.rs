@@ -99,7 +99,7 @@ use rand::RngExt;
 
 use crate::device::Device;
 use crate::dtype::{DType, WithDType};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::layout::{Layout, Shape};
 use crate::ops::{self, TensorOp};
 use crate::storage::{BackendStorage, CpuStorage, Storage};
@@ -333,9 +333,19 @@ impl Tensor {
     }
 
     /// Returns a copy of this tensor on the target device.
+    ///
+    /// Moving a BF16 tensor to CUDA fails: the CUDA backend has no BF16
+    /// storage or kernels, so this guard reports that up front instead of
+    /// panicking deep inside the backend.
     pub fn to_device(&self, device: Device) -> Result<Tensor> {
         if self.device() == device {
             return Ok(self.clone());
+        }
+
+        if device == Device::Cuda && self.dtype() == DType::BF16 {
+            return Err(Error::NotImplemented(
+                "cuda backend does not support BF16 tensors; convert to F32 or F16 before moving to CUDA",
+            ));
         }
 
         let shape: Vec<usize> = self.layout().shape().iter().copied().collect();
@@ -1215,6 +1225,38 @@ mod tests {
         assert_eq!(c.dtype(), DType::BF16);
         let vals: Vec<f32> = c.to_vec::<bf16>().unwrap().iter().map(|v| v.to_f32()).collect();
         assert_eq!(vals, vec![19.0, 22.0, 43.0, 50.0]);
+    }
+
+    #[test]
+    fn test_to_device_bf16_to_cuda_fails_loudly() {
+        // Arrange
+        let tensor =
+            Tensor::from_vec(vec![bf16::from_f32(1.0), bf16::from_f32(2.0)], (2,), Device::Cpu);
+
+        // Act
+        let result = tensor.to_device(Device::Cuda);
+
+        // Assert: the CUDA backend has no BF16 storage or kernels, so the move
+        // must report that up front instead of panicking inside the backend.
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("BF16"), "unexpected message: {message}");
+        assert!(
+            message.contains("CUDA") || message.contains("cuda"),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn test_to_device_bf16_same_device_still_clones() {
+        // Arrange
+        let tensor = Tensor::from_vec(vec![bf16::from_f32(1.0)], (1,), Device::Cpu);
+
+        // Act
+        let moved = tensor.to_device(Device::Cpu).unwrap();
+
+        // Assert: the guard only fires on a real move to CUDA.
+        assert_eq!(moved.device(), Device::Cpu);
+        assert_eq!(moved.to_vec::<bf16>().unwrap(), vec![bf16::from_f32(1.0)]);
     }
 
     #[test]
