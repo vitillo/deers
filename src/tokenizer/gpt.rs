@@ -42,6 +42,11 @@ impl Tokenizer for Gpt2Tokenizer {
         // r50k_base: 50256 base tokens + 1 special token (<|endoftext|>)
         50257
     }
+
+    fn eos_token_id(&self) -> u32 {
+        // r50k_base reserves 50256 for <|endoftext|>.
+        50256
+    }
 }
 
 /// OpenAI's cl100k_base encoding.
@@ -82,6 +87,11 @@ impl Tokenizer for Cl100kTokenizer {
         // cl100k_base: 100256 base tokens + 5 special tokens
         // (<|endoftext|>, <|fim_prefix|>, <|fim_middle|>, <|fim_suffix|>, <|endofprompt|>)
         100261
+    }
+
+    fn eos_token_id(&self) -> u32 {
+        // cl100k_base reserves 100257 for <|endoftext|>.
+        100257
     }
 }
 
