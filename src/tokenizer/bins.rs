@@ -5,7 +5,21 @@ use std::path::{Path, PathBuf};
 use std::{fs, fs::File};
 
 use super::Tokenizer;
-use crate::error::Result;
+use crate::error::{Error, Result};
+
+/// Magic prefix identifying the versioned token-bin format.
+///
+/// Versioned bins store raw little-endian `u32` ids after this header.
+/// Bins written before the header existed are raw little-endian `u16`
+/// streams; loaders still read those and widen them on load, so the header
+/// means a bin is never silently misread as the wrong width.
+pub const TOKEN_BIN_MAGIC: &[u8; 8] = b"DEERSTB\x01";
+/// Bytes per token id in the versioned format.
+const TOKEN_BIN_ITEM_BYTES: usize = 4;
+/// Largest token id the versioned token-bin format can store.
+///
+/// This covers Qwen3 (151,936 ids) and Qwen3.5 (248,320 ids) vocabularies.
+pub const MAX_TOKEN_BIN_ID: u32 = u32::MAX;
 
 /// Paths for a prepared token-bin dataset.
 pub struct TokenBinPaths {
@@ -60,6 +74,7 @@ fn tokenize_text_file_to_bin(
     let mut reader = BufReader::new(input);
     let output = File::create(out_path)?;
     let mut writer = BufWriter::new(output);
+    writer.write_all(TOKEN_BIN_MAGIC)?;
     let total_bytes = std::fs::metadata(path)?.len() as usize;
     let report_bytes = (64 * 1024 * 1024).min(total_bytes.max(1));
     let mut next_report = report_bytes;
@@ -84,7 +99,7 @@ fn tokenize_text_file_to_bin(
         processed_bytes += bytes_read;
 
         for token in tokenizer.encode(&line) {
-            let token = u16::try_from(token).expect("token id must fit in u16");
+            let token = check_token_id(token)?;
             writer.write_all(&token.to_le_bytes())?;
             total_tokens += 1;
         }
@@ -111,6 +126,18 @@ fn tokenize_text_file_to_bin(
     Ok(total_tokens)
 }
 
+/// Rejects token ids the bin format cannot store, naming the supported range.
+///
+/// Ids arrive as `u32` and the bin stores `u32`, so this cannot fail today;
+/// the explicit check keeps the supported range in one named place instead
+/// of an `expect` that would go stale the next time the range matters.
+fn check_token_id(token: u32) -> Result<u32> {
+    if u64::from(token) > u64::from(MAX_TOKEN_BIN_ID) {
+        return Err(Error::TokenIdOutOfRange { id: token, max: MAX_TOKEN_BIN_ID });
+    }
+    Ok(token)
+}
+
 fn format_mib(bytes: usize) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
@@ -126,9 +153,25 @@ fn split_token_bin(
     val_path: &Path,
 ) -> Result<()> {
     let bytes = std::fs::read(all_path)?;
-    let split_at = train_tokens * 2;
-    std::fs::write(train_path, &bytes[..split_at])?;
-    std::fs::write(val_path, &bytes[split_at..])?;
+    assert!(
+        bytes.starts_with(TOKEN_BIN_MAGIC),
+        "token bin is missing its version header"
+    );
+    let payload = &bytes[TOKEN_BIN_MAGIC.len()..];
+    assert!(
+        payload.len().is_multiple_of(TOKEN_BIN_ITEM_BYTES),
+        "token bin payload must contain u32 values"
+    );
+    let split_at = TOKEN_BIN_MAGIC.len() + train_tokens * TOKEN_BIN_ITEM_BYTES;
+    assert!(split_at <= bytes.len(), "train split runs past the token bin");
+    let mut train_bytes = Vec::with_capacity(split_at);
+    train_bytes.extend_from_slice(TOKEN_BIN_MAGIC);
+    train_bytes.extend_from_slice(&bytes[TOKEN_BIN_MAGIC.len()..split_at]);
+    let mut val_bytes = Vec::with_capacity(bytes.len() - split_at);
+    val_bytes.extend_from_slice(TOKEN_BIN_MAGIC);
+    val_bytes.extend_from_slice(&bytes[split_at..]);
+    std::fs::write(train_path, train_bytes)?;
+    std::fs::write(val_path, val_bytes)?;
     Ok(())
 }
 
@@ -136,6 +179,30 @@ fn split_token_bin(
 mod tests {
     use super::*;
     use crate::tokenizer::Gpt2Tokenizer;
+
+    /// Fixed-output tokenizer so tests control exact ids, including ones the
+    /// old `u16` bins could not store.
+    struct FixedIdsTokenizer {
+        ids: Vec<u32>,
+    }
+
+    impl crate::tokenizer::Tokenizer for FixedIdsTokenizer {
+        fn encode(&self, _text: &str) -> Vec<u32> {
+            self.ids.clone()
+        }
+
+        fn decode(&self, _tokens: &[u32]) -> String {
+            String::new()
+        }
+
+        fn decode_lossy(&self, _tokens: &[u32]) -> String {
+            String::new()
+        }
+
+        fn vocab_size(&self) -> usize {
+            248_320
+        }
+    }
 
     #[test]
     fn test_prepare_text_token_bins_roundtrips() {
@@ -161,5 +228,75 @@ mod tests {
 
         // Cleanup
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_prepare_text_token_bins_roundtrips_ids_above_u16() {
+        use crate::dataset::TokenBinDataset;
+        use crate::Device;
+
+        // Arrange
+        let dir = std::env::temp_dir().join("deers_prepare_token_bins_large_ids_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let text_path = dir.join("tiny.txt");
+        std::fs::write(&text_path, "a\nb\n").unwrap();
+        let per_line = vec![0u32, 1, 65_535, 65_536, 151_935, 248_319];
+        let tokenizer = FixedIdsTokenizer { ids: per_line.clone() };
+        let stream: Vec<i64> =
+            per_line.iter().cycle().take(per_line.len() * 2).map(|&id| id as i64).collect();
+
+        // Act
+        let paths = prepare_text_token_bins(&text_path, &tokenizer, &dir, 0.25).unwrap();
+        let raw_train = std::fs::read(&paths.train).unwrap();
+        let raw_val = std::fs::read(&paths.val).unwrap();
+        let train = TokenBinDataset::load(&paths.train, 4).unwrap();
+        let val = TokenBinDataset::load(&paths.val, 1).unwrap();
+        let (train_inputs, train_targets) = train.batch_from_starts(&[0, 4], Device::Cpu);
+        let (val_inputs, val_targets) = val.batch_from_starts(&[0, 1], Device::Cpu);
+
+        // Assert
+        assert!(raw_train.starts_with(TOKEN_BIN_MAGIC));
+        assert!(raw_val.starts_with(TOKEN_BIN_MAGIC));
+        assert_eq!(train.num_tokens(), 9);
+        assert_eq!(val.num_tokens(), 3);
+        let mut train_tokens: Vec<i64> = train_inputs.to_vec().unwrap();
+        train_tokens.push(train_targets.to_vec::<i64>().unwrap()[7]);
+        assert_eq!(train_tokens, stream[..9]);
+        let mut val_tokens: Vec<i64> = val_inputs.to_vec().unwrap();
+        val_tokens.push(val_targets.to_vec::<i64>().unwrap()[1]);
+        assert_eq!(val_tokens, stream[9..]);
+
+        // Cleanup
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_check_token_id_accepts_full_u32_range() {
+        // Arrange
+        let ids = [0u32, 65_535, 65_536, 151_935, 248_319, u32::MAX];
+
+        // Act
+        let checked: Vec<u32> = ids.iter().map(|&id| check_token_id(id).unwrap()).collect();
+
+        // Assert
+        assert_eq!(checked, ids);
+    }
+
+    #[test]
+    fn test_token_id_out_of_range_names_supported_range() {
+        use crate::error::Error;
+
+        // Arrange
+        let err = Error::TokenIdOutOfRange { id: 65_536, max: MAX_TOKEN_BIN_ID };
+
+        // Act
+        let message = err.to_string();
+
+        // Assert
+        assert!(message.contains("65536"), "message names the rejected id: {message}");
+        assert!(
+            message.contains(&MAX_TOKEN_BIN_ID.to_string()),
+            "message names the supported range: {message}"
+        );
     }
 }

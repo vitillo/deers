@@ -154,13 +154,15 @@ impl TextDataset {
     }
 }
 
-/// A flat token dataset stored as raw little-endian `u16` token ids.
+/// A flat token dataset stored as little-endian `u32` token ids.
 ///
-/// This keeps the full TinyStories token stream compact on disk and in RAM,
-/// then samples random contiguous windows at training time instead of
-/// materializing the entire corpus as a 2D `i64` tensor.
+/// This keeps the full token stream compact on disk and in RAM, then samples
+/// random contiguous windows at training time instead of materializing the
+/// entire corpus as a 2D `i64` tensor. Bins written before the `u32` format
+/// existed are raw `u16` streams with no header; they load with their ids
+/// widened to `u32`.
 pub struct TokenBinDataset {
-    tokens: Vec<u16>,
+    tokens: Vec<u32>,
     seq_len: usize,
 }
 
@@ -174,17 +176,39 @@ impl std::fmt::Debug for TokenBinDataset {
 }
 
 impl TokenBinDataset {
-    /// Loads a flat `u16` token bin from disk.
+    /// Loads a flat token bin from disk.
+    ///
+    /// Reads the versioned `u32` format (identified by
+    /// [`TOKEN_BIN_MAGIC`](crate::tokenizer::TOKEN_BIN_MAGIC)) and legacy
+    /// headerless `u16` bins, whose ids are widened to `u32` on load.
     pub fn load(path: &Path, seq_len: usize) -> Result<Self> {
         let bytes = std::fs::read(path)?;
-        assert!(bytes.len().is_multiple_of(2), "token bin must contain u16 values");
+        let tokens = if bytes.starts_with(crate::tokenizer::TOKEN_BIN_MAGIC) {
+            let payload = &bytes[crate::tokenizer::TOKEN_BIN_MAGIC.len()..];
+            assert!(
+                payload.len().is_multiple_of(4),
+                "token bin payload must contain u32 values"
+            );
 
-        let tokens = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|chunk| u16::from_le_bytes(*chunk))
-            .collect::<Vec<_>>();
+            payload
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| u32::from_le_bytes(*chunk))
+                .collect::<Vec<_>>()
+        } else {
+            assert!(
+                bytes.len().is_multiple_of(2),
+                "legacy token bin must contain u16 values"
+            );
+
+            bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|chunk| u32::from(u16::from_le_bytes(*chunk)))
+                .collect::<Vec<_>>()
+        };
 
         assert!(tokens.len() > seq_len, "token bin too short for seq_len={seq_len}");
         Ok(Self { tokens, seq_len })
@@ -299,6 +323,56 @@ mod tests {
         // Assert
         assert_eq!(inputs.to_vec::<i64>().unwrap(), vec![0, 1, 2, 3, 5, 6, 7, 8]);
         assert_eq!(targets.to_vec::<i64>().unwrap(), vec![1, 2, 3, 4, 6, 7, 8, 9]);
+
+        // Cleanup
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_token_bin_dataset_loads_versioned_u32_bins() {
+        use crate::tokenizer::TOKEN_BIN_MAGIC;
+
+        // Arrange
+        let dir = std::env::temp_dir().join("deers_token_bin_dataset_u32_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin_path = dir.join("train.bin");
+        let mut bytes = TOKEN_BIN_MAGIC.to_vec();
+        for token in [0u32, 65_536, 248_319, 7] {
+            bytes.extend_from_slice(&token.to_le_bytes());
+        }
+        std::fs::write(&bin_path, bytes).unwrap();
+
+        // Act
+        let dataset = TokenBinDataset::load(&bin_path, 1).unwrap();
+        let (inputs, targets) = dataset.batch_from_starts(&[0, 1, 2], Device::Cpu);
+
+        // Assert
+        assert_eq!(dataset.num_tokens(), 4);
+        assert_eq!(inputs.to_vec::<i64>().unwrap(), vec![0, 65_536, 248_319]);
+        assert_eq!(targets.to_vec::<i64>().unwrap(), vec![65_536, 248_319, 7]);
+
+        // Cleanup
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_token_bin_dataset_loads_legacy_u16_bins() {
+        // Arrange
+        let dir = std::env::temp_dir().join("deers_token_bin_dataset_legacy_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin_path = dir.join("legacy.bin");
+        let bytes =
+            [0u16, 1, 65_535, 42].iter().flat_map(|token| token.to_le_bytes()).collect::<Vec<_>>();
+        std::fs::write(&bin_path, bytes).unwrap();
+
+        // Act
+        let dataset = TokenBinDataset::load(&bin_path, 1).unwrap();
+        let (inputs, targets) = dataset.batch_from_starts(&[0, 1, 2], Device::Cpu);
+
+        // Assert
+        assert_eq!(dataset.num_tokens(), 4);
+        assert_eq!(inputs.to_vec::<i64>().unwrap(), vec![0, 1, 65_535]);
+        assert_eq!(targets.to_vec::<i64>().unwrap(), vec![1, 65_535, 42]);
 
         // Cleanup
         std::fs::remove_dir_all(&dir).ok();
