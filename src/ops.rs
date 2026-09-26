@@ -1310,18 +1310,10 @@ impl TensorOp for ToDevice {
         let _profile = profile_like("to_device", &self.arg);
         let shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
         let out = match self.arg.dtype() {
-            crate::DType::F16 => {
-                Tensor::from_vec(self.arg.to_vec::<f16>()?, shape, self.device)
-            }
-            crate::DType::BF16 => {
-                Tensor::from_vec(self.arg.to_vec::<bf16>()?, shape, self.device)
-            }
-            crate::DType::F32 => {
-                Tensor::from_vec(self.arg.to_vec::<f32>()?, shape, self.device)
-            }
-            crate::DType::I64 => {
-                Tensor::from_vec(self.arg.to_vec::<i64>()?, shape, self.device)
-            }
+            crate::DType::F16 => Tensor::from_vec(self.arg.to_vec::<f16>()?, shape, self.device),
+            crate::DType::BF16 => Tensor::from_vec(self.arg.to_vec::<bf16>()?, shape, self.device),
+            crate::DType::F32 => Tensor::from_vec(self.arg.to_vec::<f32>()?, shape, self.device),
+            crate::DType::I64 => Tensor::from_vec(self.arg.to_vec::<i64>()?, shape, self.device),
         };
         Ok(Tensor::new(out.storage_clone(), out.layout().clone(), false, Some(Box::new(self))))
     }
