@@ -1,7 +1,7 @@
 use candle_core::{D, Device as CDevice, Tensor as CTensor};
 use candle_nn::ops as candle_ops;
 use deers::eval::{ParityCheck, check_close, sample_token_ids, score_model};
-use deers::models::gpt::{self, GPTConfig, RopeScaling};
+use deers::models::gpt::{self, GPTConfig, GptMlpKind, GptNormKind, RopeScaling};
 use deers::nn::{Module, ParamStore, Parameter, RMSNorm};
 use deers::tokenizer::{Gpt2Tokenizer, Tokenizer};
 use deers::{DType, Device, Tensor};
@@ -198,6 +198,9 @@ fn bundled_sample_scores_end_to_end_on_cpu() {
         rms_norm_eps: 1e-5,
         rope_base: 10_000.0,
         rope_scaling: RopeScaling::None,
+        norm: GptNormKind::RmsNorm,
+        mlp: GptMlpKind::ReluSquared,
+        tie_embeddings: false,
     };
     let model = gpt::GPT::new(config, ParamStore::new().root());
 

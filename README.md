@@ -9,7 +9,7 @@ Deers implements reverse-mode automatic differentiation over a define-by-run com
 Deers can train a small GPT language model from scratch. Here's the core of the training loop from [`examples/tinystories_train.rs`](examples/tinystories_train.rs):
 
 ```rust
-use deers::models::gpt::{GPT, GPTConfig};
+use deers::models::gpt::{GPT, GPTConfig, GptMlpKind, GptNormKind, RopeScaling};
 use deers::nn::{ParamStore, Module};
 use deers::optim::{AdamWConfig, clip_grad_norm};
 use deers::dataset::TokenBinDataset;
@@ -26,6 +26,7 @@ let config = GPTConfig {
     sequence_len: 256, n_layer: 6, n_head: 6, n_embd: 192,
     mlp_hidden_dim: 768, rms_norm_eps: 1e-5, rope_base: 10_000.0,
     rope_scaling: RopeScaling::None,
+    norm: GptNormKind::RmsNorm, mlp: GptMlpKind::ReluSquared, tie_embeddings: false,
 };
 let store = ParamStore::new();
 let mut model = GPT::new(config, store.root());
@@ -72,13 +73,15 @@ step   500/12000 | train_loss 4.8320 | lr 5.00e-04 | 1.156s | 4441 tok/s
 
 See [`examples/mnist_train.rs`](examples/mnist_train.rs) for a simpler MNIST classifier starting point.
 
+The GPT defaults preserve the historical nanochat-style layout (weightless RMSNorm, `relu^2` MLP, separate output head). For a conventional GPT layout, set `norm` to `GptNormKind::AffineRmsNorm` or `GptNormKind::LayerNorm`, `mlp` to `GptMlpKind::Gelu`, and `tie_embeddings` to share the token embedding with the output head.
+
 ## What's implemented
 
 **Devices** — CPU, MPS (Metal on macOS), and CUDA (Linux, behind `cuda` feature flag)
 
 **DTypes** — `f16`, `bf16`, `f32`, and `i64`
 
-**Tensor ops** — neg, add, sub, mul, div, powf, log, exp, sqrt, sin, cos, relu, sigmoid, tanh, matmul, gather, index_select, cat, clamp, where_cond, masked_fill, tril, triu
+**Tensor ops** — neg, add, sub, mul, div, powf, log, exp, sqrt, sin, cos, relu, gelu, sigmoid, tanh, matmul, gather, index_select, cat, clamp, where_cond, masked_fill, tril, triu
 
 **Reductions / selection** — sum, max, mean, logsumexp, log_softmax, softmax, argmax, topk, sort
 

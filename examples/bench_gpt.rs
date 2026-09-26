@@ -61,7 +61,7 @@ fn main() {
 // ---------------------------------------------------------------------------
 
 fn bench_deers(device: deers::Device, profile_enabled: bool) {
-    use deers::models::gpt::{GPT, GPTConfig};
+    use deers::models::gpt::{GPT, GPTConfig, GptMlpKind, GptNormKind};
 
     if let Err(err) = device.check_available() {
         eprintln!("error: device {device:?} is not available: {err}");
@@ -79,6 +79,9 @@ fn bench_deers(device: deers::Device, profile_enabled: bool) {
         rms_norm_eps: 1e-5,
         rope_base: 10_000.0,
         rope_scaling: deers::models::gpt::RopeScaling::None,
+        norm: GptNormKind::RmsNorm,
+        mlp: GptMlpKind::ReluSquared,
+        tie_embeddings: false,
     };
     let store = deers::nn::ParamStore::new();
     let mut model = GPT::new(config, store.root());

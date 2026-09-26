@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use deers::checkpoint;
 use deers::dataset::TokenBinDataset;
-use deers::models::gpt::{GPT, GPTConfig, RopeScaling};
+use deers::models::gpt::{GPT, GPTConfig, GptMlpKind, GptNormKind, RopeScaling};
 use deers::nn::{ParamStore, Parameter};
 use deers::optim::{
     AdamW, AdamWConfig, AdamWParamGroup, LrSchedule, WarmupWarmdown, clip_grad_norm,
@@ -694,6 +694,9 @@ impl TrainOptions {
             rms_norm_eps: 1e-5,
             rope_base: 10_000.0,
             rope_scaling: RopeScaling::None,
+            norm: GptNormKind::RmsNorm,
+            mlp: GptMlpKind::ReluSquared,
+            tie_embeddings: false,
         }
     }
 }

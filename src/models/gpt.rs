@@ -11,7 +11,7 @@ use half::{bf16, f16};
 
 use crate::error::Result;
 use crate::nn::{
-    Embedding, Linear, Module, ParamBuilder, Parameter, RMSNorm, SwiGLU, functional,
+    Embedding, LayerNorm, Linear, Module, ParamBuilder, Parameter, RMSNorm, SwiGLU, functional,
 };
 use crate::sample::{SamplingConfig, sample_token};
 use crate::tensor::Tensor;
@@ -494,19 +494,35 @@ impl CausalSelfAttention {
     }
 }
 
-/// Minimal transformer MLP with bias-free projections and a `relu^2` activation.
+/// Minimal transformer MLP with bias-free projections and a selectable activation.
+///
+/// The default activation squares the ReLU output, matching the historical
+/// nanochat-style block. Select [`GptMlpKind::Gelu`] for the conventional GPT
+/// feed-forward instead.
 #[derive(Debug)]
 pub struct MLP {
     up_proj: Linear,
     down_proj: Linear,
+    activation: GptMlpKind,
 }
 
 impl MLP {
-    /// Creates an MLP whose projections are registered under `builder`.
+    /// Creates an MLP with the historical `relu^2` activation, registered under `builder`.
     pub fn new(builder: ParamBuilder, n_embd: usize, hidden_dim: usize) -> Self {
+        Self::new_with(builder, n_embd, hidden_dim, GptMlpKind::ReluSquared)
+    }
+
+    /// Creates an MLP with `activation`, registered under `builder`.
+    pub fn new_with(
+        builder: ParamBuilder,
+        n_embd: usize,
+        hidden_dim: usize,
+        activation: GptMlpKind,
+    ) -> Self {
         Self {
             up_proj: Linear::no_bias(builder.pp("up_proj"), n_embd, hidden_dim),
             down_proj: Linear::no_bias(builder.pp("down_proj"), hidden_dim, n_embd),
+            activation,
         }
     }
 }
@@ -521,8 +537,13 @@ impl Module for MLP {
 
         let x_flat = x.rearrange("b t c -> (b t) c", &[]);
         let y = self.up_proj.forward(&x_flat)?; // [B*T, H]
-        let y = y.relu(); // [B*T, H]
-        let y = &y * &y; // [B*T, H]
+        let y = match self.activation {
+            GptMlpKind::ReluSquared => {
+                let y = y.relu(); // [B*T, H]
+                &y * &y // [B*T, H]
+            }
+            GptMlpKind::Gelu => y.gelu(), // [B*T, H]
+        };
         let y = self.down_proj.forward(&y)?; // [B*T, C]
         Ok(y.rearrange("(b t) c -> b t c", &[("b", batch_size), ("t", seq_len)]))
     }
@@ -534,17 +555,87 @@ impl Module for MLP {
     }
 }
 
+/// Normalization around the GPT attention and MLP residuals.
+///
+/// `RmsNorm` is the weightless RMSNorm the model has always used: it owns
+/// no parameters, so checkpoints saved before this option existed keep
+/// their exact names and shapes. `AffineRmsNorm` adds a trainable scale
+/// per residual, and `LayerNorm` selects the GPT-2 style affine layer norm
+/// with bias instead.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum GptNormKind {
+    /// Weightless RMSNorm. The historical default.
+    #[default]
+    RmsNorm,
+    /// RMSNorm with a trainable scale initialized to ones.
+    AffineRmsNorm,
+    /// Affine layer norm with bias, as in GPT-2.
+    LayerNorm,
+}
+
+/// Activation inside the GPT feed-forward MLP.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum GptMlpKind {
+    /// Squared ReLU. The historical default.
+    #[default]
+    ReluSquared,
+    /// GELU (tanh approximation), as in conventional GPT.
+    Gelu,
+}
+
+/// One GPT normalization: either RMS flavor or an affine layer norm.
+///
+/// Blocks and the final norm share this so the configured [`GptNormKind`]
+/// threads through construction without branching at every forward call.
+#[derive(Debug)]
+enum GptNorm {
+    Rms(RMSNorm),
+    Layer(LayerNorm),
+}
+
+impl GptNorm {
+    /// Builds the configured norm, registering affine weights under `builder`.
+    ///
+    /// The historical `RmsNorm` registers nothing, so the caller passes its
+    /// usual segment (`norm1`, `norm2`, `norm`) and only the affine kinds
+    /// consume it.
+    fn build(builder: ParamBuilder, hidden: usize, eps: f64, kind: GptNormKind) -> Self {
+        match kind {
+            GptNormKind::RmsNorm => Self::Rms(RMSNorm::new(eps)),
+            GptNormKind::AffineRmsNorm => Self::Rms(RMSNorm::new_affine(builder, hidden, eps)),
+            GptNormKind::LayerNorm => Self::Layer(LayerNorm::new(builder, hidden, eps)),
+        }
+    }
+
+    /// Normalizes over the last dimension.
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Rms(norm) => norm.forward(x),
+            Self::Layer(norm) => norm.forward(x),
+        }
+    }
+
+    /// Returns the trainable scale (and bias, for layer norm), if any.
+    fn parameters(&self) -> Vec<Parameter> {
+        match self {
+            Self::Rms(norm) => norm.parameters(),
+            Self::Layer(norm) => norm.parameters(),
+        }
+    }
+}
+
 /// Pre-norm residual GPT block.
 #[derive(Debug)]
 pub struct Block {
-    norm1: RMSNorm,
+    norm1: GptNorm,
     attn: CausalSelfAttention,
-    norm2: RMSNorm,
+    norm2: GptNorm,
     mlp: MLP,
 }
 
 impl Block {
-    /// Creates a transformer block whose trainable weights are registered under `builder`.
+    /// Creates a transformer block with the historical layout: weightless
+    /// RMSNorms and a `relu^2` MLP. Weights register under `builder`.
     pub fn new(
         builder: ParamBuilder,
         n_embd: usize,
@@ -552,11 +643,33 @@ impl Block {
         hidden_dim: usize,
         eps: f64,
     ) -> Self {
+        Self::new_with(
+            builder,
+            n_embd,
+            n_head,
+            hidden_dim,
+            eps,
+            GptNormKind::RmsNorm,
+            GptMlpKind::ReluSquared,
+        )
+    }
+
+    /// Creates a transformer block with the configured norm and MLP
+    /// activation. Weights register under `builder`.
+    pub fn new_with(
+        builder: ParamBuilder,
+        n_embd: usize,
+        n_head: usize,
+        hidden_dim: usize,
+        eps: f64,
+        norm: GptNormKind,
+        mlp: GptMlpKind,
+    ) -> Self {
         Self {
-            norm1: RMSNorm::new(eps),
+            norm1: GptNorm::build(builder.pp("norm1"), n_embd, eps, norm),
             attn: CausalSelfAttention::new(builder.pp("attn"), n_embd, n_head),
-            norm2: RMSNorm::new(eps),
-            mlp: MLP::new(builder.pp("mlp"), n_embd, hidden_dim),
+            norm2: GptNorm::build(builder.pp("norm2"), n_embd, eps, norm),
+            mlp: MLP::new_with(builder.pp("mlp"), n_embd, hidden_dim, mlp),
         }
     }
 
@@ -569,7 +682,9 @@ impl Block {
 
     /// Returns the trainable parameters owned by the block.
     pub fn parameters(&self) -> Vec<Parameter> {
-        let mut parameters = self.attn.parameters();
+        let mut parameters = self.norm1.parameters();
+        parameters.extend(self.attn.parameters());
+        parameters.extend(self.norm2.parameters());
         parameters.extend(self.mlp.parameters());
         parameters
     }
@@ -692,6 +807,10 @@ impl Qwen3Block {
 }
 
 /// Minimal GPT configuration for the nanochat-style decoder stack.
+///
+/// The historical architecture is the default: weightless RMSNorms, a
+/// `relu^2` MLP, and a separate output head. Set `norm`, `mlp`, or
+/// `tie_embeddings` for the conventional GPT layout instead.
 #[derive(Clone, Debug)]
 pub struct GPTConfig {
     /// Token vocabulary size.
@@ -709,8 +828,14 @@ pub struct GPTConfig {
     pub n_embd: usize,
     /// Inner width of the MLP projection.
     pub mlp_hidden_dim: usize,
-    /// Epsilon used by RMSNorm.
+    /// Epsilon used by the block and final norms.
     pub rms_norm_eps: f64,
+    /// Normalization around each block and before the head.
+    pub norm: GptNormKind,
+    /// Activation inside the MLP.
+    pub mlp: GptMlpKind,
+    /// Share one tensor between the token embedding and the LM head.
+    pub tie_embeddings: bool,
     /// Base frequency used by RoPE.
     pub rope_base: f32,
     /// RoPE scaling applied to the precomputed rotary cache.
@@ -729,18 +854,28 @@ impl GPTConfig {
 /// The rotary cache covers `sequence_len` positions up front. Inputs longer than
 /// the cache recompute the needed prefix on demand instead of panicking; inputs
 /// within the cache narrow the stored tensors and behave exactly as before.
+///
+/// With `tie_embeddings` the head reuses the embedding storage, so the
+/// checkpoint names both weights while the parameter list holds one tensor.
 #[derive(Debug)]
 pub struct GPT {
     vocab_size: usize,
     wte: Embedding,
     blocks: Vec<Block>,
-    norm: RMSNorm,
-    lm_head: Linear,
+    norm: GptNorm,
+    lm_head: LmHead,
     cos: Tensor,
     sin: Tensor,
     head_dim: usize,
     rope_base: f32,
     rope_scaling: RopeScaling,
+}
+
+/// The GPT output head: a separate projection, or the tied embedding weight.
+#[derive(Debug)]
+enum LmHead {
+    Untied(Linear),
+    Tied(Parameter),
 }
 
 impl GPT {
@@ -751,17 +886,27 @@ impl GPT {
         let wte = Embedding::new(builder.pp("wte"), config.vocab_size, config.n_embd);
         let blocks = (0..config.n_layer)
             .map(|index| {
-                Block::new(
+                Block::new_with(
                     builder.pp("blocks").pp(index.to_string()),
                     config.n_embd,
                     config.n_head,
                     config.mlp_hidden_dim,
                     config.rms_norm_eps,
+                    config.norm,
+                    config.mlp,
                 )
             })
             .collect();
-        let norm = RMSNorm::new(config.rms_norm_eps);
-        let lm_head = Linear::no_bias(builder.pp("lm_head"), config.n_embd, config.vocab_size);
+        let norm =
+            GptNorm::build(builder.pp("norm"), config.n_embd, config.rms_norm_eps, config.norm);
+        let lm_head = if config.tie_embeddings {
+            // Tied head: the embedding tensor already tracks gradients, so
+            // registering its clone keeps one tensor id behind both names.
+            let shared = wte.parameters().into_iter().next().expect("embedding weight");
+            LmHead::Tied(builder.pp("lm_head").param("weight", (*shared).clone()))
+        } else {
+            LmHead::Untied(Linear::no_bias(builder.pp("lm_head"), config.n_embd, config.vocab_size))
+        };
         let (cos, sin) = precompute_rotary_embeddings_scaled(
             config.sequence_len,
             config.head_dim(),
@@ -830,7 +975,10 @@ impl GPT {
         x = self.norm.forward(&x)?; // [B, T, C]
 
         let x_flat = x.rearrange("b t c -> (b t) c", &[]);
-        let logits = self.lm_head.forward(&x_flat)?; // [B*T, V]
+        let logits = match &self.lm_head {
+            LmHead::Untied(head) => head.forward(&x_flat)?, // [B*T, V]
+            LmHead::Tied(weight) => x_flat.matmul(&weight.transpose(None)), // [B*T, V]
+        };
         Ok(logits.rearrange(
             "(b t) v -> b t v",
             &[("b", batch_size), ("t", seq_len), ("v", self.vocab_size)],
@@ -838,12 +986,19 @@ impl GPT {
     }
 
     /// Returns the trainable parameters owned by the model.
+    ///
+    /// A tied head shares the embedding tensor, so it contributes no second
+    /// entry: each tensor id appears exactly once.
     pub fn parameters(&self) -> Vec<Parameter> {
         let mut parameters = self.wte.parameters();
         for block in &self.blocks {
             parameters.extend(block.parameters());
         }
-        parameters.extend(self.lm_head.parameters());
+        parameters.extend(self.norm.parameters());
+        match &self.lm_head {
+            LmHead::Untied(head) => parameters.extend(head.parameters()),
+            LmHead::Tied(_) => {}
+        }
         parameters
     }
 
@@ -856,12 +1011,12 @@ impl GPT {
     }
 
     /// Moves the model parameters and rotary caches to `device`.
+    ///
+    /// A tied head moves with the embedding through their shared storage.
     pub fn to_device(&mut self, device: Device) -> Result<()> {
-        self.wte.to_device(device)?;
-        for block in &self.blocks {
-            block.to_device(device)?;
+        for parameter in self.parameters() {
+            parameter.to_device(device)?;
         }
-        self.lm_head.to_device(device)?;
         self.cos = self.cos.to_device(device)?;
         self.sin = self.sin.to_device(device)?;
         Ok(())
