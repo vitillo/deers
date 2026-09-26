@@ -143,10 +143,7 @@ fn split_token_bin(
     val_path: &Path,
 ) -> Result<()> {
     let bytes = std::fs::read(all_path)?;
-    assert!(
-        bytes.starts_with(TOKEN_BIN_MAGIC),
-        "token bin is missing its version header"
-    );
+    assert!(bytes.starts_with(TOKEN_BIN_MAGIC), "token bin is missing its version header");
     let payload = &bytes[TOKEN_BIN_MAGIC.len()..];
     assert!(
         payload.len().is_multiple_of(TOKEN_BIN_ITEM_BYTES),
@@ -221,8 +218,8 @@ mod tests {
 
     #[test]
     fn test_prepare_text_token_bins_roundtrips_ids_above_u16() {
-        use crate::dataset::TokenBinDataset;
         use crate::Device;
+        use crate::dataset::TokenBinDataset;
 
         // Arrange
         let dir = std::env::temp_dir().join("deers_prepare_token_bins_large_ids_test");
