@@ -17,7 +17,7 @@ mod imp {
     use std::path::PathBuf;
     use std::sync::{Arc, OnceLock};
 
-    use half::f16;
+    use half::{bf16, f16};
 
     use crate::profiler;
 
@@ -32,6 +32,7 @@ mod imp {
 
     const KERNELS: &str = r#"
     #include <cuda_fp16.h>
+    #include <cuda_bf16.h>
     #define MAX_DIMS 8
     #define REDUCE_THREADS 256
 
@@ -67,6 +68,8 @@ mod imp {
     __device__ __forceinline__ float zero_value<float>() { return 0.0f; }
     template <>
     __device__ __forceinline__ half zero_value<half>() { return __float2half(0.0f); }
+    template <>
+    __device__ __forceinline__ __nv_bfloat16 zero_value<__nv_bfloat16>() { return __float2bfloat16(0.0f); }
 
     template <typename T>
     __device__ __forceinline__ T one_value();
@@ -74,6 +77,8 @@ mod imp {
     __device__ __forceinline__ float one_value<float>() { return 1.0f; }
     template <>
     __device__ __forceinline__ half one_value<half>() { return __float2half(1.0f); }
+    template <>
+    __device__ __forceinline__ __nv_bfloat16 one_value<__nv_bfloat16>() { return __float2bfloat16(1.0f); }
 
     template <typename T>
     __device__ __forceinline__ float to_float(T v);
@@ -81,6 +86,8 @@ mod imp {
     __device__ __forceinline__ float to_float<float>(float v) { return v; }
     template <>
     __device__ __forceinline__ float to_float<half>(half v) { return __half2float(v); }
+    template <>
+    __device__ __forceinline__ float to_float<__nv_bfloat16>(__nv_bfloat16 v) { return __bfloat162float(v); }
 
     template <typename T>
     __device__ __forceinline__ T from_float(float v);
@@ -88,6 +95,8 @@ mod imp {
     __device__ __forceinline__ float from_float<float>(float v) { return v; }
     template <>
     __device__ __forceinline__ half from_float<half>(float v) { return __float2half(v); }
+    template <>
+    __device__ __forceinline__ __nv_bfloat16 from_float<__nv_bfloat16>(float v) { return __float2bfloat16(v); }
 
     template <typename T>
     __device__ __forceinline__ void atomic_add_t(T* dst, T v);
@@ -95,6 +104,8 @@ mod imp {
     __device__ __forceinline__ void atomic_add_t<float>(float* dst, float v) { atomicAdd(dst, v); }
     template <>
     __device__ __forceinline__ void atomic_add_t<half>(half* dst, half v) { atomicAdd(dst, v); }
+    template <>
+    __device__ __forceinline__ void atomic_add_t<__nv_bfloat16>(__nv_bfloat16* dst, __nv_bfloat16 v) { atomicAdd(dst, v); }
 
     template <typename T>
     __global__ void copy_compact_kernel(const T* src, T* dst, StridedMeta meta) {
@@ -116,6 +127,12 @@ mod imp {
         if (idx < size) { float x = __half2float(src[idx]); dst[idx] = __float2half((expr)); } \
     }
 
+    #define DEFINE_UNARY_BF16(name, expr) \
+    extern "C" __global__ void name##_bf16(const __nv_bfloat16* src, __nv_bfloat16* dst, unsigned int size) { \
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x; \
+        if (idx < size) { float x = __bfloat162float(src[idx]); dst[idx] = __float2bfloat16((expr)); } \
+    }
+
     DEFINE_UNARY_F32(neg, -x)
     DEFINE_UNARY_F16(neg, -x)
     DEFINE_UNARY_F32(exp, expf(x))
@@ -132,6 +149,14 @@ mod imp {
     DEFINE_UNARY_F16(relu, fmaxf(x, 0.0f))
     DEFINE_UNARY_F32(relu_backward, x > 0.0f ? 1.0f : 0.0f)
     DEFINE_UNARY_F16(relu_backward, x > 0.0f ? 1.0f : 0.0f)
+    DEFINE_UNARY_BF16(neg, -x)
+    DEFINE_UNARY_BF16(exp, expf(x))
+    DEFINE_UNARY_BF16(log, logf(x))
+    DEFINE_UNARY_BF16(sin, sinf(x))
+    DEFINE_UNARY_BF16(cos, cosf(x))
+    DEFINE_UNARY_BF16(tanh, tanhf(x))
+    DEFINE_UNARY_BF16(relu, fmaxf(x, 0.0f))
+    DEFINE_UNARY_BF16(relu_backward, x > 0.0f ? 1.0f : 0.0f)
 
     #define DEFINE_SCALAR_F32(name, expr) \
     extern "C" __global__ void name##_f32(const float* src, float* dst, unsigned int size, ScalarMeta meta) { \
@@ -145,6 +170,12 @@ mod imp {
         if (idx < size) { float x = __half2float(src[idx]); float s = meta.scalar; dst[idx] = __float2half((expr)); } \
     }
 
+    #define DEFINE_SCALAR_BF16(name, expr) \
+    extern "C" __global__ void name##_bf16(const __nv_bfloat16* src, __nv_bfloat16* dst, unsigned int size, ScalarMeta meta) { \
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x; \
+        if (idx < size) { float x = __bfloat162float(src[idx]); float s = meta.scalar; dst[idx] = __float2bfloat16((expr)); } \
+    }
+
     DEFINE_SCALAR_F32(scalar_add, x + s)
     DEFINE_SCALAR_F16(scalar_add, x + s)
     DEFINE_SCALAR_F32(scalar_mul, x * s)
@@ -153,6 +184,10 @@ mod imp {
     DEFINE_SCALAR_F16(scalar_div, x / s)
     DEFINE_SCALAR_F32(scalar_powf, powf(x, s))
     DEFINE_SCALAR_F16(scalar_powf, powf(x, s))
+    DEFINE_SCALAR_BF16(scalar_add, x + s)
+    DEFINE_SCALAR_BF16(scalar_mul, x * s)
+    DEFINE_SCALAR_BF16(scalar_div, x / s)
+    DEFINE_SCALAR_BF16(scalar_powf, powf(x, s))
 
     #define DEFINE_BINARY_F32(name, expr) \
     extern "C" __global__ void name##_f32(const float* lhs, const float* rhs, float* dst, unsigned int size) { \
@@ -164,6 +199,12 @@ mod imp {
     extern "C" __global__ void name##_f16(const half* lhs, const half* rhs, half* dst, unsigned int size) { \
         unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x; \
         if (idx < size) { float x = __half2float(lhs[idx]); float y = __half2float(rhs[idx]); dst[idx] = __float2half((expr)); } \
+    }
+
+    #define DEFINE_BINARY_BF16(name, expr) \
+    extern "C" __global__ void name##_bf16(const __nv_bfloat16* lhs, const __nv_bfloat16* rhs, __nv_bfloat16* dst, unsigned int size) { \
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x; \
+        if (idx < size) { float x = __bfloat162float(lhs[idx]); float y = __bfloat162float(rhs[idx]); dst[idx] = __float2bfloat16((expr)); } \
     }
 
     DEFINE_BINARY_F32(add, x + y)
@@ -178,6 +219,12 @@ mod imp {
     DEFINE_BINARY_F16(powf, powf(x, y))
     DEFINE_BINARY_F32(eq, x == y ? 1.0f : 0.0f)
     DEFINE_BINARY_F16(eq, x == y ? 1.0f : 0.0f)
+    DEFINE_BINARY_BF16(add, x + y)
+    DEFINE_BINARY_BF16(sub, x - y)
+    DEFINE_BINARY_BF16(mul, x * y)
+    DEFINE_BINARY_BF16(div, x / y)
+    DEFINE_BINARY_BF16(powf, powf(x, y))
+    DEFINE_BINARY_BF16(eq, x == y ? 1.0f : 0.0f)
 
     // Warp-shuffle sum of 32 floats within a single warp — no __syncthreads needed.
     __device__ __forceinline__ float warp_reduce_sum(float v) {
@@ -276,10 +323,13 @@ mod imp {
 
     extern "C" __global__ void reduce_sum_f32(const float* src, float* dst, unsigned int outer_size, unsigned int reduce_size) { reduce_sum_kernel(src, dst, outer_size, reduce_size); }
     extern "C" __global__ void reduce_sum_f16(const half* src, half* dst, unsigned int outer_size, unsigned int reduce_size) { reduce_sum_kernel(src, dst, outer_size, reduce_size); }
+    extern "C" __global__ void reduce_sum_bf16(const __nv_bfloat16* src, __nv_bfloat16* dst, unsigned int outer_size, unsigned int reduce_size) { reduce_sum_kernel(src, dst, outer_size, reduce_size); }
     extern "C" __global__ void reduce_max_f32(const float* src, float* dst, unsigned int outer_size, unsigned int reduce_size) { reduce_max_kernel(src, dst, outer_size, reduce_size); }
     extern "C" __global__ void reduce_max_f16(const half* src, half* dst, unsigned int outer_size, unsigned int reduce_size) { reduce_max_kernel(src, dst, outer_size, reduce_size); }
+    extern "C" __global__ void reduce_max_bf16(const __nv_bfloat16* src, __nv_bfloat16* dst, unsigned int outer_size, unsigned int reduce_size) { reduce_max_kernel(src, dst, outer_size, reduce_size); }
     extern "C" __global__ void log_sum_exp_f32(const float* src, float* dst, unsigned int outer_size, unsigned int reduce_size) { log_sum_exp_kernel(src, dst, outer_size, reduce_size); }
     extern "C" __global__ void log_sum_exp_f16(const half* src, half* dst, unsigned int outer_size, unsigned int reduce_size) { log_sum_exp_kernel(src, dst, outer_size, reduce_size); }
+    extern "C" __global__ void log_sum_exp_bf16(const __nv_bfloat16* src, __nv_bfloat16* dst, unsigned int outer_size, unsigned int reduce_size) { log_sum_exp_kernel(src, dst, outer_size, reduce_size); }
 
     // Fused log-softmax forward: computes x[i] - log(sum_j exp(x[j] - max)) - max for each row.
     // Avoids materialising the broadcast LSE tensor and the separate subtraction kernel.
@@ -353,8 +403,10 @@ mod imp {
 
     extern "C" __global__ void log_softmax_fwd_f32(const float* src, float* dst, unsigned int outer_size, unsigned int inner_size) { log_softmax_fwd_kernel(src, dst, outer_size, inner_size); }
     extern "C" __global__ void log_softmax_fwd_f16(const half* src, half* dst, unsigned int outer_size, unsigned int inner_size) { log_softmax_fwd_kernel(src, dst, outer_size, inner_size); }
+    extern "C" __global__ void log_softmax_fwd_bf16(const __nv_bfloat16* src, __nv_bfloat16* dst, unsigned int outer_size, unsigned int inner_size) { log_softmax_fwd_kernel(src, dst, outer_size, inner_size); }
     extern "C" __global__ void log_softmax_bwd_f32(const float* grad, const float* lsm_out, float* grad_input, unsigned int outer_size, unsigned int inner_size) { log_softmax_bwd_kernel(grad, lsm_out, grad_input, outer_size, inner_size); }
     extern "C" __global__ void log_softmax_bwd_f16(const half* grad, const half* lsm_out, half* grad_input, unsigned int outer_size, unsigned int inner_size) { log_softmax_bwd_kernel(grad, lsm_out, grad_input, outer_size, inner_size); }
+    extern "C" __global__ void log_softmax_bwd_bf16(const __nv_bfloat16* grad, const __nv_bfloat16* lsm_out, __nv_bfloat16* grad_input, unsigned int outer_size, unsigned int inner_size) { log_softmax_bwd_kernel(grad, lsm_out, grad_input, outer_size, inner_size); }
 
     template <typename T>
     __global__ void gather_kernel(const T* src, const index_t* indices, T* dst, unsigned int left_len, unsigned int src_dim, unsigned int dst_dim, unsigned int right_len) {
@@ -405,15 +457,20 @@ mod imp {
 
     extern "C" __global__ void gather_f32(const float* src, const index_t* indices, float* dst, unsigned int left_len, unsigned int src_dim, unsigned int dst_dim, unsigned int right_len) { gather_kernel(src, indices, dst, left_len, src_dim, dst_dim, right_len); }
     extern "C" __global__ void gather_f16(const half* src, const index_t* indices, half* dst, unsigned int left_len, unsigned int src_dim, unsigned int dst_dim, unsigned int right_len) { gather_kernel(src, indices, dst, left_len, src_dim, dst_dim, right_len); }
+    extern "C" __global__ void gather_bf16(const __nv_bfloat16* src, const index_t* indices, __nv_bfloat16* dst, unsigned int left_len, unsigned int src_dim, unsigned int dst_dim, unsigned int right_len) { gather_kernel(src, indices, dst, left_len, src_dim, dst_dim, right_len); }
     extern "C" __global__ void scatter_add_f32(const float* src, const index_t* indices, float* dst, unsigned int left_len, unsigned int dst_dim, unsigned int index_len, unsigned int right_len) { scatter_add_kernel(src, indices, dst, left_len, dst_dim, index_len, right_len); }
     extern "C" __global__ void scatter_add_f16(const half* src, const index_t* indices, half* dst, unsigned int left_len, unsigned int dst_dim, unsigned int index_len, unsigned int right_len) { scatter_add_kernel(src, indices, dst, left_len, dst_dim, index_len, right_len); }
+    extern "C" __global__ void scatter_add_bf16(const __nv_bfloat16* src, const index_t* indices, __nv_bfloat16* dst, unsigned int left_len, unsigned int dst_dim, unsigned int index_len, unsigned int right_len) { scatter_add_kernel(src, indices, dst, left_len, dst_dim, index_len, right_len); }
     extern "C" __global__ void index_select_f32(const float* src, const index_t* indices, float* dst, unsigned int left_len, unsigned int index_len, unsigned int src_dim, unsigned int right_len) { index_select_kernel(src, indices, dst, left_len, index_len, src_dim, right_len); }
     extern "C" __global__ void index_select_f16(const half* src, const index_t* indices, half* dst, unsigned int left_len, unsigned int index_len, unsigned int src_dim, unsigned int right_len) { index_select_kernel(src, indices, dst, left_len, index_len, src_dim, right_len); }
+    extern "C" __global__ void index_select_bf16(const __nv_bfloat16* src, const index_t* indices, __nv_bfloat16* dst, unsigned int left_len, unsigned int index_len, unsigned int src_dim, unsigned int right_len) { index_select_kernel(src, indices, dst, left_len, index_len, src_dim, right_len); }
     extern "C" __global__ void index_add_f32(const float* src, const index_t* indices, float* dst, unsigned int left_len, unsigned int src_dim, unsigned int dst_dim, unsigned int right_len) { index_add_kernel(src, indices, dst, left_len, src_dim, dst_dim, right_len); }
     extern "C" __global__ void index_add_f16(const half* src, const index_t* indices, half* dst, unsigned int left_len, unsigned int src_dim, unsigned int dst_dim, unsigned int right_len) { index_add_kernel(src, indices, dst, left_len, src_dim, dst_dim, right_len); }
+    extern "C" __global__ void index_add_bf16(const __nv_bfloat16* src, const index_t* indices, __nv_bfloat16* dst, unsigned int left_len, unsigned int src_dim, unsigned int dst_dim, unsigned int right_len) { index_add_kernel(src, indices, dst, left_len, src_dim, dst_dim, right_len); }
 
     extern "C" __global__ void copy_compact_f32(const float* src, float* dst, StridedMeta meta) { copy_compact_kernel(src, dst, meta); }
     extern "C" __global__ void copy_compact_f16(const half* src, half* dst, StridedMeta meta) { copy_compact_kernel(src, dst, meta); }
+    extern "C" __global__ void copy_compact_bf16(const __nv_bfloat16* src, __nv_bfloat16* dst, StridedMeta meta) { copy_compact_kernel(src, dst, meta); }
     extern "C" __global__ void copy_compact_i64(const index_t* src, index_t* dst, StridedMeta meta) { copy_compact_kernel(src, dst, meta); }
     "#;
 
@@ -441,6 +498,7 @@ mod imp {
     #[derive(Clone, Debug)]
     pub enum CudaInner {
         F16(CudaSlice<f16>),
+        BF16(CudaSlice<bf16>),
         F32(CudaSlice<f32>),
         I64(CudaSlice<i64>),
     }
@@ -657,11 +715,9 @@ mod imp {
             let runtime = runtime()?;
             let inner = match dtype {
                 DType::F16 => CudaInner::F16(unsafe { alloc_uninit::<f16>(&runtime, size) }?),
+                DType::BF16 => CudaInner::BF16(unsafe { alloc_uninit::<bf16>(&runtime, size) }?),
                 DType::F32 => CudaInner::F32(unsafe { alloc_uninit::<f32>(&runtime, size) }?),
                 DType::I64 => CudaInner::I64(unsafe { alloc_uninit::<i64>(&runtime, size) }?),
-                DType::BF16 => {
-                    return Err(Error::NotImplemented("cuda BF16 storage is not implemented"));
-                }
             };
             Ok(Self { inner, runtime })
         }
@@ -672,13 +728,15 @@ mod imp {
                 DType::F16 => CudaInner::F16(
                     runtime.stream.alloc_zeros::<f16>(size).expect("cuda alloc failed"),
                 ),
+                DType::BF16 => CudaInner::BF16(
+                    runtime.stream.alloc_zeros::<bf16>(size).expect("cuda alloc failed"),
+                ),
                 DType::F32 => CudaInner::F32(
                     runtime.stream.alloc_zeros::<f32>(size).expect("cuda alloc failed"),
                 ),
                 DType::I64 => CudaInner::I64(
                     runtime.stream.alloc_zeros::<i64>(size).expect("cuda alloc failed"),
                 ),
-                DType::BF16 => panic!("cuda BF16 storage is not implemented"),
             };
             Self { inner, runtime }
         }
@@ -688,9 +746,9 @@ mod imp {
                 DType::F16 => {
                     Self::from_cpu_storage(CpuStorage::F16(vec![f16::from_f32(1.0); size]))
                 }
+                DType::BF16 => Self::from_cpu_storage(CpuStorage::BF16(vec![bf16::ONE; size])),
                 DType::F32 => Self::from_cpu_storage(CpuStorage::F32(vec![1.0; size])),
                 DType::I64 => Self::from_cpu_storage(CpuStorage::I64(vec![1; size])),
-                DType::BF16 => panic!("cuda BF16 storage is not implemented"),
             }
         }
 
@@ -700,13 +758,15 @@ mod imp {
                 CpuStorage::F16(data) => {
                     CudaInner::F16(runtime.stream.clone_htod(&data).expect("cuda copy failed"))
                 }
+                CpuStorage::BF16(data) => {
+                    CudaInner::BF16(runtime.stream.clone_htod(&data).expect("cuda copy failed"))
+                }
                 CpuStorage::F32(data) => {
                     CudaInner::F32(runtime.stream.clone_htod(&data).expect("cuda copy failed"))
                 }
                 CpuStorage::I64(data) => {
                     CudaInner::I64(runtime.stream.clone_htod(&data).expect("cuda copy failed"))
                 }
-                CpuStorage::BF16(_) => panic!("cuda BF16 storage is not implemented"),
             };
             Self { inner, runtime }
         }
@@ -724,6 +784,21 @@ mod imp {
                 (CudaInner::F16(_), CudaInner::F16(dst)) => {
                     for (part, len) in parts {
                         let CudaInner::F16(src) = &part.inner else {
+                            return Err(Error::DTypeMismatch("cat: mixed dtypes".into()));
+                        };
+                        part.runtime
+                            .stream
+                            .memcpy_dtod(
+                                &src.slice(..*len),
+                                &mut dst.slice_mut(offset..offset + *len),
+                            )
+                            .map_err(|err| Error::Cuda(format!("cat memcpy failed: {err}")))?;
+                        offset += *len;
+                    }
+                }
+                (CudaInner::BF16(_), CudaInner::BF16(dst)) => {
+                    for (part, len) in parts {
+                        let CudaInner::BF16(src) = &part.inner else {
                             return Err(Error::DTypeMismatch("cat: mixed dtypes".into()));
                         };
                         part.runtime
@@ -774,6 +849,7 @@ mod imp {
         fn len(&self) -> usize {
             match &self.inner {
                 CudaInner::F16(slice) => slice.len(),
+                CudaInner::BF16(slice) => slice.len(),
                 CudaInner::F32(slice) => slice.len(),
                 CudaInner::I64(slice) => slice.len(),
             }
@@ -796,6 +872,13 @@ mod imp {
             Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
         }
 
+        fn launch_unary_bf16(&self, kernel: &str, src: &CudaSlice<bf16>) -> Result<Self> {
+            let out = unsafe { alloc_uninit::<bf16>(&self.runtime, src.len()) }?;
+            let len = src.len() as u32;
+            launch_1d!(&self.runtime, kernel, src.len(), src, &out, &len);
+            Ok(Self { inner: CudaInner::BF16(out), runtime: self.runtime.clone() })
+        }
+
         fn launch_unary_f32(&self, kernel: &str, src: &CudaSlice<f32>) -> Result<Self> {
             let out = unsafe { alloc_uninit::<f32>(&self.runtime, src.len()) }?;
             let len = src.len() as u32;
@@ -814,6 +897,19 @@ mod imp {
             let meta = ScalarMeta { scalar };
             launch_1d!(&self.runtime, kernel, src.len(), src, &out, &len, &meta);
             Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
+        }
+
+        fn launch_scalar_bf16(
+            &self,
+            kernel: &str,
+            src: &CudaSlice<bf16>,
+            scalar: f32,
+        ) -> Result<Self> {
+            let out = unsafe { alloc_uninit::<bf16>(&self.runtime, src.len()) }?;
+            let len = src.len() as u32;
+            let meta = ScalarMeta { scalar };
+            launch_1d!(&self.runtime, kernel, src.len(), src, &out, &len, &meta);
+            Ok(Self { inner: CudaInner::BF16(out), runtime: self.runtime.clone() })
         }
 
         fn launch_scalar_f32(
@@ -841,6 +937,18 @@ mod imp {
             Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
         }
 
+        fn launch_binary_bf16(
+            &self,
+            kernel: &str,
+            lhs: &CudaSlice<bf16>,
+            rhs: &CudaSlice<bf16>,
+        ) -> Result<Self> {
+            let out = unsafe { alloc_uninit::<bf16>(&self.runtime, lhs.len()) }?;
+            let len = lhs.len() as u32;
+            launch_1d!(&self.runtime, kernel, lhs.len(), lhs, rhs, &out, &len);
+            Ok(Self { inner: CudaInner::BF16(out), runtime: self.runtime.clone() })
+        }
+
         fn launch_binary_f32(
             &self,
             kernel: &str,
@@ -862,6 +970,13 @@ mod imp {
                     launch_reduce!(&self.runtime, kernel, outer_size, src, &out, &outer, &reduce);
                     Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
                 }
+                CudaInner::BF16(src) => {
+                    let out = unsafe { alloc_uninit::<bf16>(&self.runtime, outer_size) }?;
+                    let outer = outer_size as u32;
+                    let reduce = reduce_size as u32;
+                    launch_reduce!(&self.runtime, kernel, outer_size, src, &out, &outer, &reduce);
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: self.runtime.clone() })
+                }
                 CudaInner::F32(src) => {
                     let out = unsafe { alloc_uninit::<f32>(&self.runtime, outer_size) }?;
                     let outer = outer_size as u32;
@@ -881,6 +996,9 @@ mod imp {
             let compact = self.compact(l)?;
             match &compact.inner {
                 CudaInner::F16(src) => compact.launch_scalar_f16("scalar_powf_f16", src, e as f32),
+                CudaInner::BF16(src) => {
+                    compact.launch_scalar_bf16("scalar_powf_bf16", src, e as f32)
+                }
                 CudaInner::F32(src) => compact.launch_scalar_f32("scalar_powf_f32", src, e as f32),
                 CudaInner::I64(_) => {
                     Err(Error::NotImplemented("cuda scalar powf for i64 is not implemented"))
@@ -892,21 +1010,31 @@ mod imp {
             let compact = self.compact(l)?;
             match (&compact.inner, O::KERNEL) {
                 (CudaInner::F16(src), "Neg") => compact.launch_unary_f16("neg_f16", src),
+                (CudaInner::BF16(src), "Neg") => compact.launch_unary_bf16("neg_bf16", src),
                 (CudaInner::F32(src), "Neg") => compact.launch_unary_f32("neg_f32", src),
                 (CudaInner::F16(src), "exp") => compact.launch_unary_f16("exp_f16", src),
+                (CudaInner::BF16(src), "exp") => compact.launch_unary_bf16("exp_bf16", src),
                 (CudaInner::F32(src), "exp") => compact.launch_unary_f32("exp_f32", src),
                 (CudaInner::F16(src), "log") => compact.launch_unary_f16("log_f16", src),
+                (CudaInner::BF16(src), "log") => compact.launch_unary_bf16("log_bf16", src),
                 (CudaInner::F32(src), "log") => compact.launch_unary_f32("log_f32", src),
                 (CudaInner::F16(src), "sin") => compact.launch_unary_f16("sin_f16", src),
+                (CudaInner::BF16(src), "sin") => compact.launch_unary_bf16("sin_bf16", src),
                 (CudaInner::F32(src), "sin") => compact.launch_unary_f32("sin_f32", src),
                 (CudaInner::F16(src), "cos") => compact.launch_unary_f16("cos_f16", src),
+                (CudaInner::BF16(src), "cos") => compact.launch_unary_bf16("cos_bf16", src),
                 (CudaInner::F32(src), "cos") => compact.launch_unary_f32("cos_f32", src),
                 (CudaInner::F16(src), "tanh") => compact.launch_unary_f16("tanh_f16", src),
+                (CudaInner::BF16(src), "tanh") => compact.launch_unary_bf16("tanh_bf16", src),
                 (CudaInner::F32(src), "tanh") => compact.launch_unary_f32("tanh_f32", src),
                 (CudaInner::F16(src), "relu") => compact.launch_unary_f16("relu_f16", src),
+                (CudaInner::BF16(src), "relu") => compact.launch_unary_bf16("relu_bf16", src),
                 (CudaInner::F32(src), "relu") => compact.launch_unary_f32("relu_f32", src),
                 (CudaInner::F16(src), "scalar_add") => {
                     compact.launch_scalar_f16("scalar_add_f16", src, _op.f32(0.0))
+                }
+                (CudaInner::BF16(src), "scalar_add") => {
+                    compact.launch_scalar_bf16("scalar_add_bf16", src, _op.f32(0.0))
                 }
                 (CudaInner::F32(src), "scalar_add") => {
                     compact.launch_scalar_f32("scalar_add_f32", src, _op.f32(0.0))
@@ -914,17 +1042,26 @@ mod imp {
                 (CudaInner::F16(src), "scalar_mul") => {
                     compact.launch_scalar_f16("scalar_mul_f16", src, _op.f32(1.0))
                 }
+                (CudaInner::BF16(src), "scalar_mul") => {
+                    compact.launch_scalar_bf16("scalar_mul_bf16", src, _op.f32(1.0))
+                }
                 (CudaInner::F32(src), "scalar_mul") => {
                     compact.launch_scalar_f32("scalar_mul_f32", src, _op.f32(1.0))
                 }
                 (CudaInner::F16(src), "scalar_div") => {
                     compact.launch_scalar_f16("scalar_div_f16", src, 1.0 / _op.f32(1.0))
                 }
+                (CudaInner::BF16(src), "scalar_div") => {
+                    compact.launch_scalar_bf16("scalar_div_bf16", src, 1.0 / _op.f32(1.0))
+                }
                 (CudaInner::F32(src), "scalar_div") => {
                     compact.launch_scalar_f32("scalar_div_f32", src, 1.0 / _op.f32(1.0))
                 }
                 (CudaInner::F16(src), "relu_backward") => {
                     compact.launch_unary_f16("relu_backward_f16", src)
+                }
+                (CudaInner::BF16(src), "relu_backward") => {
+                    compact.launch_unary_bf16("relu_backward_bf16", src)
                 }
                 (CudaInner::F32(src), "relu_backward") => {
                     compact.launch_unary_f32("relu_backward_f32", src)
@@ -948,11 +1085,17 @@ mod imp {
                 (CudaInner::F16(a), CudaInner::F16(b), "add") => {
                     lhs.launch_binary_f16("add_f16", a, b)
                 }
+                (CudaInner::BF16(a), CudaInner::BF16(b), "add") => {
+                    lhs.launch_binary_bf16("add_bf16", a, b)
+                }
                 (CudaInner::F32(a), CudaInner::F32(b), "add") => {
                     lhs.launch_binary_f32("add_f32", a, b)
                 }
                 (CudaInner::F16(a), CudaInner::F16(b), "sub") => {
                     lhs.launch_binary_f16("sub_f16", a, b)
+                }
+                (CudaInner::BF16(a), CudaInner::BF16(b), "sub") => {
+                    lhs.launch_binary_bf16("sub_bf16", a, b)
                 }
                 (CudaInner::F32(a), CudaInner::F32(b), "sub") => {
                     lhs.launch_binary_f32("sub_f32", a, b)
@@ -960,11 +1103,17 @@ mod imp {
                 (CudaInner::F16(a), CudaInner::F16(b), "mul") => {
                     lhs.launch_binary_f16("mul_f16", a, b)
                 }
+                (CudaInner::BF16(a), CudaInner::BF16(b), "mul") => {
+                    lhs.launch_binary_bf16("mul_bf16", a, b)
+                }
                 (CudaInner::F32(a), CudaInner::F32(b), "mul") => {
                     lhs.launch_binary_f32("mul_f32", a, b)
                 }
                 (CudaInner::F16(a), CudaInner::F16(b), "div") => {
                     lhs.launch_binary_f16("div_f16", a, b)
+                }
+                (CudaInner::BF16(a), CudaInner::BF16(b), "div") => {
+                    lhs.launch_binary_bf16("div_bf16", a, b)
                 }
                 (CudaInner::F32(a), CudaInner::F32(b), "div") => {
                     lhs.launch_binary_f32("div_f32", a, b)
@@ -972,11 +1121,17 @@ mod imp {
                 (CudaInner::F16(a), CudaInner::F16(b), "powf") => {
                     lhs.launch_binary_f16("powf_f16", a, b)
                 }
+                (CudaInner::BF16(a), CudaInner::BF16(b), "powf") => {
+                    lhs.launch_binary_bf16("powf_bf16", a, b)
+                }
                 (CudaInner::F32(a), CudaInner::F32(b), "powf") => {
                     lhs.launch_binary_f32("powf_f32", a, b)
                 }
                 (CudaInner::F16(a), CudaInner::F16(b), "eq") => {
                     lhs.launch_binary_f16("eq_f16", a, b)
+                }
+                (CudaInner::BF16(a), CudaInner::BF16(b), "eq") => {
+                    lhs.launch_binary_bf16("eq_bf16", a, b)
                 }
                 (CudaInner::F32(a), CudaInner::F32(b), "eq") => {
                     lhs.launch_binary_f32("eq_f32", a, b)
@@ -991,15 +1146,11 @@ mod imp {
                 "reduce_sum" => compact.reduce_impl(
                     match compact.dtype() {
                         DType::F16 => "reduce_sum_f16",
+                        DType::BF16 => "reduce_sum_bf16",
                         DType::F32 => "reduce_sum_f32",
                         DType::I64 => {
                             return Err(Error::NotImplemented(
                                 "cuda reduce_sum for i64 is not implemented",
-                            ));
-                        }
-                        DType::BF16 => {
-                            return Err(Error::NotImplemented(
-                                "cuda reduce_sum for bf16 is not implemented",
                             ));
                         }
                     },
@@ -1009,15 +1160,11 @@ mod imp {
                 "reduce_max" => compact.reduce_impl(
                     match compact.dtype() {
                         DType::F16 => "reduce_max_f16",
+                        DType::BF16 => "reduce_max_bf16",
                         DType::F32 => "reduce_max_f32",
                         DType::I64 => {
                             return Err(Error::NotImplemented(
                                 "cuda reduce_max for i64 is not implemented",
-                            ));
-                        }
-                        DType::BF16 => {
-                            return Err(Error::NotImplemented(
-                                "cuda reduce_max for bf16 is not implemented",
                             ));
                         }
                     },
@@ -1196,6 +1343,55 @@ mod imp {
                     drop(gb);
                     Ok(Self { inner: CudaInner::F16(out), runtime: lhs_storage.runtime.clone() })
                 }
+                (CudaInner::BF16(a), CudaInner::BF16(b)) => {
+                    let mut out =
+                        unsafe { alloc_uninit::<bf16>(&lhs_storage.runtime, batch * m * n) }?;
+                    let alpha_f32 = 1.0f32;
+                    let beta_f32 = 0.0f32;
+                    let alpha_ptr = &alpha_f32 as *const f32 as *const _;
+                    let beta_ptr = &beta_f32 as *const f32 as *const _;
+                    let stream = out.stream().clone();
+                    let b_view = b.slice(rhs_offset..);
+                    let a_view = a.slice(lhs_offset..);
+                    let (b_ptr, gb) = b_view.device_ptr(&stream);
+                    let (a_ptr, ga) = a_view.device_ptr(&stream);
+                    let (c_ptr, gc) = out.device_ptr_mut(&stream);
+                    maybe_profile_launch(&lhs_storage.runtime, || {
+                        unsafe {
+                            cublas_result::gemm_strided_batched_ex(
+                                *lhs_storage.runtime.blas.handle(),
+                                transa,
+                                transb,
+                                n as i32,
+                                m as i32,
+                                k as i32,
+                                alpha_ptr,
+                                b_ptr as *const _,
+                                cudaDataType_t::CUDA_R_16BF,
+                                lda,
+                                rhs_bs,
+                                a_ptr as *const _,
+                                cudaDataType_t::CUDA_R_16BF,
+                                ldb,
+                                lhs_bs,
+                                beta_ptr,
+                                c_ptr as *mut _,
+                                cudaDataType_t::CUDA_R_16BF,
+                                n as i32,
+                                (m * n) as i64,
+                                batch as i32,
+                                cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                                cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+                            )
+                        }
+                        .map_err(|err| Error::Cuda(format!("cuBLAS matmul failed: {err}")))?;
+                        Ok(())
+                    })?;
+                    drop(gc);
+                    drop(ga);
+                    drop(gb);
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: lhs_storage.runtime.clone() })
+                }
                 _ => Err(Error::DTypeMismatch("matmul dtype mismatch".into())),
             }
         }
@@ -1234,6 +1430,28 @@ mod imp {
                         &right
                     );
                     Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
+                }
+                (CudaInner::BF16(src), CudaInner::I64(indices)) => {
+                    let out =
+                        unsafe { alloc_uninit::<bf16>(&self.runtime, indices_layout.size()) }?;
+                    let left = left_len as u32;
+                    let src_dim_u32 = src_dim as u32;
+                    let dst_dim_u32 = dst_dim as u32;
+                    let right = right_len as u32;
+                    launch_2d!(
+                        &self.runtime,
+                        "gather_bf16",
+                        right_len,
+                        left_len * dst_dim,
+                        src,
+                        indices,
+                        &out,
+                        &left,
+                        &src_dim_u32,
+                        &dst_dim_u32,
+                        &right
+                    );
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: self.runtime.clone() })
                 }
                 (CudaInner::F32(src), CudaInner::I64(indices)) => {
                     let out = unsafe { alloc_uninit::<f32>(&self.runtime, indices_layout.size()) }?;
@@ -1301,6 +1519,30 @@ mod imp {
                     );
                     Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
                 }
+                (CudaInner::BF16(src), CudaInner::I64(indices)) => {
+                    let out = src
+                        .stream()
+                        .alloc_zeros::<bf16>(dst_shape.iter().product())
+                        .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let left = left_len as u32;
+                    let dst_dim_u32 = dst_dim as u32;
+                    let index_len_u32 = index_len as u32;
+                    let right = right_len as u32;
+                    launch_2d!(
+                        &self.runtime,
+                        "scatter_add_bf16",
+                        right_len,
+                        left_len * index_len,
+                        src,
+                        indices,
+                        &out,
+                        &left,
+                        &dst_dim_u32,
+                        &index_len_u32,
+                        &right
+                    );
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: self.runtime.clone() })
+                }
                 (CudaInner::F32(src), CudaInner::I64(indices)) => {
                     let out = src
                         .stream()
@@ -1365,6 +1607,29 @@ mod imp {
                         &right
                     );
                     Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
+                }
+                (CudaInner::BF16(src), CudaInner::I64(indices)) => {
+                    let out = unsafe {
+                        alloc_uninit::<bf16>(&self.runtime, left_len * index_len * right_len)
+                    }?;
+                    let left = left_len as u32;
+                    let index_len_u32 = index_len as u32;
+                    let src_dim_u32 = src_dim as u32;
+                    let right = right_len as u32;
+                    launch_2d!(
+                        &self.runtime,
+                        "index_select_bf16",
+                        right_len,
+                        left_len * index_len,
+                        src,
+                        indices,
+                        &out,
+                        &left,
+                        &index_len_u32,
+                        &src_dim_u32,
+                        &right
+                    );
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: self.runtime.clone() })
                 }
                 (CudaInner::F32(src), CudaInner::I64(indices)) => {
                     let out = unsafe { alloc_uninit::<f32>(&self.runtime, left_len * index_len * right_len) }?;
@@ -1432,6 +1697,30 @@ mod imp {
                     );
                     Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
                 }
+                (CudaInner::BF16(src), CudaInner::I64(indices)) => {
+                    let out = src
+                        .stream()
+                        .alloc_zeros::<bf16>(dst_shape.iter().product())
+                        .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let left = left_len as u32;
+                    let src_dim_u32 = src_dim as u32;
+                    let dst_dim_u32 = dst_dim as u32;
+                    let right = right_len as u32;
+                    launch_2d!(
+                        &self.runtime,
+                        "index_add_bf16",
+                        right_len,
+                        left_len * src_dim,
+                        src,
+                        indices,
+                        &out,
+                        &left,
+                        &src_dim_u32,
+                        &dst_dim_u32,
+                        &right
+                    );
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: self.runtime.clone() })
+                }
                 (CudaInner::F32(src), CudaInner::I64(indices)) => {
                     let out = src
                         .stream()
@@ -1471,15 +1760,11 @@ mod imp {
             self.compact(layout)?.reduce_impl(
                 match self.dtype() {
                     DType::F16 => "log_sum_exp_f16",
+                    DType::BF16 => "log_sum_exp_bf16",
                     DType::F32 => "log_sum_exp_f32",
                     DType::I64 => {
                         return Err(Error::NotImplemented(
                             "cuda log_sum_exp for i64 is not implemented",
-                        ));
-                    }
-                    DType::BF16 => {
-                        return Err(Error::NotImplemented(
-                            "cuda log_sum_exp for bf16 is not implemented",
                         ));
                     }
                 },
@@ -1505,6 +1790,22 @@ mod imp {
                     let inner = inner_size as u32;
                     launch_reduce!(&src.runtime, "log_softmax_fwd_f16", outer_size, s, &out, &outer, &inner);
                     Ok(Self { inner: CudaInner::F16(out), runtime: src.runtime.clone() })
+                }
+                CudaInner::BF16(s) => {
+                    let out =
+                        unsafe { alloc_uninit::<bf16>(&src.runtime, outer_size * inner_size) }?;
+                    let outer = outer_size as u32;
+                    let inner = inner_size as u32;
+                    launch_reduce!(
+                        &src.runtime,
+                        "log_softmax_fwd_bf16",
+                        outer_size,
+                        s,
+                        &out,
+                        &outer,
+                        &inner
+                    );
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: src.runtime.clone() })
                 }
                 CudaInner::F32(s) => {
                     let out = unsafe { alloc_uninit::<f32>(&src.runtime, outer_size * inner_size) }?;
@@ -1540,6 +1841,23 @@ mod imp {
                     launch_reduce!(&grad.runtime, "log_softmax_bwd_f16", outer_size, g, l, &out, &outer, &inner);
                     Ok(Self { inner: CudaInner::F16(out), runtime: grad.runtime.clone() })
                 }
+                (CudaInner::BF16(g), CudaInner::BF16(l)) => {
+                    let out =
+                        unsafe { alloc_uninit::<bf16>(&grad.runtime, outer_size * inner_size) }?;
+                    let outer = outer_size as u32;
+                    let inner = inner_size as u32;
+                    launch_reduce!(
+                        &grad.runtime,
+                        "log_softmax_bwd_bf16",
+                        outer_size,
+                        g,
+                        l,
+                        &out,
+                        &outer,
+                        &inner
+                    );
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: grad.runtime.clone() })
+                }
                 (CudaInner::F32(g), CudaInner::F32(l)) => {
                     let out = unsafe { alloc_uninit::<f32>(&grad.runtime, outer_size * inner_size) }?;
                     let outer = outer_size as u32;
@@ -1554,6 +1872,7 @@ mod imp {
         fn dtype(&self) -> DType {
             match &self.inner {
                 CudaInner::F16(_) => DType::F16,
+                CudaInner::BF16(_) => DType::BF16,
                 CudaInner::F32(_) => DType::F32,
                 CudaInner::I64(_) => DType::I64,
             }
@@ -1564,6 +1883,9 @@ mod imp {
             let compact = self.compact(layout).expect("cuda compact failed");
             match &compact.inner {
                 CudaInner::F16(slice) => D::to_vec(&CpuStorage::F16(
+                    compact.runtime.stream.clone_dtoh(slice).expect("cuda dtoh failed"),
+                )),
+                CudaInner::BF16(slice) => D::to_vec(&CpuStorage::BF16(
                     compact.runtime.stream.clone_dtoh(slice).expect("cuda dtoh failed"),
                 )),
                 CudaInner::F32(slice) => D::to_vec(&CpuStorage::F32(
@@ -1582,6 +1904,17 @@ mod imp {
                     launch_1d!(
                         &self.runtime,
                         "copy_compact_f16",
+                        src_layout.size(),
+                        src,
+                        dst,
+                        &meta
+                    );
+                    Ok(())
+                }
+                (CudaInner::BF16(src), CudaInner::BF16(dst)) => {
+                    launch_1d!(
+                        &self.runtime,
+                        "copy_compact_bf16",
                         src_layout.size(),
                         src,
                         dst,
