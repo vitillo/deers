@@ -1315,4 +1315,64 @@ mod tests {
         let expected = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         assert_eq!(expected, array);
     }
+
+    #[test]
+    fn ewise_powf_compact_i64_returns_dtype_error() {
+        // Arrange
+        let storage = CpuStorage::I64(vec![1, 2, 3, 4]);
+        let layout = Layout::new(Shape::from((4,)), Strides(vec![1]), 0);
+
+        // Act
+        let result = storage.ewise_powf(2.0, &layout);
+
+        // Assert
+        let err = result.expect_err("powf on compact i64 must fail");
+        assert!(matches!(err, Error::DTypeMismatch(_)), "unexpected error: {err}");
+        assert!(err.to_string().contains("i64"), "message must name the dtype: {err}");
+    }
+
+    #[test]
+    fn ewise_powf_strided_i64_returns_dtype_error() {
+        // Arrange
+        let storage = CpuStorage::I64(vec![1, 2, 3, 4, 5, 6]);
+        let layout = Layout::new(Shape::from((3,)), Strides(vec![2]), 0);
+
+        // Act
+        let result = storage.ewise_powf(2.0, &layout);
+
+        // Assert
+        let err = result.expect_err("powf on strided i64 must fail");
+        assert!(matches!(err, Error::DTypeMismatch(_)), "unexpected error: {err}");
+        assert!(err.to_string().contains("i64"), "message must name the dtype: {err}");
+    }
+
+    #[test]
+    fn unary_op_compact_i64_returns_dtype_error() {
+        // Arrange
+        let storage = CpuStorage::I64(vec![1, 2, 3, 4]);
+        let layout = Layout::new(Shape::from((4,)), Strides(vec![1]), 0);
+
+        // Act
+        let result = storage.unary_op(crate::storage::Neg, &layout);
+
+        // Assert
+        let err = result.expect_err("unary op on compact i64 must fail");
+        assert!(matches!(err, Error::DTypeMismatch(_)), "unexpected error: {err}");
+        assert!(err.to_string().contains("i64"), "message must name the dtype: {err}");
+    }
+
+    #[test]
+    fn unary_op_strided_i64_returns_dtype_error() {
+        // Arrange
+        let storage = CpuStorage::I64(vec![1, 2, 3, 4, 5, 6]);
+        let layout = Layout::new(Shape::from((3,)), Strides(vec![2]), 0);
+
+        // Act
+        let result = storage.unary_op(crate::storage::Neg, &layout);
+
+        // Assert
+        let err = result.expect_err("unary op on strided i64 must fail");
+        assert!(matches!(err, Error::DTypeMismatch(_)), "unexpected error: {err}");
+        assert!(err.to_string().contains("i64"), "message must name the dtype: {err}");
+    }
 }
