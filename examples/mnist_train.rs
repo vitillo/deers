@@ -2,6 +2,7 @@ use std::time::Instant;
 use std::{env, process};
 
 use deers::dataset::MNISTDataset;
+use deers::eval::accuracy;
 use deers::models::mnist::MnistMLP;
 use deers::nn::{Module, ParamStore};
 use deers::optim::AdamWConfig;
@@ -120,26 +121,17 @@ fn usage(message: &str) -> ! {
 
 fn evaluate(model: &impl Module, images: &Tensor, labels: &Tensor, batch_size: usize) -> f64 {
     let num_batches = 10000 / batch_size;
-    let mut correct = 0usize;
+    let mut correct = 0.0;
 
     for batch_idx in 0..num_batches {
         let start = batch_idx * batch_size;
         let batch_images = images.narrow(0, start, batch_size);
-        let batch_labels: Vec<i64> = labels.narrow(0, start, batch_size).to_vec().unwrap();
+        let batch_labels = labels.narrow(0, start, batch_size);
 
         let logits = model.forward(&batch_images).unwrap();
-        let logit_vals: Vec<f32> = logits.to_vec().unwrap();
-
-        for i in 0..batch_size {
-            let row = &logit_vals[i * 10..(i + 1) * 10];
-            let pred =
-                row.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
-            if pred == batch_labels[i] as usize {
-                correct += 1;
-            }
-        }
+        correct += accuracy(&logits, &batch_labels) * batch_size as f64;
     }
 
-    let total = num_batches * batch_size;
-    correct as f64 / total as f64 * 100.0
+    let total = (num_batches * batch_size) as f64;
+    correct / total * 100.0
 }
