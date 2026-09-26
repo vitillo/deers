@@ -11,7 +11,7 @@ use crate::error::Result;
 ///
 /// Versioned bins store raw little-endian `u32` ids after this header, so a
 /// headerless bin from the old `u16` format is rejected instead of misread.
-pub const TOKEN_BIN_MAGIC: &[u8; 8] = b"DEERSTB\x01";
+pub const TOKEN_BIN_MAGIC: &[u8; 8] = b"DEERSTB\x02";
 /// Bytes per token id in the versioned format.
 const TOKEN_BIN_ITEM_BYTES: usize = 4;
 /// Largest token id the versioned token-bin format can store.
@@ -30,8 +30,7 @@ pub struct TokenBinPaths {
 /// Tokenizes a text corpus into flat binary token bins.
 ///
 /// Each line of the input file is one document. The tokenizer's
-/// end-of-text token is stored after each document, exactly once, unless
-/// that document's encoding already ends with it, so training windows
+/// end-of-text token is stored after each document, so training windows
 /// learn where one document ends and the next begins instead of reading
 /// concatenated lines as one uninterrupted stream.
 ///
@@ -113,11 +112,7 @@ fn tokenize_text_file_to_bin(
         }
         processed_bytes += bytes_read;
 
-        let mut ids = tokenizer.encode(&line);
-        if ids.last() != Some(&eos) {
-            ids.push(eos);
-        }
-        for token in ids {
+        for token in tokenizer.encode(&line).into_iter().chain([eos]) {
             writer.write_all(&token.to_le_bytes())?;
             total_tokens += 1;
         }
@@ -315,38 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_text_token_bins_skips_duplicate_eos() {
-        // Arrange
-        let dir = std::env::temp_dir().join("deers_prepare_token_bins_eos_dup_test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let text_path = dir.join("tiny.txt");
-        std::fs::write(&text_path, "a\nb\n").unwrap();
-        let eos = 9u32;
-        // The encoding already ends with the EOS token.
-        let tokenizer = FixedIdsTokenizer { ids: vec![10, eos], vocab_size: 248_320, eos };
-
-        // Act
-        let paths = prepare_text_token_bins(&text_path, &tokenizer, &dir, 0.5).unwrap();
-        let mut stream = Vec::new();
-        for path in [&paths.train, &paths.val] {
-            let bytes = std::fs::read(path).unwrap();
-            stream.extend(
-                bytes[TOKEN_BIN_MAGIC.len()..]
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|chunk| u32::from_le_bytes(*chunk)),
-            );
-        }
-
-        // Assert — no second EOS is appended after the encoded one.
-        assert_eq!(stream, vec![10, eos, 10, eos]);
-
-        // Cleanup
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn test_batch_window_crossing_a_document_boundary() {
         use crate::Device;
         use crate::dataset::TokenBinDataset;
@@ -400,12 +363,11 @@ mod tests {
             );
         }
 
-        // Assert — one 50256 (<|endoftext|>) per document, none duplicated.
+        // Assert — one 50256 (<|endoftext|>) per document.
         let boundaries = stream.iter().filter(|&&id| id == 50256).count();
         assert_eq!(boundaries, 2);
         assert_eq!(tokenizer.eos_token_id(), 50256);
         assert_eq!(*stream.last().unwrap(), 50256);
-        assert!(stream.windows(2).all(|pair| pair != [50256, 50256]), "duplicate EOS boundary");
 
         // Cleanup
         std::fs::remove_dir_all(&dir).ok();

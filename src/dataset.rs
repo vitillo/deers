@@ -359,6 +359,23 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "missing its version header")]
+    fn test_token_bin_dataset_rejects_v1_bins_without_document_boundaries() {
+        // Arrange
+        let dir = std::env::temp_dir().join("deers_token_bin_dataset_v1_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin_path = dir.join("v1.bin");
+        let mut bytes = b"DEERSTB\x01".to_vec();
+        for token in [0u32, 1, 2, 3] {
+            bytes.extend_from_slice(&token.to_le_bytes());
+        }
+        std::fs::write(&bin_path, bytes).unwrap();
+
+        // Act
+        let _ = TokenBinDataset::load(&bin_path, 1);
+    }
+
+    #[test]
     fn test_mnist_dataset() {
         // See https://github.com/huggingface/candle/blob/17cbbe4286f25934197db79a244fd0694259c899/candle-examples/examples/mnist-training/main.rs#L251
         // See https://learn.microsoft.com/en-us/azure/open-datasets/dataset-mnist?tabs=azure-storage
