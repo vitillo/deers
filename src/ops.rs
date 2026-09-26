@@ -1288,7 +1288,53 @@ impl TensorOp for Compact {
     }
 }
 
-/// Gathers values along `dim` using integer indices.
+/// Moves tensor data to another device while keeping the autograd edge.
+///
+/// Forward copies the values to the target device. Backward moves the output
+/// gradient back to the source device and accumulates it there, so gradients
+/// flow across the device boundary instead of stopping silently.
+#[derive(Debug)]
+pub struct ToDevice {
+    arg: Tensor,
+    device: crate::Device,
+}
+
+impl ToDevice {
+    pub fn new(arg: Tensor, device: crate::Device) -> Result<Self> {
+        Ok(Self { arg, device })
+    }
+}
+
+impl TensorOp for ToDevice {
+    fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("to_device", &self.arg);
+        let shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
+        let out = match self.arg.dtype() {
+            crate::DType::F16 => {
+                Tensor::from_vec(self.arg.to_vec::<f16>()?, shape, self.device)
+            }
+            crate::DType::BF16 => {
+                Tensor::from_vec(self.arg.to_vec::<bf16>()?, shape, self.device)
+            }
+            crate::DType::F32 => {
+                Tensor::from_vec(self.arg.to_vec::<f32>()?, shape, self.device)
+            }
+            crate::DType::I64 => {
+                Tensor::from_vec(self.arg.to_vec::<i64>()?, shape, self.device)
+            }
+        };
+        Ok(Tensor::new(out.storage_clone(), out.layout().clone(), false, Some(Box::new(self))))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        grads.accumulate(&self.arg, out_grad.to_device(self.arg.device())?);
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
 ///
 /// The index tensor must have the same rank as the input and the same shape on
 /// every non-indexed dimension. The output shape matches the index tensor.

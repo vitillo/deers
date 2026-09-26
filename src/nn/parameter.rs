@@ -96,18 +96,20 @@ mod tests {
 
     #[test]
     fn test_to_device() {
-        if !Device::Mps.is_available() {
-            return;
-        }
-
         // Arrange
+        let Some(device) = [Device::Cuda, Device::Mps].into_iter().find(|d| d.is_available())
+        else {
+            return;
+        };
         let var = Parameter::new(Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu));
+        let id = var.id();
 
         // Act
-        var.to_device(Device::Mps).unwrap();
+        var.to_device(device).unwrap();
 
         // Assert
-        assert_eq!(var.device(), Device::Mps);
+        assert_eq!(var.id(), id);
+        assert_eq!(var.device(), device);
         assert!(var.requires_grad());
         assert_eq!(var.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
     }
