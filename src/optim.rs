@@ -2,6 +2,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use half::{bf16, f16};
+
+use crate::DType;
 use crate::GradientStore;
 use crate::error::{Error, Result};
 use crate::nn::Parameter;
@@ -325,7 +328,12 @@ pub fn clip_grad_norm(
     }
 
     let total_norm = total.sqrt();
-    let total_norm_value = total_norm.to_vec::<f32>()?[0];
+    let total_norm_value = match total_norm.dtype() {
+        DType::F16 => total_norm.to_vec::<f16>()?[0].to_f32(),
+        DType::BF16 => total_norm.to_vec::<bf16>()?[0].to_f32(),
+        DType::F32 => total_norm.to_vec::<f32>()?[0],
+        DType::I64 => total_norm.to_vec::<i64>()?[0] as f32,
+    };
     if !total_norm_value.is_finite() {
         return Ok(total_norm_value);
     }
@@ -676,5 +684,75 @@ mod tests {
         assert!((norm - 5.0).abs() < 1e-5);
         assert!((clipped[0] - 0.6).abs() < 1e-4);
         assert!((clipped[1] - 0.8).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_clip_grad_norm_scales_f16_gradients() {
+        // Arrange
+        let x = Parameter::new(Tensor::from_vec(
+            vec![f16::from_f32(0.0), f16::from_f32(0.0)],
+            (2,),
+            Device::Cpu,
+        ));
+        let mut grads = GradientStore::new();
+        grads.insert(
+            x.id(),
+            Tensor::from_vec(
+                vec![f16::from_f32(3.0), f16::from_f32(4.0)],
+                (2,),
+                Device::Cpu,
+            ),
+        );
+
+        // Act
+        let norm = clip_grad_norm(std::slice::from_ref(&x), &mut grads, 1.0).unwrap();
+        let clipped: Vec<f32> = grads
+            .get(x.id())
+            .unwrap()
+            .to_vec::<f16>()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_f32())
+            .collect();
+
+        // Assert
+        assert!((norm - 5.0).abs() < 1e-2);
+        assert!((clipped[0] - 0.6).abs() < 1e-2);
+        assert!((clipped[1] - 0.8).abs() < 1e-2);
+    }
+
+    #[test]
+    fn test_clip_grad_norm_scales_bf16_gradients() {
+        // Arrange
+        let x = Parameter::new(Tensor::from_vec(
+            vec![bf16::from_f32(0.0), bf16::from_f32(0.0)],
+            (2,),
+            Device::Cpu,
+        ));
+        let mut grads = GradientStore::new();
+        grads.insert(
+            x.id(),
+            Tensor::from_vec(
+                vec![bf16::from_f32(3.0), bf16::from_f32(4.0)],
+                (2,),
+                Device::Cpu,
+            ),
+        );
+
+        // Act
+        let norm = clip_grad_norm(std::slice::from_ref(&x), &mut grads, 1.0).unwrap();
+        let clipped: Vec<f32> = grads
+            .get(x.id())
+            .unwrap()
+            .to_vec::<bf16>()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_f32())
+            .collect();
+
+        // Assert
+        assert!((norm - 5.0).abs() < 1e-2);
+        assert!((clipped[0] - 0.6).abs() < 1e-2);
+        assert!((clipped[1] - 0.8).abs() < 1e-2);
     }
 }
