@@ -199,7 +199,7 @@ mod tests {
         accuracy, check_close, perplexity_from_logits, sample_token_ids, score_model,
         top_k_accuracy,
     };
-    use crate::models::gpt::{GPTConfig, RopeScaling};
+    use crate::models::gpt::{GPTConfig, GptMlpKind, GptNormKind, RopeScaling};
     use crate::nn::ParamStore;
     use crate::tokenizer::{Gpt2Tokenizer, Tokenizer};
     use crate::{Device, Tensor};
@@ -215,6 +215,9 @@ mod tests {
             rms_norm_eps: 1e-5,
             rope_base: 10_000.0,
             rope_scaling: RopeScaling::None,
+            norm: GptNormKind::RmsNorm,
+            mlp: GptMlpKind::ReluSquared,
+            tie_embeddings: false,
         }
     }
 

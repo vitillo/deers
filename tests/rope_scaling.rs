@@ -1,5 +1,5 @@
 use deers::models::gpt::{
-    GPT, GPTConfig, RopeScaling, precompute_rotary_embeddings,
+    GPT, GPTConfig, GptMlpKind, GptNormKind, RopeScaling, precompute_rotary_embeddings,
     precompute_rotary_embeddings_scaled,
 };
 use deers::nn::ParamStore;
@@ -16,6 +16,9 @@ fn tiny_config(scaling: RopeScaling) -> GPTConfig {
         rms_norm_eps: 1e-5,
         rope_base: 10_000.0,
         rope_scaling: scaling,
+        norm: GptNormKind::RmsNorm,
+        mlp: GptMlpKind::ReluSquared,
+        tie_embeddings: false,
     }
 }
 
