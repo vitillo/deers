@@ -119,7 +119,7 @@ impl TensorOp for Neg {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        grads.accumulate(&self.arg, -out_grad);
+        grads.accumulate(&self.arg, (-out_grad)?);
         Ok(())
     }
 
@@ -211,7 +211,7 @@ impl TensorOp for EWiseSub {
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         grads.accumulate(&self.arg1, out_grad.clone());
-        grads.accumulate(&self.arg2, -out_grad);
+        grads.accumulate(&self.arg2, (-out_grad)?);
         Ok(())
     }
 
@@ -304,7 +304,7 @@ impl TensorOp for EWiseDiv {
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         grads.accumulate(&self.arg1, out_grad / &self.arg2);
-        grads.accumulate(&self.arg2, -out_grad * &self.arg1 / (&self.arg2.scalar_powf(2.0)));
+        grads.accumulate(&self.arg2, (-out_grad)? * &self.arg1 / &self.arg2.scalar_powf(2.0)?);
         Ok(())
     }
 
@@ -349,10 +349,10 @@ impl TensorOp for EWisePowf {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let arg_grad = out_grad * &self.e * self.arg.powf(&self.e - 1.0);
+        let arg_grad = out_grad * &self.e * self.arg.powf((&self.e - 1.0)?)?;
         grads.accumulate(&self.arg, arg_grad);
 
-        let e_grad = out_grad * self.arg.powf(&self.e) * self.arg.log();
+        let e_grad = out_grad * self.arg.powf(&self.e)? * self.arg.log()?;
         grads.accumulate(&self.e, e_grad);
 
         Ok(())
@@ -422,7 +422,7 @@ impl TensorOp for EWiseExp {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        grads.accumulate(&self.arg, out_grad * &self.arg.exp());
+        grads.accumulate(&self.arg, out_grad * &self.arg.exp()?);
         Ok(())
     }
 
@@ -456,7 +456,7 @@ impl TensorOp for EWiseSin {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        grads.accumulate(&self.arg, out_grad * &self.arg.cos());
+        grads.accumulate(&self.arg, out_grad * &self.arg.cos()?);
         Ok(())
     }
 
@@ -490,7 +490,7 @@ impl TensorOp for EWiseCos {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        grads.accumulate(&self.arg, out_grad * &self.arg.sin() * -1.0);
+        grads.accumulate(&self.arg, (out_grad * &self.arg.sin()? * -1.0)?);
         Ok(())
     }
 
@@ -524,8 +524,8 @@ impl TensorOp for Tanh {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let out = self.arg.tanh();
-        let arg_grad = out_grad * (&(&out * &out) * -1.0 + 1.0);
+        let out = self.arg.tanh()?;
+        let arg_grad = out_grad * ((&(&out * &out) * -1.0)? + 1.0)?;
         grads.accumulate(&self.arg, arg_grad);
         Ok(())
     }
@@ -638,7 +638,7 @@ impl TensorOp for ScalarMul {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let arg_grad = out_grad * self.scalar;
+        let arg_grad = (out_grad * self.scalar)?;
         grads.accumulate(&self.arg, arg_grad);
 
         Ok(())
@@ -675,7 +675,7 @@ impl TensorOp for ScalarPowf {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let arg_grad = out_grad * self.e * self.arg.scalar_powf(self.e - 1.0);
+        let arg_grad = (out_grad * self.e)? * self.arg.scalar_powf(self.e - 1.0)?;
         grads.accumulate(&self.arg, arg_grad);
         Ok(())
     }
@@ -1146,9 +1146,9 @@ impl TensorOp for LogSumExp {
             // Decomposed fallback: max, sub, exp, sum, log, add.
             let max_z = self.arg.max(self.axes.clone(), true);
             let broadcast_max = max_z.broadcast(self.arg.layout().shape().clone());
-            let exp_z = (&self.arg - &broadcast_max).exp();
+            let exp_z = (&self.arg - &broadcast_max).exp()?;
             let sum_z = exp_z.sum(self.axes.clone(), false);
-            &max_z.reshape(sum_z.layout().shape.clone()) + &sum_z.log()
+            &max_z.reshape(sum_z.layout().shape.clone()) + &sum_z.log()?
         };
 
         self.lse = Some(logsumexp.clone());
@@ -1166,7 +1166,7 @@ impl TensorOp for LogSumExp {
         let lse = self.lse.as_ref().expect("forward must run before backward");
         let expand_shape = reduce_shape(self.arg.layout().shape(), &self.axes, true);
         let lse_broadcast = lse.reshape(expand_shape).broadcast(self.arg.layout().shape().clone());
-        let softmax = (&self.arg - &lse_broadcast).exp();
+        let softmax = (&self.arg - &lse_broadcast).exp()?;
         let out_grad_broadcast = out_grad
             .reshape(reduce_shape(self.arg.layout().shape(), &self.axes, true))
             .broadcast(self.arg.layout().shape().clone());

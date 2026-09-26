@@ -243,19 +243,15 @@ impl Linear {
         let weight = builder.param(
             "weight",
             Tensor::rand((in_features, out_features), DType::F32, Device::Cpu)
-                .expect("rand with F32 dtype cannot fail")
-                * 2.0
-                * k
-                - k,
+                .and_then(|t| ((t * 2.0)? * k)? - k)
+                .expect("uniform init with F32 dtype cannot fail"),
         );
         let bias = if bias {
             Some(builder.param(
                 "bias",
                 Tensor::rand((out_features,), DType::F32, Device::Cpu)
-                    .expect("rand with F32 dtype cannot fail")
-                    * 2.0
-                    * k
-                    - k,
+                    .and_then(|t| ((t * 2.0)? * k)? - k)
+                    .expect("uniform init with F32 dtype cannot fail"),
             ))
         } else {
             None
@@ -372,8 +368,8 @@ impl RMSNorm {
 impl Module for RMSNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let last_axis = x.layout().ndim() - 1;
-        let mean_sq = (x * x).mean(vec![last_axis], true);
-        let inv_norm = (mean_sq + self.eps).scalar_powf(-0.5);
+        let mean_sq = (x * x).mean(vec![last_axis], true)?;
+        let inv_norm = (mean_sq + self.eps)?.scalar_powf(-0.5)?;
         let normed = x * &inv_norm;
         match &self.weight {
             Some(weight) => Ok(&normed * &**weight),
@@ -437,10 +433,10 @@ impl Module for LayerNorm {
             self.weight.layout().shape()[0],
             "LayerNorm input last dim must match normalized shape"
         );
-        let mean = x.mean(vec![last_axis], true);
+        let mean = x.mean(vec![last_axis], true)?;
         let centered = x - &mean;
-        let var = (&centered * &centered).mean(vec![last_axis], true);
-        let normed = &centered * &(var + self.eps).scalar_powf(-0.5);
+        let var = (&centered * &centered).mean(vec![last_axis], true)?;
+        let normed = &centered * &(var + self.eps)?.scalar_powf(-0.5)?;
         let scaled = &normed * &*self.weight;
         match &self.bias {
             Some(bias) => Ok(&scaled + &**bias),
@@ -475,7 +471,7 @@ pub struct ReLU;
 
 impl Module for ReLU {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        Ok(x.relu())
+        x.relu()
     }
 }
 
@@ -485,7 +481,7 @@ pub struct GELU;
 
 impl Module for GELU {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        Ok(x.gelu())
+        x.gelu()
     }
 }
 
@@ -495,7 +491,7 @@ pub struct SiLU;
 
 impl Module for SiLU {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        Ok(x.silu())
+        x.silu()
     }
 }
 
@@ -531,7 +527,7 @@ impl SwiGLU {
     /// The core stays fixed rank. Only the wrapper below folds leading dims,
     /// and that fold is rank-polymorphic through the ellipsis form.
     fn forward_flat(&self, x_flat: &Tensor) -> Result<Tensor> {
-        let gate = self.gate_proj.forward(x_flat)?.silu();
+        let gate = self.gate_proj.forward(x_flat)?.silu()?;
         let up = self.up_proj.forward(x_flat)?;
         self.down_proj.forward(&(&gate * &up))
     }

@@ -47,7 +47,7 @@ for epoch in 0..3 {
         let logits = model.forward(&inputs).unwrap();
         let logits_flat = logits.reshape(vec![batch_size * 256, tokenizer.vocab_size()]);
         let targets_flat = targets.reshape(vec![batch_size * 256]);
-        let batch_loss = loss::cross_entropy(&logits_flat, &targets_flat);
+        let batch_loss = loss::cross_entropy(&logits_flat, &targets_flat).unwrap();
 
         let grads = batch_loss.backward().unwrap();
         clip_grad_norm(&params, &mut grads, 1.0).unwrap();

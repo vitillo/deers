@@ -336,7 +336,8 @@ fn test_gpt_backward_conforms_with_candle_on_cpu_and_accelerators() {
         let loss = loss::cross_entropy(
             &logits.reshape((batch_size * seq_len, config.vocab_size)),
             &targets,
-        );
+        )
+        .unwrap();
         let actual_loss = loss.to_vec::<f32>().unwrap()[0];
         let grads = loss.backward().unwrap();
         let parameters = model.parameters();

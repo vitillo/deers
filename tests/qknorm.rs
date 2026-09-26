@@ -30,8 +30,8 @@ fn assert_close(actual: &[f32], expected: &[f32], tol: f32) {
 /// `RMSNorm` without calling it.
 fn manual_rms_norm(x: &Tensor, weight: &Tensor) -> Tensor {
     let last = x.layout().ndim() - 1;
-    let mean_sq = (x * x).mean(vec![last], true);
-    let inv_norm = (mean_sq + QK_EPS).scalar_powf(-0.5);
+    let mean_sq = (x * x).mean(vec![last], true).unwrap();
+    let inv_norm = (mean_sq + QK_EPS).unwrap().scalar_powf(-0.5).unwrap();
     let normed = x * &inv_norm;
     &normed * weight
 }
@@ -67,9 +67,9 @@ fn manual_mha_forward(
     let v = v.rearrange("b t h d -> b h t d", &[]);
 
     let scale = 1.0 / (head_dim as f64).sqrt();
-    let scores = q.matmul(&k.transpose(Some((2, 3)))) * scale;
+    let scores = (q.matmul(&k.transpose(Some((2, 3)))) * scale).unwrap();
     let mask = functional::causal_mask(batch, seq, 0, x.dtype(), x.device());
-    let attn = (&scores + &mask).softmax(3);
+    let attn = (&scores + &mask).softmax(3).unwrap();
     let y_flat = attn.matmul(&v).rearrange("b h t d -> (b t) (h d)", &[]);
 
     y_flat.matmul(out_w).rearrange("(b t) c -> b t c", &[("b", batch), ("t", seq)])
