@@ -294,6 +294,11 @@ impl Embedding {
     pub fn new(builder: ParamBuilder, vocab_size: usize, hidden_size: usize) -> Self {
         let weight = builder
             .param("weight", Tensor::randn((vocab_size, hidden_size), DType::F32, Device::Cpu));
+        Self::from_weight(weight)
+    }
+
+    /// Creates an embedding table around an already registered `[vocab, hidden]` weight.
+    pub fn from_weight(weight: Parameter) -> Self {
         Self { weight, training: Cell::new(true) }
     }
 }
