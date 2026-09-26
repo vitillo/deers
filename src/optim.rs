@@ -46,6 +46,40 @@ impl SGD {
     }
 }
 
+/// One AdamW parameter group with its own decoupled weight decay.
+///
+/// Group parameters so norms and biases can opt out of decay following the
+/// standard recipe (decay nD weights, `weight_decay = 0.0` for biases and norms):
+/// ```ignore
+/// let opt = AdamWConfig::new(1e-3)
+///     .build_with_groups(vec![
+///         AdamWParamGroup::new(decay_params, 0.01),
+///         AdamWParamGroup::new(no_decay_params, 0.0),
+///     ]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct AdamWParamGroup {
+    parameters: Vec<Parameter>,
+    weight_decay: f64,
+}
+
+impl AdamWParamGroup {
+    /// Creates a group over `parameters` with decoupled weight decay `weight_decay`.
+    pub fn new(parameters: Vec<Parameter>, weight_decay: f64) -> Self {
+        Self { parameters, weight_decay }
+    }
+
+    /// Returns the parameters in this group.
+    pub fn parameters(&self) -> &[Parameter] {
+        &self.parameters
+    }
+
+    /// Returns the decoupled weight decay for this group.
+    pub fn weight_decay(&self) -> f64 {
+        self.weight_decay
+    }
+}
+
 /// Configuration for the AdamW optimizer, separate from its runtime state.
 #[derive(Debug)]
 pub struct AdamWConfig {
@@ -80,13 +114,26 @@ impl AdamWConfig {
     }
 
     /// Builds an AdamW optimizer over `parameters`.
+    ///
+    /// This is the single-group default: every parameter shares the config's
+    /// `weight_decay`. Use [`build_with_groups`](Self::build_with_groups) to
+    /// exclude norms and biases per group.
     pub fn build(self, parameters: Vec<Parameter>) -> AdamW {
+        let weight_decay = self.weight_decay;
+        self.build_with_groups(vec![AdamWParamGroup::new(parameters, weight_decay)])
+    }
+
+    /// Builds an AdamW optimizer over per-group parameters.
+    ///
+    /// Each group carries its own `weight_decay`; the config's `weight_decay`
+    /// applies only to [`build`](Self::build). Shared hyperparameters
+    /// (`lr`, `betas`, `eps`) come from the config.
+    pub fn build_with_groups(self, groups: Vec<AdamWParamGroup>) -> AdamW {
         AdamW {
-            parameters,
+            groups,
             lr: self.lr,
             betas: self.betas,
             eps: self.eps,
-            weight_decay: self.weight_decay,
             m: HashMap::new(),
             v: HashMap::new(),
             step: 0,
@@ -112,13 +159,21 @@ impl AdamWConfig {
 ///     .weight_decay(0.01)
 ///     .build(model.parameters());
 /// ```
+///
+/// To exclude norms and biases, build with per-group decay:
+/// ```ignore
+/// let opt = AdamWConfig::new(1e-3)
+///     .build_with_groups(vec![
+///         AdamWParamGroup::new(decay_params, 0.01),
+///         AdamWParamGroup::new(no_decay_params, 0.0),
+///     ]);
+/// ```
 #[derive(Debug)]
 pub struct AdamW {
-    parameters: Vec<Parameter>,
+    groups: Vec<AdamWParamGroup>,
     lr: f64,
     betas: (f64, f64),
     eps: f64,
-    weight_decay: f64,
     m: HashMap<TensorId, Tensor>,
     v: HashMap<TensorId, Tensor>,
     step: usize,
@@ -128,6 +183,11 @@ impl AdamW {
     /// Sets the learning rate used on subsequent steps.
     pub fn set_lr(&mut self, lr: f64) {
         self.lr = lr;
+    }
+
+    /// Returns the parameter groups with their per-group weight decay.
+    pub fn param_groups(&self) -> &[AdamWParamGroup] {
+        &self.groups
     }
 
     /// Returns the current learning rate.
@@ -218,33 +278,36 @@ impl AdamW {
         let bias_correction1 = 1.0 - beta1.powi(self.step as i32);
         let bias_correction2 = 1.0 - beta2.powi(self.step as i32);
 
-        for param in &self.parameters {
-            let grad = match grads.get(param.id()) {
-                Some(g) => g.detach(),
-                None => continue,
-            };
-            let w = param.detach();
+        for group in &self.groups {
+            let weight_decay = group.weight_decay;
+            for param in &group.parameters {
+                let grad = match grads.get(param.id()) {
+                    Some(g) => g.detach(),
+                    None => continue,
+                };
+                let w = param.detach();
 
-            // First moment: m = β₁ * m + (1 - β₁) * grad
-            let m = self.m.entry(param.id()).or_insert_with(|| param.zeros_like());
-            *m = &*m * beta1 + &grad * (1.0 - beta1);
+                // First moment: m = β₁ * m + (1 - β₁) * grad
+                let m = self.m.entry(param.id()).or_insert_with(|| param.zeros_like());
+                *m = &*m * beta1 + &grad * (1.0 - beta1);
 
-            // Second moment: v = β₂ * v + (1 - β₂) * grad²
-            let v = self.v.entry(param.id()).or_insert_with(|| param.zeros_like());
-            *v = &*v * beta2 + &(&grad * &grad) * (1.0 - beta2);
+                // Second moment: v = β₂ * v + (1 - β₂) * grad²
+                let v = self.v.entry(param.id()).or_insert_with(|| param.zeros_like());
+                *v = &*v * beta2 + &(&grad * &grad) * (1.0 - beta2);
 
-            // Bias-corrected estimates
-            let m_hat = &*m * (1.0 / bias_correction1);
-            let v_hat = &*v * (1.0 / bias_correction2);
+                // Bias-corrected estimates
+                let m_hat = &*m * (1.0 / bias_correction1);
+                let v_hat = &*v * (1.0 / bias_correction2);
 
-            // Decoupled weight decay: w = w * (1 - lr * λ)
-            let decayed =
-                if self.weight_decay > 0.0 { &w * (1.0 - self.lr * self.weight_decay) } else { w };
+                // Decoupled weight decay: w = w * (1 - lr * λ)
+                let decayed =
+                    if weight_decay > 0.0 { &w * (1.0 - self.lr * weight_decay) } else { w };
 
             // Parameter update: w = w_decayed - lr * m̂ / (√v̂ + ε)
             let update = &m_hat / &(&v_hat.sqrt() + self.eps);
             let updated = (&decayed - &(&update * self.lr)).attach();
             param.set(&updated)?;
+            }
         }
 
         Ok(())
@@ -468,6 +531,68 @@ mod tests {
 
         // Assert
         assert!(val[0] < 5.0, "weight decay should shrink x, got {}", val[0]);
+    }
+
+    #[test]
+    fn test_adamw_param_groups_default_matches_single_group() {
+        // Arrange — same params, lr, and decay built both ways
+        let make_params = || {
+            vec![
+                Parameter::new(Tensor::from_vec(vec![1.0f32, 2.0], (2,), Device::Cpu)),
+                Parameter::new(Tensor::from_vec(vec![-1.0f32], (1,), Device::Cpu)),
+            ]
+        };
+        let single_params = make_params();
+        let grouped_params = make_params();
+        let mut single =
+            AdamWConfig::new(0.05).weight_decay(0.1).build(single_params.clone());
+        let mut grouped = AdamWConfig::new(0.05).build_with_groups(vec![
+            AdamWParamGroup::new(vec![grouped_params[0].clone()], 0.1),
+            AdamWParamGroup::new(vec![grouped_params[1].clone()], 0.1),
+        ]);
+
+        // Act — one step each with identical grads (grad = param)
+        let mut grads = GradientStore::new();
+        for param in single_params.iter().chain(grouped_params.iter()) {
+            grads.insert(param.id(), (**param).clone().detach());
+        }
+        single.step_with_grads(&grads).unwrap();
+        grouped.step_with_grads(&grads).unwrap();
+
+        // Assert — identical results: single-group default is unchanged
+        for (a, b) in single_params.iter().zip(grouped_params.iter()) {
+            let a_val: Vec<f32> = a.to_vec().unwrap();
+            let b_val: Vec<f32> = b.to_vec().unwrap();
+            assert_eq!(a_val.len(), b_val.len());
+            for (x, y) in a_val.iter().zip(b_val.iter()) {
+                assert!((x - y).abs() < 1e-6, "{a_val:?} vs {b_val:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_adamw_param_groups_selective_decay() {
+        // Arrange — decay group vs no-decay group, zero grads isolate decay
+        let decayed = Parameter::new(Tensor::from_vec(vec![5.0f32], (1,), Device::Cpu));
+        let frozen = Parameter::new(Tensor::from_vec(vec![5.0f32], (1,), Device::Cpu));
+        let mut opt = AdamWConfig::new(0.1).build_with_groups(vec![
+            AdamWParamGroup::new(vec![decayed.clone()], 0.1),
+            AdamWParamGroup::new(vec![frozen.clone()], 0.0),
+        ]);
+
+        // Act — loss = 0 * w means grad ≈ 0, only decay acts
+        let loss = (&(&*decayed * 0.0) + &(&*frozen * 0.0)).sum(vec![0], true);
+        opt.backward_step(&loss).unwrap();
+
+        // Assert — decay applies per group
+        let decayed_val: Vec<f32> = decayed.to_vec().unwrap();
+        let frozen_val: Vec<f32> = frozen.to_vec().unwrap();
+        assert!(
+            (decayed_val[0] - 5.0 * (1.0 - 0.1 * 0.1)).abs() < 1e-5,
+            "decayed param = {}",
+            decayed_val[0]
+        );
+        assert!((frozen_val[0] - 5.0).abs() < 1e-5, "frozen param = {}", frozen_val[0]);
     }
 
     #[test]

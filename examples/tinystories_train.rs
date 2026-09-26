@@ -17,7 +17,7 @@ use deers::checkpoint;
 use deers::dataset::TokenBinDataset;
 use deers::models::gpt::{GPT, GPTConfig, RopeScaling};
 use deers::nn::{ParamStore, Parameter};
-use deers::optim::{AdamW, AdamWConfig, LrSchedule, WarmupWarmdown, clip_grad_norm};
+use deers::optim::{AdamW, AdamWConfig, AdamWParamGroup, LrSchedule, WarmupWarmdown, clip_grad_norm};
 use deers::tokenizer::{Gpt2Tokenizer, TokenBinPaths, Tokenizer, prepare_text_token_bins};
 use deers::{Device, GradientStore, Tensor, loss};
 
@@ -72,6 +72,14 @@ fn main() {
     let num_params: usize = parameters.iter().map(|parameter| parameter.layout().size()).sum();
     println!("Model: {num_params} parameters on {:?}", options.device);
 
+    // Standard recipe: decay nD weights, exclude biases and norms.
+    let (decay_params, no_decay_params) = split_decay_params(&store);
+    println!(
+        "Weight decay: {} decayed / {} excluded (biases, norms)",
+        decay_params.len(),
+        no_decay_params.len()
+    );
+
     fs::create_dir_all(&options.out_dir).unwrap();
     write_run_config(&options, &config, tokenizer.vocab_size(), num_params);
 
@@ -81,10 +89,10 @@ fn main() {
         options.warmdown_ratio,
         options.final_lr_frac,
     );
-    let mut opt = AdamWConfig::new(options.lr)
-        .betas(options.betas)
-        .weight_decay(options.weight_decay)
-        .build(parameters.clone());
+    let mut opt = AdamWConfig::new(options.lr).betas(options.betas).build_with_groups(vec![
+        AdamWParamGroup::new(decay_params, options.weight_decay),
+        AdamWParamGroup::new(no_decay_params, 0.0),
+    ]);
     let start_step = if let Some(resume) = &options.resume {
         let step = load_checkpoint(&store, &mut opt, &config, options.device, resume);
         println!("Resumed from {} at step {}", resume.display(), step);
@@ -184,8 +192,23 @@ fn main() {
     println!("Done in {:.1}s", train_start.elapsed().as_secs_f64());
 }
 
-fn train_step(
-    model: &GPT,
+/// Splits parameters into (decayed, excluded) following the standard recipe:
+/// biases, normalization weights, and 1-D parameters skip weight decay.
+fn split_decay_params(store: &ParamStore) -> (Vec<Parameter>, Vec<Parameter>) {
+    let mut decayed = Vec::new();
+    let mut excluded = Vec::new();
+    for (name, parameter) in store.named_parameters() {
+        let is_1d = parameter.layout().ndim() <= 1;
+        if name.ends_with(".bias") || name.contains("norm") || is_1d {
+            excluded.push(parameter);
+        } else {
+            decayed.push(parameter);
+        }
+    }
+    (decayed, excluded)
+}
+
+fn train_step(    model: &GPT,
     parameters: &[Parameter],
     opt: &mut deers::optim::AdamW,
     dataset: &TokenBinDataset,
