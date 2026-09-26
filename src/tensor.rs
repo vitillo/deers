@@ -259,10 +259,11 @@ impl Tensor {
     }
 
     /// Create a tensor with values drawn from a uniform distribution in [0, 1).
+    ///
+    /// Draws from the global RNG: reproducible after [`crate::manual_seed`].
     pub fn rand(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
-        let mut rng = rand::rng();
-        let storage = match dtype {
+        let storage = crate::rng::with_rng(|rng| match dtype {
             DType::F16 => {
                 let data: Vec<f16> =
                     (0..shape.size()).map(|_| f16::from_f32(rng.random::<f32>())).collect();
@@ -278,16 +279,17 @@ impl Tensor {
                 CpuStorage::from(data).to(device)
             }
             _ => unimplemented!(),
-        };
+        });
         Tensor::from_plain_storage(storage, shape)
     }
 
     /// Create a tensor with values drawn from a standard normal distribution.
+    ///
+    /// Draws from the global RNG: reproducible after [`crate::manual_seed`].
     pub fn randn(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
-        let mut rng = rand::rng();
         // Box-Muller transform
-        let storage = match dtype {
+        let storage = crate::rng::with_rng(|rng| match dtype {
             DType::F16 => {
                 let data: Vec<f16> = (0..shape.size())
                     .map(|_| {
@@ -323,7 +325,7 @@ impl Tensor {
                 CpuStorage::from(data).to(device)
             }
             _ => unimplemented!(),
-        };
+        });
         Tensor::from_plain_storage(storage, shape)
     }
 

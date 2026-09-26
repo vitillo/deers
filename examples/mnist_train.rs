@@ -1,14 +1,18 @@
 use std::time::Instant;
 use std::{env, process};
 
-use deers::dataset::MNISTDataset;
+use deers::dataset::{MNISTDataset, permutation};
 use deers::models::mnist::MnistMLP;
 use deers::nn::{Module, ParamStore};
 use deers::optim::AdamWConfig;
 use deers::{Device, Tensor, loss};
 
 fn main() {
-    let device = parse_device_arg();
+    let (device, seed) = parse_args();
+    if let Some(seed) = seed {
+        deers::manual_seed(seed);
+        println!("Seed: {seed}");
+    }
     if !device.is_available() {
         match device {
             Device::Cuda => {
@@ -52,10 +56,21 @@ fn main() {
         let epoch_start = Instant::now();
         let mut epoch_loss = 0.0;
 
+        // Shuffle the training order every epoch. Reproducible when `--seed`
+        // is given, entropy-seeded otherwise.
+        let perm = permutation(60000);
+        let index = Tensor::from_vec(
+            perm.into_iter().map(|i| i as i64).collect::<Vec<_>>(),
+            (60000,),
+            Device::Cpu,
+        );
+        let epoch_images = train_images.index_select(0, &index);
+        let epoch_labels = train_labels.index_select(0, &index);
+
         for batch_idx in 0..num_batches {
             let start = batch_idx * batch_size;
-            let images = train_images.narrow(0, start, batch_size);
-            let labels = train_labels.narrow(0, start, batch_size);
+            let images = epoch_images.narrow(0, start, batch_size);
+            let labels = epoch_labels.narrow(0, start, batch_size);
 
             let logits = model.forward(&images).unwrap();
             let batch_loss = loss::cross_entropy(&logits, &labels);
@@ -80,9 +95,10 @@ fn main() {
     println!("\nDone.");
 }
 
-fn parse_device_arg() -> Device {
+fn parse_args() -> (Device, Option<u64>) {
     let mut args = env::args().skip(1);
     let mut device = Device::Cpu;
+    let mut seed = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -95,12 +111,16 @@ fn parse_device_arg() -> Device {
                     other => usage(&format!("unsupported device: {other}")),
                 };
             }
+            "--seed" => {
+                let value = args.next().unwrap_or_else(|| usage("missing value for --seed"));
+                seed = Some(value.parse().unwrap_or_else(|_| usage("invalid value for --seed")));
+            }
             "--help" | "-h" => usage(""),
             other => usage(&format!("unexpected argument: {other}")),
         }
     }
 
-    device
+    (device, seed)
 }
 
 fn usage(message: &str) -> ! {
@@ -108,13 +128,9 @@ fn usage(message: &str) -> ! {
         eprintln!("{message}");
         eprintln!();
     }
-    eprintln!("Usage: cargo run --example mnist_train -- [--device cpu|cuda|mps]");
-    eprintln!(
-        "  note: CUDA builds require `--features cuda`, for example:"
-    );
-    eprintln!(
-        "        cargo run --release --features cuda --example mnist_train -- --device cuda"
-    );
+    eprintln!("Usage: cargo run --example mnist_train -- [--device cpu|cuda|mps] [--seed N]");
+    eprintln!("  note: CUDA builds require `--features cuda`, for example:");
+    eprintln!("        cargo run --release --features cuda --example mnist_train -- --device cuda");
     process::exit(if message.is_empty() { 0 } else { 1 });
 }
 

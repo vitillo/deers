@@ -25,12 +25,13 @@ pub mod models;
 /// Neural-network layers, parameters, and functional helpers.
 pub mod nn;
 mod ops;
-/// Token sampling strategies for decoding.
-pub mod sample;
 /// Optimizers and learning-rate schedules.
 pub mod optim;
 /// Lightweight profiling utilities.
 pub mod profiler;
+mod rng;
+/// Token sampling strategies for decoding.
+pub mod sample;
 mod storage;
 mod tensor;
 /// BPE tokenizer and corpus tokenization pipelines.
@@ -42,6 +43,12 @@ pub use device::Device;
 pub use dtype::DType;
 /// Re-exported profiling types and helper entrypoint.
 pub use profiler::{Profile, ProfileRow, Profiler, ProfilerConfig, profile};
+/// Seeds deers' global random number generator.
+///
+/// After `manual_seed(seed)`, [`Tensor::rand`], [`Tensor::randn`], dropout,
+/// batch sampling, and shuffling all produce the same sequence on every run.
+/// Without it, runs are seeded from OS entropy and differ by default.
+pub use rng::manual_seed;
 /// RAII guard that disables gradient tracking within a scope.
 pub use tensor::NoGradGuard;
 /// The core tensor type.
