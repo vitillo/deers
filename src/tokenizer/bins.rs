@@ -29,10 +29,11 @@ pub struct TokenBinPaths {
 
 /// Tokenizes a text corpus into flat binary token bins.
 ///
-/// Each line of the input file is one document. The tokenizer's
-/// end-of-text token is stored after each document, so training windows
-/// learn where one document ends and the next begins instead of reading
-/// concatenated lines as one uninterrupted stream.
+/// Documents are separated by standalone marker lines holding the
+/// tokenizer's end-of-text text (e.g. `<|endoftext|>` in TinyStories). Each
+/// marker line is stored as exactly one end-of-text token, so training
+/// windows learn where one document ends and the next begins, while
+/// newlines inside a document are kept without adding boundaries.
 ///
 /// The full token stream is first written to a temporary `all.bin`, then split
 /// contiguously into `train.bin` and `val.bin`, preserving the "last chunk is
@@ -96,6 +97,7 @@ fn tokenize_text_file_to_bin(
     let mut line = String::new();
     let mut printed_progress = false;
     let eos = tokenizer.eos_token_id();
+    let eos_marker = tokenizer.decode(&[eos]);
 
     println!(
         "Tokenizing {} ({:.1} MiB) into {}...",
@@ -112,7 +114,8 @@ fn tokenize_text_file_to_bin(
         }
         processed_bytes += bytes_read;
 
-        for token in tokenizer.encode(&line).into_iter().chain([eos]) {
+        let ids = if line.trim() == eos_marker { vec![eos] } else { tokenizer.encode(&line) };
+        for token in ids {
             writer.write_all(&token.to_le_bytes())?;
             total_tokens += 1;
         }
@@ -190,7 +193,7 @@ mod tests {
         }
 
         fn decode(&self, _tokens: &[u32]) -> String {
-            String::new()
+            "<|endoftext|>".to_string()
         }
 
         fn decode_lossy(&self, _tokens: &[u32]) -> String {
@@ -241,10 +244,10 @@ mod tests {
         let dir = std::env::temp_dir().join("deers_prepare_token_bins_large_ids_test");
         std::fs::create_dir_all(&dir).unwrap();
         let text_path = dir.join("tiny.txt");
-        std::fs::write(&text_path, "a\nb\n").unwrap();
+        std::fs::write(&text_path, "a\n<|endoftext|>\nb\n<|endoftext|>\n").unwrap();
         let per_line = vec![0u32, 1, 65_535, 65_536, 151_935, 248_319];
-        // EOS id 2 is absent from `per_line`, so each of the two documents
-        // gains exactly one trailing boundary token: 2 * (6 + 1) tokens.
+        // Each of the two documents is closed by one marker line, stored as
+        // a single boundary token: 2 * (6 + 1) tokens.
         let eos = 2u32;
         let tokenizer = FixedIdsTokenizer { ids: per_line.clone(), vocab_size: 248_320, eos };
         let mut doc = per_line.clone();
@@ -278,12 +281,12 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_text_token_bins_stores_one_eos_per_document() {
+    fn test_prepare_text_token_bins_stores_one_eos_per_marker_line() {
         // Arrange
         let dir = std::env::temp_dir().join("deers_prepare_token_bins_eos_test");
         std::fs::create_dir_all(&dir).unwrap();
         let text_path = dir.join("tiny.txt");
-        std::fs::write(&text_path, "a\nb\nc\n").unwrap();
+        std::fs::write(&text_path, "a\nb\n<|endoftext|>\nc\n<|endoftext|>\n").unwrap();
         let eos = 7u32;
         let tokenizer = FixedIdsTokenizer { ids: vec![10, 20], vocab_size: 248_320, eos };
 
@@ -302,8 +305,8 @@ mod tests {
             );
         }
 
-        // Assert — each of the three documents ends with exactly one EOS.
-        assert_eq!(stream, vec![10, 20, eos, 10, 20, eos, 10, 20, eos]);
+        // Assert — lines inside a document add no boundary; each marker adds one EOS.
+        assert_eq!(stream, vec![10, 20, 10, 20, eos, 10, 20, eos]);
 
         // Cleanup
         std::fs::remove_dir_all(&dir).ok();
@@ -314,11 +317,11 @@ mod tests {
         use crate::Device;
         use crate::dataset::TokenBinDataset;
 
-        // Arrange — two documents, each closed by EOS, in one flat stream.
+        // Arrange — two documents separated by an EOS marker line.
         let dir = std::env::temp_dir().join("deers_prepare_token_bins_boundary_window_test");
         std::fs::create_dir_all(&dir).unwrap();
         let text_path = dir.join("tiny.txt");
-        std::fs::write(&text_path, "a\nb\n").unwrap();
+        std::fs::write(&text_path, "a\n<|endoftext|>\nb\n").unwrap();
         let eos = 7u32;
         let tokenizer = FixedIdsTokenizer { ids: vec![10, 20], vocab_size: 248_320, eos };
 
@@ -346,7 +349,8 @@ mod tests {
         let dir = std::env::temp_dir().join("deers_prepare_token_bins_gpt2_eos_test");
         std::fs::create_dir_all(&dir).unwrap();
         let text_path = dir.join("tiny.txt");
-        std::fs::write(&text_path, "Hello.\nWorld.\n").unwrap();
+        std::fs::write(&text_path, "Once.\n\nThe end.\n<|endoftext|>\nHello.\n<|endoftext|>\n")
+            .unwrap();
         let tokenizer = Gpt2Tokenizer::new();
 
         // Act
@@ -363,11 +367,13 @@ mod tests {
             );
         }
 
-        // Assert — one 50256 (<|endoftext|>) per document.
-        let boundaries = stream.iter().filter(|&&id| id == 50256).count();
-        assert_eq!(boundaries, 2);
+        // Assert — one 50256 (<|endoftext|>) per marker line, story newlines kept.
         assert_eq!(tokenizer.eos_token_id(), 50256);
-        assert_eq!(*stream.last().unwrap(), 50256);
+        assert_eq!(stream.iter().filter(|&&id| id == 50256).count(), 2);
+        assert_eq!(
+            tokenizer.decode(&stream),
+            "Once.\n\nThe end.\n<|endoftext|>Hello.\n<|endoftext|>"
+        );
 
         // Cleanup
         std::fs::remove_dir_all(&dir).ok();

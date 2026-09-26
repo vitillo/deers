@@ -42,9 +42,9 @@ pub trait Tokenizer {
 
     /// Returns the end-of-text token id terminating one document.
     ///
-    /// Corpus preparation stores this id after each input document so
-    /// training windows learn document boundaries instead of reading
-    /// concatenated documents as one uninterrupted stream.
+    /// Corpus preparation stores this id once for each standalone marker
+    /// line holding its decoded text, so training windows learn document
+    /// boundaries instead of reading concatenated documents as one stream.
     fn eos_token_id(&self) -> u32;
 
     /// Tokenizes a text file, reading line by line.
