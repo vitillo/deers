@@ -21,8 +21,13 @@ impl Parameter {
     }
 
     /// Copies `src` data into the variable's existing storage, keeping the same tensor id.
+    ///
+    /// The source storage is cloned before taking the write lock, so `src` may
+    /// share storage with this parameter (as when re-applying an idempotent
+    /// conversion) without deadlocking on the storage lock.
     pub fn set(&self, src: &Tensor) -> Result<()> {
-        *self.0.storage_mut() = src.storage().clone();
+        let storage = src.storage().clone();
+        *self.0.storage_mut() = storage;
         Ok(())
     }
 
@@ -74,6 +79,19 @@ mod tests {
         // Assert
         assert!(var.requires_grad());
         assert_eq!(var.to_vec::<f32>().unwrap(), vec![4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn test_set_with_shared_storage_does_not_deadlock() {
+        // Arrange: `detach` shares the parameter's storage, as when an
+        // idempotent dtype conversion sets the converted tensor back.
+        let var = Parameter::new(Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu));
+
+        // Act
+        var.set(&var.detach()).unwrap();
+
+        // Assert
+        assert_eq!(var.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
     }
 
     #[test]
