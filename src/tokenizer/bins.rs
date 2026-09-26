@@ -11,6 +11,8 @@ use crate::error::Result;
 ///
 /// Versioned bins store raw little-endian `u32` ids after this header, so a
 /// headerless bin from the old `u16` format is rejected instead of misread.
+/// Version 2 marks document boundaries with end-of-text tokens, so version 1
+/// bins prepared without them are rejected too.
 pub const TOKEN_BIN_MAGIC: &[u8; 8] = b"DEERSTB\x02";
 /// Bytes per token id in the versioned format.
 const TOKEN_BIN_ITEM_BYTES: usize = 4;
