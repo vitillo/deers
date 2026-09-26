@@ -1,5 +1,5 @@
-//! Evaluation harness: perplexity scoring over a text sample, on-device
-//! classification accuracy helpers, and reference parity checks.
+//! Evaluation harness: perplexity scoring over a text sample, classification
+//! accuracy helpers, and reference parity checks.
 //!
 //! Perplexity scores a language model by the average number of next-token choices it hesitates
 //! between: it exponentiates the mean negative log-probability over a corpus, so a model that
@@ -9,7 +9,7 @@
 
 use crate::models::gpt::GPT;
 use crate::tokenizer::Tokenizer;
-use crate::{DType, Tensor, no_grad};
+use crate::{DType, Device, Tensor, no_grad};
 
 /// Tiny bundled sample for the default eval. Larger corpora stay opt-in: tokenize them yourself
 /// and pass the ids to [`score_model`].
@@ -77,18 +77,17 @@ pub fn perplexity_from_logits(logits: &Tensor, targets: &Tensor) -> PerplexityRe
 ///
 /// `logits` has shape `[..., C]` and `targets` holds I64 class ids with the
 /// class axis dropped (`[...]`). Every leading dimension counts as batch, so a
-/// `[B, T, V]` language-model output scores `B * T` predictions. Selection
-/// reuses the existing `argmax` selector and only the predicted and target id
-/// vectors are compared on the host, so callers keep forward and loss
-/// on-device and never hand-roll the argmax loop. Returns a fraction in
-/// `[0, 1]`.
+/// `[B, T, V]` language-model output scores `B * T` predictions. Callers keep
+/// forward and loss on the model's device; the logits and targets are read to
+/// the host once, where the existing `argmax` selector runs, so no ids are
+/// uploaded back. Returns a fraction in `[0, 1]`.
 ///
 /// Ties resolve to the lowest class index (argmax order), so this always agrees
 /// with [`top_k_accuracy`] at `k = 1`. Panics on shape or dtype mismatch, on an
 /// empty batch, or on a target outside `[0, C)`.
 pub fn accuracy(logits: &Tensor, targets: &Tensor) -> f64 {
     let (n, num_classes) = check_classification_inputs(logits, targets);
-    let preds = logits.reshape(vec![n, num_classes]).argmax(1, false);
+    let preds = host_logits(logits, n, num_classes).argmax(1, false);
     let pred: Vec<i64> = preds.to_vec().expect("predicted ids must be readable as I64");
     let actual: Vec<i64> =
         targets.reshape(vec![n]).to_vec().expect("targets must be readable as I64");
@@ -108,7 +107,7 @@ pub fn accuracy(logits: &Tensor, targets: &Tensor) -> f64 {
 /// Fraction of batch positions whose target ranks among the top `k` scores.
 ///
 /// Same shapes as [`accuracy`]. Selection reuses the existing `topk`
-/// selector: the top `k` are the `k` largest scores in descending order with
+/// selector on the host copy of the logits: the top `k` are the `k` largest scores in descending order with
 /// ties broken toward the lowest class index, so a target tied at the cutoff
 /// counts only when its index orders within the first `k`. `k` equal to the
 /// class count always returns 1.0 for valid targets. Panics when `k` is zero
@@ -117,7 +116,7 @@ pub fn top_k_accuracy(logits: &Tensor, targets: &Tensor, k: usize) -> f64 {
     let (n, num_classes) = check_classification_inputs(logits, targets);
     assert!(k >= 1, "top-k needs k >= 1, got {k}");
     assert!(k <= num_classes, "top-k k = {k} exceeds {num_classes} classes");
-    let (_, indices) = logits.reshape(vec![n, num_classes]).topk(k, 1);
+    let (_, indices) = host_logits(logits, n, num_classes).topk(k, 1);
     let top: Vec<i64> = indices.to_vec().expect("top-k ids must be readable as I64");
     let actual: Vec<i64> =
         targets.reshape(vec![n]).to_vec().expect("targets must be readable as I64");
@@ -132,6 +131,15 @@ pub fn top_k_accuracy(logits: &Tensor, targets: &Tensor, k: usize) -> f64 {
         }
     }
     correct as f64 / n as f64
+}
+
+/// Reads `[..., C]` logits to the host once as `[n, C]`, so CPU-only selectors
+/// do not upload their ids back to an accelerator.
+fn host_logits(logits: &Tensor, n: usize, num_classes: usize) -> Tensor {
+    logits
+        .reshape(vec![n, num_classes])
+        .to_device(Device::Cpu)
+        .expect("logits must be readable on the host")
 }
 
 /// Validates classification shapes and returns `(num_predictions, num_classes)`.
