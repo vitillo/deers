@@ -333,19 +333,14 @@ impl Tensor {
     }
 
     /// Returns a copy of this tensor on the target device.
+    ///
+    /// The move is recorded in the autograd graph, so gradients flow back
+    /// to the source tensor across the device boundary.
     pub fn to_device(&self, device: Device) -> Result<Tensor> {
         if self.device() == device {
             return Ok(self.clone());
         }
-
-        let shape: Vec<usize> = self.layout().shape().iter().copied().collect();
-        let out = match self.dtype() {
-            DType::F16 => Tensor::from_vec(self.to_vec::<f16>()?, shape, device),
-            DType::BF16 => Tensor::from_vec(self.to_vec::<bf16>()?, shape, device),
-            DType::F32 => Tensor::from_vec(self.to_vec::<f32>()?, shape, device),
-            DType::I64 => Tensor::from_vec(self.to_vec::<i64>()?, shape, device),
-        };
-        Ok(out)
+        ops::ToDevice::new(self.clone(), device)?.forward()
     }
 
     /// Creates a tensor of ones with the same shape, dtype, and device.
@@ -1072,20 +1067,60 @@ mod tests {
 
     #[test]
     fn test_to_device_backward() {
-        if !Device::Mps.is_available() {
-            return;
-        }
-
         // Arrange
-        let tensor = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Mps).attach();
+        let Some(device) = [Device::Cuda, Device::Mps].into_iter().find(|d| d.is_available())
+        else {
+            return;
+        };
+        let tensor = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), device).attach();
 
         // Act
-        let moved = tensor.to_device(Device::Cpu).unwrap().attach();
+        let moved = tensor.to_device(Device::Cpu).unwrap();
         let grads = moved.sum(vec![0], false).backward().unwrap();
 
         // Assert
-        assert_eq!(grads.get(tensor.id()), None);
+        assert_eq!(moved.device(), Device::Cpu);
+        assert!(moved.requires_grad());
+        assert_eq!(grads.get(tensor.id()).unwrap().to_vec::<f32>().unwrap(), vec![1.0, 1.0, 1.0]);
         assert_eq!(grads.get(moved.id()).unwrap().to_vec::<f32>().unwrap(), vec![1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_to_device_backward_chain() {
+        // Arrange
+        let Some(device) = [Device::Cuda, Device::Mps].into_iter().find(|d| d.is_available())
+        else {
+            return;
+        };
+        let tensor = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu).attach();
+        let scaled = &tensor * 2.0;
+
+        // Act
+        let moved = scaled.to_device(device).unwrap();
+        let out = &moved * 3.0;
+        let grads = out.sum(vec![0], false).backward().unwrap();
+
+        // Assert
+        assert_eq!(moved.device(), device);
+        assert_eq!(grads.get(tensor.id()).unwrap().to_vec::<f32>().unwrap(), vec![6.0, 6.0, 6.0]);
+        assert_eq!(grads.get(scaled.id()).unwrap().to_vec::<f32>().unwrap(), vec![3.0, 3.0, 3.0]);
+        assert_eq!(grads.get(moved.id()).unwrap().to_vec::<f32>().unwrap(), vec![3.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn test_to_device_op_flows_grads() {
+        // Arrange
+        let tensor = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu).attach();
+
+        // Act
+        let moved =
+            ops::ToDevice::new(tensor.clone(), Device::Cpu).unwrap().forward().unwrap();
+        let grads = moved.sum(vec![0], false).backward().unwrap();
+
+        // Assert
+        assert_eq!(moved.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
+        assert!(moved.requires_grad());
+        assert_eq!(grads.get(tensor.id()).unwrap().to_vec::<f32>().unwrap(), vec![1.0, 1.0, 1.0]);
     }
 
     #[test]
