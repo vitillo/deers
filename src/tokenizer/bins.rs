@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::{fs, fs::File};
 
 use super::Tokenizer;
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 /// Magic prefix identifying the versioned token-bin format.
 ///
@@ -19,7 +19,7 @@ const TOKEN_BIN_ITEM_BYTES: usize = 4;
 /// Largest token id the versioned token-bin format can store.
 ///
 /// This covers Qwen3 (151,936 ids) and Qwen3.5 (248,320 ids) vocabularies.
-pub const MAX_TOKEN_BIN_ID: u32 = u32::MAX;
+const MAX_TOKEN_BIN_ID: u32 = u32::MAX;
 
 /// Paths for a prepared token-bin dataset.
 pub struct TokenBinPaths {
@@ -41,6 +41,11 @@ pub fn prepare_text_token_bins(
     val_ratio: f32,
 ) -> Result<TokenBinPaths> {
     assert!((0.0..1.0).contains(&val_ratio), "val_ratio must be in [0, 1)");
+    let vocab_size = tokenizer.vocab_size();
+    assert!(
+        vocab_size as u64 <= u64::from(MAX_TOKEN_BIN_ID) + 1,
+        "tokenizer vocab size {vocab_size} exceeds supported token-bin id range 0..={MAX_TOKEN_BIN_ID}"
+    );
 
     fs::create_dir_all(out_dir)?;
 
@@ -99,7 +104,6 @@ fn tokenize_text_file_to_bin(
         processed_bytes += bytes_read;
 
         for token in tokenizer.encode(&line) {
-            let token = check_token_id(token)?;
             writer.write_all(&token.to_le_bytes())?;
             total_tokens += 1;
         }
@@ -124,18 +128,6 @@ fn tokenize_text_file_to_bin(
     }
     println!("Finished tokenizing: {} tokens written to {}", total_tokens, out_path.display());
     Ok(total_tokens)
-}
-
-/// Rejects token ids the bin format cannot store, naming the supported range.
-///
-/// Ids arrive as `u32` and the bin stores `u32`, so this cannot fail today;
-/// the explicit check keeps the supported range in one named place instead
-/// of an `expect` that would go stale the next time the range matters.
-fn check_token_id(token: u32) -> Result<u32> {
-    if u64::from(token) > u64::from(MAX_TOKEN_BIN_ID) {
-        return Err(Error::TokenIdOutOfRange { id: token, max: MAX_TOKEN_BIN_ID });
-    }
-    Ok(token)
 }
 
 fn format_mib(bytes: usize) -> f64 {
@@ -164,14 +156,12 @@ fn split_token_bin(
     );
     let split_at = TOKEN_BIN_MAGIC.len() + train_tokens * TOKEN_BIN_ITEM_BYTES;
     assert!(split_at <= bytes.len(), "train split runs past the token bin");
-    let mut train_bytes = Vec::with_capacity(split_at);
-    train_bytes.extend_from_slice(TOKEN_BIN_MAGIC);
-    train_bytes.extend_from_slice(&bytes[TOKEN_BIN_MAGIC.len()..split_at]);
-    let mut val_bytes = Vec::with_capacity(bytes.len() - split_at);
-    val_bytes.extend_from_slice(TOKEN_BIN_MAGIC);
-    val_bytes.extend_from_slice(&bytes[split_at..]);
-    std::fs::write(train_path, train_bytes)?;
-    std::fs::write(val_path, val_bytes)?;
+    let mut train = File::create(train_path)?;
+    train.write_all(TOKEN_BIN_MAGIC)?;
+    train.write_all(&bytes[TOKEN_BIN_MAGIC.len()..split_at])?;
+    let mut val = File::create(val_path)?;
+    val.write_all(TOKEN_BIN_MAGIC)?;
+    val.write_all(&bytes[split_at..])?;
     Ok(())
 }
 
@@ -184,6 +174,7 @@ mod tests {
     /// old `u16` bins could not store.
     struct FixedIdsTokenizer {
         ids: Vec<u32>,
+        vocab_size: usize,
     }
 
     impl crate::tokenizer::Tokenizer for FixedIdsTokenizer {
@@ -200,7 +191,7 @@ mod tests {
         }
 
         fn vocab_size(&self) -> usize {
-            248_320
+            self.vocab_size
         }
     }
 
@@ -241,7 +232,7 @@ mod tests {
         let text_path = dir.join("tiny.txt");
         std::fs::write(&text_path, "a\nb\n").unwrap();
         let per_line = vec![0u32, 1, 65_535, 65_536, 151_935, 248_319];
-        let tokenizer = FixedIdsTokenizer { ids: per_line.clone() };
+        let tokenizer = FixedIdsTokenizer { ids: per_line.clone(), vocab_size: 248_320 };
         let stream: Vec<i64> =
             per_line.iter().cycle().take(per_line.len() * 2).map(|&id| id as i64).collect();
 
@@ -271,32 +262,15 @@ mod tests {
     }
 
     #[test]
-    fn test_check_token_id_accepts_full_u32_range() {
+    #[should_panic(expected = "exceeds supported token-bin id range 0..=4294967295")]
+    fn test_prepare_text_token_bins_rejects_vocab_beyond_bin_range() {
         // Arrange
-        let ids = [0u32, 65_535, 65_536, 151_935, 248_319, u32::MAX];
+        let dir = std::env::temp_dir().join("deers_prepare_token_bins_vocab_range_test");
+        let text_path = dir.join("tiny.txt");
+        let vocab_size = usize::try_from(u64::from(u32::MAX) + 2).unwrap();
+        let tokenizer = FixedIdsTokenizer { ids: vec![0], vocab_size };
 
         // Act
-        let checked: Vec<u32> = ids.iter().map(|&id| check_token_id(id).unwrap()).collect();
-
-        // Assert
-        assert_eq!(checked, ids);
-    }
-
-    #[test]
-    fn test_token_id_out_of_range_names_supported_range() {
-        use crate::error::Error;
-
-        // Arrange
-        let err = Error::TokenIdOutOfRange { id: 65_536, max: MAX_TOKEN_BIN_ID };
-
-        // Act
-        let message = err.to_string();
-
-        // Assert
-        assert!(message.contains("65536"), "message names the rejected id: {message}");
-        assert!(
-            message.contains(&MAX_TOKEN_BIN_ID.to_string()),
-            "message names the supported range: {message}"
-        );
+        let _ = prepare_text_token_bins(&text_path, &tokenizer, &dir, 0.25);
     }
 }

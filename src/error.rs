@@ -25,9 +25,6 @@ pub enum Error {
     #[error("{0}")]
     IndexOutOfBounds(String),
 
-    #[error("token id {id} exceeds supported token-bin range 0..={max}")]
-    TokenIdOutOfRange { id: u32, max: u32 },
-
     #[error(transparent)]
     Io(#[from] io::Error),
 

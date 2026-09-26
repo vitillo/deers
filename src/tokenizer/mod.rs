@@ -11,7 +11,7 @@ mod gpt;
 mod qwen3;
 mod qwen3_5;
 
-pub use bins::{MAX_TOKEN_BIN_ID, TOKEN_BIN_MAGIC, TokenBinPaths, prepare_text_token_bins};
+pub use bins::{TOKEN_BIN_MAGIC, TokenBinPaths, prepare_text_token_bins};
 pub use gpt::{Cl100kTokenizer, Gpt2Tokenizer};
 pub use qwen3::{ChatMessage, Qwen3Tokenizer};
 pub use qwen3_5::{ChatMessage as Qwen3_5ChatMessage, Qwen3_5Tokenizer};
