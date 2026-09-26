@@ -22,7 +22,10 @@ pub fn dropout(x: &Tensor, p: f64, training: bool) -> Tensor {
     match x.dtype() {
         DType::F16 => {
             let uniform: Vec<f16> =
-                Tensor::rand(shape.clone(), DType::F16, device).to_vec().unwrap();
+                Tensor::rand(shape.clone(), DType::F16, device)
+                    .expect("rand with F16 dtype cannot fail")
+                    .to_vec()
+                    .unwrap();
             let mask: Vec<f16> = uniform
                 .iter()
                 .map(|v| {
@@ -37,14 +40,20 @@ pub fn dropout(x: &Tensor, p: f64, training: bool) -> Tensor {
         }
         DType::F32 => {
             let uniform: Vec<f32> =
-                Tensor::rand(shape.clone(), DType::F32, device).to_vec().unwrap();
+                Tensor::rand(shape.clone(), DType::F32, device)
+                    .expect("rand with F32 dtype cannot fail")
+                    .to_vec()
+                    .unwrap();
             let mask: Vec<f32> =
                 uniform.iter().map(|&v| if v < keep as f32 { scale as f32 } else { 0.0 }).collect();
             x * &Tensor::from_vec(mask, shape, device)
         }
         DType::BF16 => {
             let uniform: Vec<bf16> =
-                Tensor::rand(shape.clone(), DType::BF16, device).to_vec().unwrap();
+                Tensor::rand(shape.clone(), DType::BF16, device)
+                    .expect("rand with BF16 dtype cannot fail")
+                    .to_vec()
+                    .unwrap();
             let mask: Vec<bf16> = uniform
                 .iter()
                 .map(|v| {
