@@ -62,6 +62,19 @@ impl Device {
         }
     }
 
+    /// Returns an error if this device's backend cannot store `dtype`.
+    ///
+    /// The CUDA backend has no BF16 storage or kernels, so callers that can
+    /// report failure check here instead of panicking deep inside the backend.
+    pub fn check_dtype(&self, dtype: DType) -> Result<()> {
+        if *self == Device::Cuda && dtype == DType::BF16 {
+            return Err(Error::NotImplemented(
+                "cuda backend does not support BF16 tensors; use F32 or F16 on CUDA",
+            ));
+        }
+        Ok(())
+    }
+
     /// Waits for pending work on this device to finish.
     pub fn synchronize(&self) {
         match self {

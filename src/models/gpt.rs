@@ -875,6 +875,7 @@ fn cast_tensor(tensor: &Tensor, dtype: DType) -> Result<Tensor> {
     }
     let shape: Vec<usize> = tensor.layout().shape().iter().copied().collect();
     let device = tensor.device();
+    device.check_dtype(dtype)?;
     let as_f32: Vec<f32> = match tensor.dtype() {
         DType::F16 => tensor.to_vec::<f16>()?.iter().map(|v| v.to_f32()).collect(),
         DType::BF16 => tensor.to_vec::<bf16>()?.iter().map(|v| v.to_f32()).collect(),

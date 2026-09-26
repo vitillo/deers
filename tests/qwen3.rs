@@ -207,6 +207,23 @@ fn qwen3_to_dtype_converts_params_and_caches_to_bf16() {
 }
 
 #[test]
+fn qwen3_to_dtype_bf16_on_cuda_returns_error() {
+    if !Device::Cuda.is_available() {
+        return;
+    }
+    // Arrange: a small F32 model already moved onto CUDA.
+    let (mut model, _) = small_model();
+    model.to_device(Device::Cuda).unwrap();
+
+    // Act
+    let result = model.to_dtype(DType::BF16);
+
+    // Assert: the CUDA backend has no BF16 storage, so conversion reports it.
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("BF16"), "unexpected message: {message}");
+}
+
+#[test]
 fn qwen3_bf16_forward_emits_finite_logits() {
     // Arrange: a small model converted to the published checkpoint dtype.
     let (mut model, _) = small_model();

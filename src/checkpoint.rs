@@ -264,6 +264,7 @@ fn read_tensor(tensors: &SafeTensors<'_>, name: &str, device: Device) -> Result<
             Tensor::from_vec(values, shape, device)
         }
         SafeDtype::BF16 => {
+            device.check_dtype(DType::BF16)?;
             let values = view
                 .data()
                 .as_chunks::<2>()
@@ -425,6 +426,30 @@ mod tests {
         assert_eq!(as_f32, vec![1.5, -2.0, 3.140625]);
         assert_eq!(loaded["linear.bias"].dtype(), DType::F32);
         assert_eq!(loaded["linear.bias"].to_vec::<f32>().unwrap(), vec![0.5]);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_load_bf16_tensors_onto_cuda_returns_error() {
+        // Arrange
+        let path = std::env::temp_dir().join(format!(
+            "deers-checkpoint-bf16-cuda-{}.safetensors",
+            std::process::id()
+        ));
+        let mut tensors = BTreeMap::new();
+        tensors.insert(
+            "linear.weight".to_owned(),
+            Tensor::from_vec(vec![bf16::from_f32(1.5)], (1,), Device::Cpu),
+        );
+        save_tensors(&path, &tensors).unwrap();
+
+        // Act
+        let result = load_tensors(&path, Device::Cuda);
+
+        // Assert: the CUDA backend has no BF16 storage, so loading reports it.
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("BF16"), "unexpected message: {message}");
 
         let _ = fs::remove_file(path);
     }

@@ -99,7 +99,7 @@ use rand::RngExt;
 
 use crate::device::Device;
 use crate::dtype::{DType, WithDType};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::layout::{Layout, Shape};
 use crate::ops::{self, TensorOp};
 use crate::storage::{BackendStorage, CpuStorage, Storage};
@@ -334,19 +334,13 @@ impl Tensor {
 
     /// Returns a copy of this tensor on the target device.
     ///
-    /// Moving a BF16 tensor to CUDA fails: the CUDA backend has no BF16
-    /// storage or kernels, so this guard reports that up front instead of
-    /// panicking deep inside the backend.
+    /// Fails if the target backend cannot store this dtype (BF16 on CUDA).
     pub fn to_device(&self, device: Device) -> Result<Tensor> {
         if self.device() == device {
             return Ok(self.clone());
         }
 
-        if device == Device::Cuda && self.dtype() == DType::BF16 {
-            return Err(Error::NotImplemented(
-                "cuda backend does not support BF16 tensors; convert to F32 or F16 before moving to CUDA",
-            ));
-        }
+        device.check_dtype(self.dtype())?;
 
         let shape: Vec<usize> = self.layout().shape().iter().copied().collect();
         let out = match self.dtype() {
