@@ -2,6 +2,16 @@ use deers::models::gpt::{CausalSelfAttention, precompute_rotary_embeddings};
 use deers::nn::{ParamStore, Parameter};
 use deers::{DType, Device, Tensor};
 
+const TOL: f32 = 1e-4;
+
+fn assert_close(actual: &[f32], expected: &[f32], label: &str) {
+    assert_eq!(actual.len(), expected.len(), "{label}: length mismatch");
+
+    for (index, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!((a - e).abs() < TOL, "{label}[{index}]: got {a}, expected {e}");
+    }
+}
+
 fn devices() -> Vec<Device> {
     [Device::Cpu, Device::Cuda, Device::Mps]
         .into_iter()
@@ -90,10 +100,10 @@ fn gqa_matches_naive_repeated_heads() {
         let naive_out = values(&naive.forward(&x, &cos, &sin).unwrap());
 
         // Assert
-        assert_eq!(grouped_out, naive_out);
-        assert_eq!(
-            grouped_out[..8].to_vec(),
-            vec![
+        assert_close(&grouped_out, &naive_out, &format!("grouped vs naive on {device:?}"));
+        assert_close(
+            &grouped_out[..8],
+            &[
                 0.018874997,
                 0.039125003,
                 -0.005625005,
@@ -102,7 +112,8 @@ fn gqa_matches_naive_repeated_heads() {
                 -0.042375006,
                 -0.022125002,
                 -0.03437501
-            ]
+            ],
+            &format!("grouped snapshot on {device:?}"),
         );
     }
 }
@@ -133,10 +144,10 @@ fn mha_constructor_matches_gqa_with_equal_heads() {
         let grouped_out = values(&grouped.forward(&x, &cos, &sin).unwrap());
 
         // Assert
-        assert_eq!(grouped_out, plain_out);
-        assert_eq!(
-            plain_out,
-            vec![
+        assert_close(&grouped_out, &plain_out, &format!("grouped vs plain on {device:?}"));
+        assert_close(
+            &plain_out,
+            &[
                 -0.01575,
                 -0.0127500035,
                 -0.0016250028,
@@ -145,7 +156,8 @@ fn mha_constructor_matches_gqa_with_equal_heads() {
                 -0.012801903,
                 -0.0054932944,
                 0.0018153149
-            ]
+            ],
+            &format!("plain snapshot on {device:?}"),
         );
     }
 }

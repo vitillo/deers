@@ -24,7 +24,7 @@ serde_json = "1"
 safetensors = "0.7"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-cudarc = { version = "0.19.0", optional = true, default-features = false, features = ["std", "cublas", "curand", "driver", "nvrtc", "f16", "cuda-version-from-build-system", "dynamic-linking"] }
+cudarc = { version = "0.19.8", optional = true, default-features = false, features = ["std", "cublas", "curand", "driver", "nvrtc", "f16", "cuda-version-from-build-system", "dynamic-linking"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.33.0"
