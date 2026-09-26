@@ -198,7 +198,7 @@ impl TokenBinDataset {
 
     /// Samples a random batch of contiguous token windows.
     ///
-    /// Draws from the global RNG: reproducible after [`manual_seed`].
+    /// Draws from the global RNG: reproducible after [`crate::manual_seed`].
     pub fn sample_batch(&self, batch_size: usize, device: Device) -> (Tensor, Tensor) {
         let max_start = self.tokens.len() - (self.seq_len + 1);
         let starts = crate::rng::with_rng(|rng| {
@@ -223,11 +223,8 @@ impl TokenBinDataset {
     }
 }
 
-/// Re-seeds deers' global RNG; see [`crate::manual_seed`].
-pub use crate::rng::manual_seed;
-
 /// Returns a random permutation of `0..len` (Fisher-Yates) drawn from the
-/// global RNG. Reproducible after [`manual_seed`].
+/// global RNG. Reproducible after [`crate::manual_seed`].
 ///
 /// Useful for shuffling a dataset's row order each epoch: gather rows with
 /// [`Tensor::index_select`](crate::Tensor::index_select), then slice
@@ -246,7 +243,7 @@ pub fn permutation(len: usize) -> Vec<usize> {
 }
 
 /// Shuffles `data` in place (Fisher-Yates) using the global RNG.
-/// Reproducible after [`manual_seed`].
+/// Reproducible after [`crate::manual_seed`].
 ///
 /// # Panics
 ///
