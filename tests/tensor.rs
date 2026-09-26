@@ -1499,6 +1499,7 @@ fn unary_methods_return_dtype_error_on_i64() {
         ("log_sum_exp", input.log_sum_exp(vec![0])),
         ("log_softmax", input.log_softmax(0)),
         ("softmax", input.softmax(0)),
+        ("gelu", input.gelu()),
     ];
 
     // Assert

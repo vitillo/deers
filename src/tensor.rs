@@ -545,9 +545,10 @@ impl Tensor {
     /// `0.5 * x * (1 + tanh(√(2/π) * x * (1 + 0.044715 * x²)))`.
     pub fn gelu(&self) -> Result<Tensor> {
         // Match candle-core's association so parity tests stay within 1e-4.
+        // The fallible scalar op runs first so unsupported dtypes return Err.
         const SQRT_2_OVER_PI: f64 = 0.7978845608028654;
-        let x2 = self * self;
-        let inner = self * &(((x2 * 0.044715)? + 1.0)?);
+        let scaled = (self * 0.044715)?;
+        let inner = self * &(((&scaled * self) + 1.0)?);
         let tanh_out = (inner * SQRT_2_OVER_PI)?.tanh()?;
         &(self * &(tanh_out + 1.0)?) * 0.5
     }
