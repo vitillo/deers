@@ -49,7 +49,7 @@ impl SGD {
             if let Some(grad) = grads.get(parameter.id()) {
                 let grad = grad.detach();
                 let w = parameter.detach();
-                let step = &grad * self.lr;
+                let step = (&grad * self.lr)?;
                 let updated = (&w - &step).attach();
                 parameter.set(&updated)?;
             }
@@ -290,23 +290,26 @@ impl AdamW {
 
                 // First moment: m = β₁ * m + (1 - β₁) * grad
                 let m = self.m.entry(param.id()).or_insert_with(|| param.zeros_like());
-                *m = &*m * beta1 + &grad * (1.0 - beta1);
+                *m = (&*m * beta1)? + (&grad * (1.0 - beta1))?;
 
                 // Second moment: v = β₂ * v + (1 - β₂) * grad²
                 let v = self.v.entry(param.id()).or_insert_with(|| param.zeros_like());
-                *v = &*v * beta2 + &(&grad * &grad) * (1.0 - beta2);
+                *v = (&*v * beta2)? + (&(&grad * &grad) * (1.0 - beta2))?;
 
                 // Bias-corrected estimates
-                let m_hat = &*m * (1.0 / bias_correction1);
-                let v_hat = &*v * (1.0 / bias_correction2);
+                let m_hat = (&*m * (1.0 / bias_correction1))?;
+                let v_hat = (&*v * (1.0 / bias_correction2))?;
 
                 // Decoupled weight decay: w = w * (1 - lr * λ)
-                let decayed =
-                    if weight_decay > 0.0 { &w * (1.0 - self.lr * weight_decay) } else { w };
+                let decayed = if weight_decay > 0.0 {
+                    (&w * (1.0 - self.lr * weight_decay))?
+                } else {
+                    w
+                };
 
                 // Parameter update: w = w_decayed - lr * m̂ / (√v̂ + ε)
-                let update = &m_hat / &(&v_hat.sqrt() + self.eps);
-                let updated = (&decayed - &(&update * self.lr)).attach();
+                let update = &m_hat / &(v_hat.sqrt()? + self.eps)?;
+                let updated = (&decayed - &(&update * self.lr)?).attach();
                 param.set(&updated)?;
             }
         }
@@ -345,9 +348,13 @@ pub fn clip_grad_norm(
             }
             total.sqrt()
         }
-        DType::BF16 => grad_norm(parameters, grads).to_vec::<bf16>()?[0].to_f32(),
-        DType::F32 => grad_norm(parameters, grads).to_vec::<f32>()?[0],
-        DType::I64 => panic!("clip_grad_norm requires float parameters"),
+        DType::BF16 => grad_norm(parameters, grads)?.to_vec::<bf16>()?[0].to_f32(),
+        DType::F32 => grad_norm(parameters, grads)?.to_vec::<f32>()?[0],
+        DType::I64 => {
+            return Err(Error::DTypeMismatch(
+                "clip_grad_norm: i64 is not supported, use a float dtype".into(),
+            ));
+        }
     };
     if !total_norm_value.is_finite() {
         return Ok(total_norm_value);
@@ -365,14 +372,14 @@ pub fn clip_grad_norm(
         let Some(grad) = grads.get(parameter.id()) else {
             continue;
         };
-        grads.insert(parameter.id(), (&grad * scale).detach());
+        grads.insert(parameter.id(), (&grad * scale)?.detach());
     }
 
     Ok(total_norm_value)
 }
 
 /// Computes the global gradient L2 norm on device in the parameter dtype.
-fn grad_norm(parameters: &[Parameter], grads: &GradientStore) -> Tensor {
+fn grad_norm(parameters: &[Parameter], grads: &GradientStore) -> Result<Tensor> {
     let mut seen = HashSet::new();
     let mut total = Tensor::zeros((1,), parameters[0].dtype(), parameters[0].device());
     for parameter in parameters {
@@ -918,7 +925,7 @@ mod tests {
         let mut opt = AdamWConfig::new(0.1).weight_decay(0.1).build(vec![x.clone()]);
 
         // Act — loss = x * 0 means grad ≈ 0, only weight decay acts
-        let loss = (&*x * 0.0).sum(vec![0], true);
+        let loss = (&*x * 0.0).unwrap().sum(vec![0], true);
         opt.backward_step(&loss).unwrap();
         let val: Vec<f32> = x.to_vec().unwrap();
 
@@ -973,7 +980,7 @@ mod tests {
         ]);
 
         // Act — loss = 0 * w means grad ≈ 0, only decay acts
-        let loss = (&(&*decayed * 0.0) + &(&*frozen * 0.0)).sum(vec![0], true);
+        let loss = (&(&*decayed * 0.0).unwrap() + &(&*frozen * 0.0).unwrap()).sum(vec![0], true);
         opt.backward_step(&loss).unwrap();
 
         // Assert — decay applies per group

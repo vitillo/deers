@@ -40,7 +40,7 @@ fn relu_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), shape, device);
-            let output = input.relu();
+            let output = input.relu().unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -67,7 +67,7 @@ fn relu_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
-            let loss = input.relu().sum(vec![0, 1], true);
+            let loss = input.relu().unwrap().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -363,7 +363,7 @@ fn log_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = input.log();
+            let output = input.log().unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -390,7 +390,7 @@ fn log_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = input.log().sum(vec![0, 1], true);
+            let loss = input.log().unwrap().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -415,7 +415,7 @@ fn exp_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = input.exp();
+            let output = input.exp().unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -442,7 +442,7 @@ fn exp_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = input.exp().sum(vec![0, 1], true);
+            let loss = input.exp().unwrap().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -467,7 +467,7 @@ fn scalar_powf_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (3,), device);
-            let output = input.scalar_powf(3.0);
+            let output = input.scalar_powf(3.0).unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -494,7 +494,7 @@ fn scalar_powf_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (3,), device).attach();
-            let loss = input.scalar_powf(3.0).sum(vec![0], false);
+            let loss = input.scalar_powf(3.0).unwrap().sum(vec![0], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -741,7 +741,7 @@ fn neg_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = -&input;
+            let output = (-&input).unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -768,7 +768,7 @@ fn neg_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = (-&input).sum(vec![0, 1], true);
+            let loss = (-&input).unwrap().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1041,7 +1041,7 @@ fn scalar_add_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = &input + 2.0;
+            let output = (&input + 2.0).unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1068,7 +1068,7 @@ fn scalar_add_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = (&input + 2.0).sum(vec![0, 1], true);
+            let loss = (&input + 2.0).unwrap().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1093,7 +1093,7 @@ fn scalar_sub_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = &input - 2.0;
+            let output = (&input - 2.0).unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1120,7 +1120,7 @@ fn scalar_sub_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = (&input - 2.0).sum(vec![0, 1], true);
+            let loss = (&input - 2.0).unwrap().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1145,7 +1145,7 @@ fn scalar_mul_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = &input * 2.0;
+            let output = (&input * 2.0).unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1172,7 +1172,7 @@ fn scalar_mul_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = (&input * 2.0).sum(vec![0, 1], true);
+            let loss = (&input * 2.0).unwrap().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1197,7 +1197,7 @@ fn scalar_div_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = &input / 2.0;
+            let output = (&input / 2.0).unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1224,7 +1224,7 @@ fn scalar_div_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = (&input / 2.0).sum(vec![0, 1], true);
+            let loss = (&input / 2.0).unwrap().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1474,6 +1474,56 @@ fn randn_rejects_integer_dtype() {
     assert!(message.contains("I64"), "message must name the dtype: {message}");
 }
 
+fn assert_i64_dtype_error<E: std::fmt::Display>(result: Result<Tensor, E>, label: &str) {
+    let Err(err) = result else { panic!("{label}: expected a dtype error on i64 input") };
+    let message = err.to_string();
+    assert!(message.contains("i64"), "{label}: message must name the dtype: {message}");
+    assert!(message.contains("not supported"), "{label}: message must reject the dtype: {message}");
+}
+
+#[test]
+fn unary_methods_return_dtype_error_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2, 3], (3,), Device::Cpu);
+
+    // Act
+    let results = [
+        ("exp", input.exp()),
+        ("log", input.log()),
+        ("sin", input.sin()),
+        ("cos", input.cos()),
+        ("tanh", input.tanh()),
+        ("relu", input.relu()),
+        ("sqrt", input.sqrt()),
+        ("scalar_powf", input.scalar_powf(2.0)),
+    ];
+
+    // Assert
+    for (label, result) in results {
+        assert_i64_dtype_error(result, label);
+    }
+}
+
+#[test]
+fn scalar_operators_return_dtype_error_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2, 3], (3,), Device::Cpu);
+
+    // Act
+    let results = [
+        ("neg", -&input),
+        ("add", &input + 1.0),
+        ("sub", &input - 1.0),
+        ("mul", &input * 2.0),
+        ("div", &input / 2.0),
+    ];
+
+    // Assert
+    for (label, result) in results {
+        assert_i64_dtype_error(result, label);
+    }
+}
+
 #[test]
 fn narrow_forward_conforms() {
     // Arrange
@@ -1705,7 +1755,7 @@ fn powf_forward_conforms() {
         .map(|device| {
             let base = Tensor::from_vec(base.clone(), (3,), device);
             let exp = Tensor::from_vec(exp.clone(), (3,), device);
-            let output = base.powf(&exp);
+            let output = base.powf(&exp).unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1736,7 +1786,7 @@ fn powf_backward_conforms() {
         .map(|device| {
             let base = Tensor::from_vec(base.clone(), (3,), device).attach();
             let exp = Tensor::from_vec(exp.clone(), (3,), device).attach();
-            let loss = base.powf(&exp).sum(vec![0], false);
+            let loss = base.powf(&exp).unwrap().sum(vec![0], false);
             let grads = loss.backward().unwrap();
             let base_grad = grads.get(base.id()).unwrap().to_vec::<f32>().unwrap();
             let exp_grad = grads.get(exp.id()).unwrap().to_vec::<f32>().unwrap();
@@ -1767,7 +1817,7 @@ fn sqrt_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = input.sqrt();
+            let output = input.sqrt().unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1794,7 +1844,7 @@ fn sqrt_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = input.sqrt().sum(vec![0, 1], true);
+            let loss = input.sqrt().unwrap().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1819,7 +1869,7 @@ fn sin_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = input.sin();
+            let output = input.sin().unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1846,7 +1896,7 @@ fn sin_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = input.sin().sum(vec![0, 1], true);
+            let loss = input.sin().unwrap().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1871,7 +1921,7 @@ fn cos_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = input.cos();
+            let output = input.cos().unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1898,7 +1948,7 @@ fn cos_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = input.cos().sum(vec![0, 1], true);
+            let loss = input.cos().unwrap().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -2051,7 +2101,7 @@ fn sigmoid_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = input.sigmoid();
+            let output = input.sigmoid().unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -2078,7 +2128,7 @@ fn sigmoid_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = input.sigmoid().sum(vec![0, 1], false);
+            let loss = input.sigmoid().unwrap().sum(vec![0, 1], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -2103,7 +2153,7 @@ fn tanh_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = input.tanh();
+            let output = input.tanh().unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -2130,7 +2180,7 @@ fn tanh_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = input.tanh().sum(vec![0, 1], false);
+            let loss = input.tanh().unwrap().sum(vec![0, 1], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -2155,7 +2205,7 @@ fn gelu_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
-            let output = input.gelu();
+            let output = input.gelu().unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -2182,7 +2232,7 @@ fn gelu_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
-            let loss = input.gelu().sum(vec![0, 1], false);
+            let loss = input.gelu().unwrap().sum(vec![0, 1], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -2207,7 +2257,7 @@ fn silu_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
-            let output = input.silu();
+            let output = input.silu().unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -2234,7 +2284,7 @@ fn silu_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
-            let loss = input.silu().sum(vec![0, 1], false);
+            let loss = input.silu().unwrap().sum(vec![0, 1], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -2264,7 +2314,7 @@ fn softmax_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
-            let output = input.softmax(1);
+            let output = input.softmax(1).unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -2291,7 +2341,7 @@ fn softmax_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
-            let loss = input.softmax(1).sum(vec![0, 1], false);
+            let loss = input.softmax(1).unwrap().sum(vec![0, 1], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -2316,7 +2366,7 @@ fn mean_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
-            let output = input.mean(vec![1], false);
+            let output = (input.mean(vec![1], false)).unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -2343,7 +2393,7 @@ fn mean_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
-            let loss = input.mean(vec![1], false).sum(vec![0], false);
+            let loss = input.mean(vec![1], false).unwrap().sum(vec![0], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)

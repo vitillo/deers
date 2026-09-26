@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 
 use crate::Tensor;
+use crate::error::Result;
 
 /// One flat axis inside a pattern group.
 #[derive(Debug, Clone, PartialEq)]
@@ -587,7 +588,7 @@ impl Tensor {
     /// two-axis drop never sees a stale rank. A `...` on both sides keeps the
     /// batch dims while named axes drop, as in `x.reduce("... t c -> ... c",
     /// "mean", &[])`.
-    pub fn reduce(&self, pattern: &str, op: &str, sizes: &[(&str, usize)]) -> Tensor {
+    pub fn reduce(&self, pattern: &str, op: &str, sizes: &[(&str, usize)]) -> Result<Tensor> {
         if !["sum", "mean", "max"].contains(&op) {
             panic!(
                 "einops reduce '{pattern}': unsupported reduction '{op}'; use sum, mean, or max"
@@ -623,11 +624,11 @@ impl Tensor {
         let axes: Vec<usize> = (rhs_flat.len()..order.len()).collect();
         let reduced = match op {
             "sum" => permuted.sum(axes, false),
-            "mean" => permuted.mean(axes, false),
+            "mean" => permuted.mean(axes, false)?,
             _ => permuted.max(axes, false),
         };
         let pass_shape = expanded_rhs_shape(&parsed.rhs, &resolved, &bound, source);
-        match parsed.rhs.ellipsis {
+        Ok(match parsed.rhs.ellipsis {
             Some(EllipsisKind::Flatten) => {
                 let merged = merge_ellipsis_run(&reduced, &parsed.rhs, &pass_shape, rank);
                 reshape_unless(&merged, grouped_shape(&parsed.rhs, &resolved, &bound, source))
@@ -636,7 +637,7 @@ impl Tensor {
                 &reduced,
                 grouped_shape(&parsed.rhs, &resolved, &bound, source),
             ),
-        }
+        })
     }
 
     /// Tiles new rhs axes by unsqueezing size 1 dims, permuting them into

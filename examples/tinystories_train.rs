@@ -232,10 +232,10 @@ fn train_step(
         let logits_flat =
             logits.reshape(vec![options.micro_batch_size * options.seq_len, vocab_size]);
         let targets_flat = targets.reshape(vec![options.micro_batch_size * options.seq_len]);
-        let batch_loss = loss::cross_entropy(&logits_flat, &targets_flat);
+        let batch_loss = loss::cross_entropy(&logits_flat, &targets_flat).unwrap();
         total_loss += batch_loss.to_vec::<f32>().unwrap()[0];
 
-        let scaled_loss = &batch_loss * (1.0 / options.grad_accum_steps as f64);
+        let scaled_loss = (&batch_loss * (1.0 / options.grad_accum_steps as f64)).unwrap();
         let grads = scaled_loss.backward().unwrap();
         accumulate_grads(&mut accumulated, parameters, &grads);
     }
@@ -274,7 +274,7 @@ fn evaluate(
         let logits_flat =
             logits.reshape(vec![options.micro_batch_size * options.seq_len, vocab_size]);
         let targets_flat = targets.reshape(vec![options.micro_batch_size * options.seq_len]);
-        let batch_loss = loss::cross_entropy(&logits_flat, &targets_flat);
+        let batch_loss = loss::cross_entropy(&logits_flat, &targets_flat).unwrap();
         total += batch_loss.to_vec::<f32>().unwrap()[0];
     }
 

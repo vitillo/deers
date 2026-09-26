@@ -430,38 +430,38 @@ impl Tensor {
     }
 
     /// Element-wise power: `self^e`.
-    pub fn powf<B: Borrow<Tensor>>(&self, e: B) -> Tensor {
-        ops::EWisePowf::new(self.clone(), e.borrow().clone()).unwrap().forward().unwrap()
+    pub fn powf<B: Borrow<Tensor>>(&self, e: B) -> Result<Tensor> {
+        ops::EWisePowf::new(self.clone(), e.borrow().clone())?.forward()
     }
 
     /// Element-wise natural logarithm.
-    pub fn log(&self) -> Tensor {
-        ops::EWiseLog::new(self.clone()).unwrap().forward().unwrap()
+    pub fn log(&self) -> Result<Tensor> {
+        ops::EWiseLog::new(self.clone())?.forward()
     }
 
     /// Element-wise square root.
-    pub fn sqrt(&self) -> Tensor {
+    pub fn sqrt(&self) -> Result<Tensor> {
         self.scalar_powf(0.5)
     }
 
     /// Element-wise exponential.
-    pub fn exp(&self) -> Tensor {
-        ops::EWiseExp::new(self.clone()).unwrap().forward().unwrap()
+    pub fn exp(&self) -> Result<Tensor> {
+        ops::EWiseExp::new(self.clone())?.forward()
     }
 
     /// Element-wise sine.
-    pub fn sin(&self) -> Tensor {
-        ops::EWiseSin::new(self.clone()).unwrap().forward().unwrap()
+    pub fn sin(&self) -> Result<Tensor> {
+        ops::EWiseSin::new(self.clone())?.forward()
     }
 
     /// Element-wise cosine.
-    pub fn cos(&self) -> Tensor {
-        ops::EWiseCos::new(self.clone()).unwrap().forward().unwrap()
+    pub fn cos(&self) -> Result<Tensor> {
+        ops::EWiseCos::new(self.clone())?.forward()
     }
 
     /// Raises every element to the scalar power `e`.
-    pub fn scalar_powf(&self, e: f64) -> Tensor {
-        ops::ScalarPowf::new(self.clone(), e).unwrap().forward().unwrap()
+    pub fn scalar_powf(&self, e: f64) -> Result<Tensor> {
+        ops::ScalarPowf::new(self.clone(), e)?.forward()
     }
 
     /// Matrix multiplication: `[..., m, k] @ [..., k, n] -> [..., m, n]`.
@@ -470,8 +470,8 @@ impl Tensor {
     }
 
     /// Element-wise ReLU: `max(0, x)`.
-    pub fn relu(&self) -> Tensor {
-        ops::Relu::new(self.clone()).unwrap().forward().unwrap()
+    pub fn relu(&self) -> Result<Tensor> {
+        ops::Relu::new(self.clone())?.forward()
     }
 
     pub(crate) fn eq(&self, other: &Tensor) -> Tensor {
@@ -529,41 +529,41 @@ impl Tensor {
     }
 
     /// Element-wise sigmoid: `1 / (1 + exp(-x))`.
-    pub fn sigmoid(&self) -> Tensor {
-        let denom = (-self).exp() + 1.0;
+    pub fn sigmoid(&self) -> Result<Tensor> {
+        let denom = ((-self)?.exp()? + 1.0)?;
         let one = Tensor::ones(vec![1], self.dtype(), self.device())
             .broadcast(self.layout().shape().clone());
-        &one / &denom
+        Ok(&one / &denom)
     }
 
     /// Element-wise SiLU (swish): `x * sigmoid(x)`.
-    pub fn silu(&self) -> Tensor {
-        self * &self.sigmoid()
+    pub fn silu(&self) -> Result<Tensor> {
+        Ok(self * &self.sigmoid()?)
     }
 
     /// Element-wise GELU using the tanh approximation (candle / PyTorch `gelu`):
     /// `0.5 * x * (1 + tanh(√(2/π) * x * (1 + 0.044715 * x²)))`.
-    pub fn gelu(&self) -> Tensor {
+    pub fn gelu(&self) -> Result<Tensor> {
         // Match candle-core's association so parity tests stay within 1e-4.
         const SQRT_2_OVER_PI: f64 = 0.7978845608028654;
         let x2 = self * self;
-        let inner = self * &((x2 * 0.044715) + 1.0);
-        let tanh_out = (inner * SQRT_2_OVER_PI).tanh();
-        &(self * &(tanh_out + 1.0)) * 0.5
+        let inner = self * &(((x2 * 0.044715)? + 1.0)?);
+        let tanh_out = (inner * SQRT_2_OVER_PI)?.tanh()?;
+        &(self * &(tanh_out + 1.0)?) * 0.5
     }
 
     /// Element-wise tanh.
-    pub fn tanh(&self) -> Tensor {
-        ops::Tanh::new(self.clone()).unwrap().forward().unwrap()
+    pub fn tanh(&self) -> Result<Tensor> {
+        ops::Tanh::new(self.clone())?.forward()
     }
 
     /// Numerically stable softmax along the given axis.
-    pub fn softmax(&self, axis: usize) -> Tensor {
+    pub fn softmax(&self, axis: usize) -> Result<Tensor> {
         self.log_softmax(axis).exp()
     }
 
     /// Mean along the given axes. If `keep_dims`, reduced axes become size 1.
-    pub fn mean(&self, axes: Vec<usize>, keep_dims: bool) -> Tensor {
+    pub fn mean(&self, axes: Vec<usize>, keep_dims: bool) -> Result<Tensor> {
         let n: usize = axes.iter().map(|&a| self.layout().shape()[a]).product();
         let s = self.sum(axes, keep_dims);
         &s * (1.0 / n as f64)
@@ -697,18 +697,18 @@ impl PartialEq for Tensor {
 impl Eq for Tensor {}
 
 impl Neg for Tensor {
-    type Output = Tensor;
+    type Output = Result<Tensor>;
 
     fn neg(self) -> Self::Output {
-        ops::Neg::new(self.clone()).unwrap().forward().unwrap()
+        ops::Neg::new(self.clone())?.forward()
     }
 }
 
 impl Neg for &Tensor {
-    type Output = Tensor;
+    type Output = Result<Tensor>;
 
     fn neg(self) -> Self::Output {
-        ops::Neg::new(self.clone()).unwrap().forward().unwrap()
+        ops::Neg::new(self.clone())?.forward()
     }
 }
 
@@ -731,18 +731,18 @@ impl<B: Borrow<Tensor>> Add<B> for &Tensor {
 }
 
 impl Add<f64> for Tensor {
-    type Output = Tensor;
+    type Output = Result<Tensor>;
 
     fn add(self, rhs: f64) -> Self::Output {
-        ops::ScalarAdd::new(self.clone(), rhs).unwrap().forward().unwrap()
+        ops::ScalarAdd::new(self.clone(), rhs)?.forward()
     }
 }
 
 impl Add<f64> for &Tensor {
-    type Output = Tensor;
+    type Output = Result<Tensor>;
 
     fn add(self, rhs: f64) -> Self::Output {
-        ops::ScalarAdd::new(self.clone(), rhs).unwrap().forward().unwrap()
+        ops::ScalarAdd::new(self.clone(), rhs)?.forward()
     }
 }
 
@@ -765,7 +765,7 @@ impl<B: Borrow<Tensor>> Sub<B> for &Tensor {
 }
 
 impl Sub<f64> for Tensor {
-    type Output = Tensor;
+    type Output = Result<Tensor>;
 
     fn sub(self, rhs: f64) -> Self::Output {
         self + -rhs
@@ -773,7 +773,7 @@ impl Sub<f64> for Tensor {
 }
 
 impl Sub<f64> for &Tensor {
-    type Output = Tensor;
+    type Output = Result<Tensor>;
 
     fn sub(self, rhs: f64) -> Self::Output {
         self + -rhs
@@ -817,7 +817,7 @@ impl<B: Borrow<Tensor>> Div<B> for &Tensor {
 }
 
 impl Div<f64> for Tensor {
-    type Output = Tensor;
+    type Output = Result<Tensor>;
 
     fn div(self, rhs: f64) -> Self::Output {
         self * (1.0 / rhs)
@@ -825,7 +825,7 @@ impl Div<f64> for Tensor {
 }
 
 impl Div<f64> for &Tensor {
-    type Output = Tensor;
+    type Output = Result<Tensor>;
 
     fn div(self, rhs: f64) -> Self::Output {
         self * (1.0 / rhs)
@@ -833,18 +833,18 @@ impl Div<f64> for &Tensor {
 }
 
 impl Mul<f64> for Tensor {
-    type Output = Tensor;
+    type Output = Result<Tensor>;
 
     fn mul(self, rhs: f64) -> Self::Output {
-        ops::ScalarMul::new(self.clone(), rhs).unwrap().forward().unwrap()
+        ops::ScalarMul::new(self.clone(), rhs)?.forward()
     }
 }
 
 impl Mul<f64> for &Tensor {
-    type Output = Tensor;
+    type Output = Result<Tensor>;
 
     fn mul(self, rhs: f64) -> Self::Output {
-        ops::ScalarMul::new(self.clone(), rhs).unwrap().forward().unwrap()
+        ops::ScalarMul::new(self.clone(), rhs)?.forward()
     }
 }
 
@@ -1022,7 +1022,7 @@ mod tests {
         // Act
         let y = {
             let _guard = NoGradGuard::new();
-            &x * 2.0
+            (&x * 2.0).unwrap()
         };
 
         // Assert
@@ -1043,7 +1043,7 @@ mod tests {
             assert!(!mid.requires_grad());
         }
         // Inner guard dropped; outer still active so tracking stays off.
-        let still_off = &x * 2.0;
+        let still_off = (&x * 2.0).unwrap();
         assert!(!still_off.requires_grad());
         assert!(still_off.op().is_none());
     }
@@ -1105,11 +1105,11 @@ mod tests {
             return;
         };
         let tensor = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu).attach();
-        let scaled = &tensor * 2.0;
+        let scaled = (&tensor * 2.0).unwrap();
 
         // Act
         let moved = scaled.to_device(device).unwrap();
-        let out = &moved * 3.0;
+        let out = (&moved * 3.0).unwrap();
         let grads = out.sum(vec![0], false).backward().unwrap();
 
         // Assert

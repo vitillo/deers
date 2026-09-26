@@ -106,7 +106,7 @@ fn reduce_mean_matches_manual_mean() {
     let input = cpu(vec![1.0, 2.0, 3.0, 4.0], vec![1, 2, 2]);
 
     // Act
-    let reduced = input.reduce("b t c -> b c", "mean", &[]);
+    let reduced = input.reduce("b t c -> b c", "mean", &[]).unwrap();
 
     // Assert
     assert_eq!(shape_of(&reduced), vec![1, 2]);
@@ -119,14 +119,14 @@ fn multi_axis_reduce_matches_manual_ops() {
     let input = cpu((0..8).map(|v| v as f32).collect(), vec![1, 2, 2, 2]);
 
     // Act
-    let summed = input.reduce("a b c d -> a d", "sum", &[]);
-    let averaged = input.reduce("a b c d -> a d", "mean", &[]);
-    let maxed = input.reduce("a b c d -> a d", "max", &[]);
+    let summed = input.reduce("a b c d -> a d", "sum", &[]).unwrap();
+    let averaged = input.reduce("a b c d -> a d", "mean", &[]).unwrap();
+    let maxed = input.reduce("a b c d -> a d", "max", &[]).unwrap();
 
     // Assert
     assert_eq!(values(&summed), values(&input.sum(vec![1, 2], false)));
     assert_eq!(values(&summed), vec![12.0, 16.0]);
-    assert_eq!(values(&averaged), values(&input.mean(vec![1, 2], false)));
+    assert_eq!(values(&averaged), values(&input.mean(vec![1, 2], false).unwrap()));
     assert_eq!(values(&averaged), vec![3.0, 4.0]);
     assert_eq!(values(&maxed), values(&input.max(vec![1, 2], false)));
     assert_eq!(values(&maxed), vec![6.0, 7.0]);
@@ -140,7 +140,8 @@ fn multi_axis_reduce_gradients_match_manual_ops() {
     let via_manual = cpu(data.clone(), vec![1, 2, 2, 2]).attach();
 
     // Act
-    let loss_pattern = via_pattern.reduce("a b c d -> a d", "sum", &[]).sum(vec![0, 1], false);
+    let loss_pattern =
+        via_pattern.reduce("a b c d -> a d", "sum", &[]).unwrap().sum(vec![0, 1], false);
     let loss_manual = via_manual.sum(vec![1, 2], false).sum(vec![0, 1], false);
     let grads_pattern = loss_pattern.backward().unwrap();
     let grads_manual = loss_manual.backward().unwrap();
@@ -161,7 +162,7 @@ fn max_tie_shares_gradient_on_both_paths() {
     let via_manual = cpu(data.clone(), vec![2, 4]).attach();
 
     // Act
-    let reduced = via_pattern.reduce("b t -> b", "max", &[]);
+    let reduced = via_pattern.reduce("b t -> b", "max", &[]).unwrap();
     let loss_pattern = reduced.sum(vec![0], false);
     let loss_manual = via_manual.max(vec![1], false).sum(vec![0], false);
     let grads_pattern = loss_pattern.backward().unwrap();
@@ -191,11 +192,13 @@ fn rearrange_plus_reduce_gradients_match_manual_path() {
     let loss_pattern = via_pattern
         .rearrange("b t (h d) -> b h t d", &[("h", h)])
         .reduce("b h t d -> b h d", "mean", &[])
+        .unwrap()
         .sum(vec![0, 1, 2], false);
     let loss_manual = via_manual
         .reshape(vec![b, t, h, 4])
         .permute(vec![0, 2, 1, 3])
         .mean(vec![2], false)
+        .unwrap()
         .sum(vec![0, 1, 2], false);
     let grads_pattern = loss_pattern.backward().unwrap();
     let grads_manual = loss_manual.backward().unwrap();
@@ -363,7 +366,7 @@ fn reduce_dropping_nothing_panics() {
     let input = cpu(vec![0.0; 8], vec![1, 2, 4]);
 
     // Act
-    let _ = input.reduce("b t c -> c t b", "sum", &[]);
+    let _ = input.reduce("b t c -> c t b", "sum", &[]).unwrap();
 }
 
 #[test]
@@ -383,7 +386,7 @@ fn unknown_reduction_panics() {
     let input = cpu(vec![0.0; 8], vec![1, 2, 4]);
 
     // Act
-    let _ = input.reduce("b t c -> b c", "median", &[]);
+    let _ = input.reduce("b t c -> b c", "median", &[]).unwrap();
 }
 
 #[test]
@@ -803,7 +806,7 @@ fn ellipsis_reduce_sums_inside_the_batch() {
     let input = cpu((0..24).map(|v| v as f32).collect(), vec![2, 3, 4]);
 
     // Act
-    let reduced = input.reduce("... t c -> ... c", "sum", &[]);
+    let reduced = input.reduce("... t c -> ... c", "sum", &[]).unwrap();
 
     // Assert
     assert_eq!(shape_of(&reduced), vec![2, 4]);
@@ -816,7 +819,7 @@ fn ellipsis_reduce_binds_zero_batch_dims() {
     let input = cpu((0..12).map(|v| v as f32).collect(), vec![3, 4]);
 
     // Act
-    let reduced = input.reduce("... t c -> ... c", "sum", &[]);
+    let reduced = input.reduce("... t c -> ... c", "sum", &[]).unwrap();
 
     // Assert
     assert_eq!(shape_of(&reduced), vec![4]);
@@ -832,8 +835,8 @@ fn ellipsis_reduce_gradients_match_manual_mean() {
 
     // Act
     let loss_pattern =
-        via_pattern.reduce("... t c -> ... c", "mean", &[]).sum(vec![0, 1], false);
-    let loss_manual = via_manual.mean(vec![1], false).sum(vec![0, 1], false);
+        via_pattern.reduce("... t c -> ... c", "mean", &[]).unwrap().sum(vec![0, 1], false);
+    let loss_manual = via_manual.mean(vec![1], false).unwrap().sum(vec![0, 1], false);
     let grads_pattern = loss_pattern.backward().unwrap();
     let grads_manual = loss_manual.backward().unwrap();
 
@@ -1143,7 +1146,7 @@ fn reduce_no_drop_with_ellipsis_panics() {
     let input = cpu(vec![0.0; 24], vec![2, 3, 4]);
 
     // Act
-    let _ = input.reduce("... b c -> ... c b", "sum", &[]);
+    let _ = input.reduce("... b c -> ... c b", "sum", &[]).unwrap();
 }
 
 #[test]
