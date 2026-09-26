@@ -49,9 +49,6 @@ pub trait Tokenizer {
 
     /// Tokenizes a text file, reading line by line.
     ///
-    /// Each line is one document. The [`Tokenizer::eos_token_id`] token is
-    /// stored after each document, unless that document's encoding already
-    /// ends with it, so the stream carries explicit document boundaries.
     /// Returns the full token stream. This is useful for building a
     /// [`TextDataset`](crate::dataset::TextDataset) via
     /// [`TextDataset::from_tokens`](crate::dataset::TextDataset::from_tokens).
@@ -60,7 +57,6 @@ pub trait Tokenizer {
         let mut reader = BufReader::new(input);
         let mut tokens = Vec::new();
         let mut line = String::new();
-        let eos = self.eos_token_id();
 
         loop {
             line.clear();
@@ -68,11 +64,7 @@ pub trait Tokenizer {
             if bytes_read == 0 {
                 break;
             }
-            let mut ids = self.encode(&line);
-            if ids.last() != Some(&eos) {
-                ids.push(eos);
-            }
-            tokens.extend(ids);
+            tokens.extend(self.encode(&line));
         }
 
         Ok(tokens)
