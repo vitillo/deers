@@ -1113,8 +1113,7 @@ mod tests {
         let tensor = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu).attach();
 
         // Act
-        let moved =
-            ops::ToDevice::new(tensor.clone(), Device::Cpu).unwrap().forward().unwrap();
+        let moved = ops::ToDevice::new(tensor.clone(), Device::Cpu).unwrap().forward().unwrap();
         let grads = moved.sum(vec![0], false).backward().unwrap();
 
         // Assert
