@@ -433,10 +433,8 @@ mod tests {
     #[test]
     fn test_load_bf16_tensors_onto_cuda_returns_error() {
         // Arrange
-        let path = std::env::temp_dir().join(format!(
-            "deers-checkpoint-bf16-cuda-{}.safetensors",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir()
+            .join(format!("deers-checkpoint-bf16-cuda-{}.safetensors", std::process::id()));
         let mut tensors = BTreeMap::new();
         tensors.insert(
             "linear.weight".to_owned(),
