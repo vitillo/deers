@@ -65,7 +65,7 @@ pub fn perplexity_from_logits(logits: &Tensor, targets: &Tensor) -> PerplexityRe
     let n_tokens = shape[0];
     assert!(n_tokens > 0, "need at least one scored token");
 
-    let log_probs = logits.log_softmax(1);
+    let log_probs = logits.log_softmax(1).expect("logits must have a float dtype");
     let picked = log_probs.gather(1, &targets.reshape(vec![n_tokens, 1]));
     let token_log_probs: Vec<f32> =
         picked.to_vec().expect("log-probabilities must be readable as f32");

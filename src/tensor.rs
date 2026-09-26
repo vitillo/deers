@@ -485,8 +485,8 @@ impl Tensor {
     }
 
     /// Numerically stable `log(sum(exp(x)))` along the given axes.
-    pub fn log_sum_exp(&self, axes: Vec<usize>) -> Tensor {
-        ops::LogSumExp::new(self.clone(), axes).unwrap().forward().unwrap()
+    pub fn log_sum_exp(&self, axes: Vec<usize>) -> Result<Tensor> {
+        ops::LogSumExp::new(self.clone(), axes)?.forward()
     }
 
     /// Numerically stable log-softmax along the given axis.
@@ -494,7 +494,7 @@ impl Tensor {
     /// On CUDA with a compact last-axis layout this uses a fused single-kernel path
     /// that avoids materialising the broadcast LSE intermediate. All other cases fall
     /// back to the primitive decomposition (log_sum_exp → reshape → broadcast → sub).
-    pub fn log_softmax(&self, axis: usize) -> Tensor {
+    pub fn log_softmax(&self, axis: usize) -> Result<Tensor> {
         // Fused CUDA path: single kernel reads x twice and writes output once,
         // skipping the separate log_sum_exp + broadcast + sub chain.
         let last_axis = self.layout().ndim() - 1;
@@ -502,15 +502,15 @@ impl Tensor {
             && self.device() == crate::device::Device::Cuda
             && self.is_compact()
         {
-            return ops::FusedLogSoftmax::new(self.clone(), axis).unwrap().forward().unwrap();
+            return ops::FusedLogSoftmax::new(self.clone(), axis)?.forward();
         }
         // Primitive fallback.
-        let lse = self.log_sum_exp(vec![axis]);
+        let lse = self.log_sum_exp(vec![axis])?;
         let mut shape: Vec<usize> = self.layout().shape().iter().copied().collect();
         shape[axis] = 1;
         let lse = lse.reshape(shape);
         let lse = lse.broadcast(self.layout().shape().clone());
-        self - &lse
+        Ok(self - &lse)
     }
 
     /// Concatenates tensors along the given dimension.
@@ -559,7 +559,7 @@ impl Tensor {
 
     /// Numerically stable softmax along the given axis.
     pub fn softmax(&self, axis: usize) -> Result<Tensor> {
-        self.log_softmax(axis).exp()
+        self.log_softmax(axis)?.exp()
     }
 
     /// Mean along the given axes. If `keep_dims`, reduced axes become size 1.

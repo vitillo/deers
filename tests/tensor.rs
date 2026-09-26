@@ -307,7 +307,7 @@ fn log_softmax_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
-            let output = input.log_softmax(1);
+            let output = input.log_softmax(1).unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -334,7 +334,7 @@ fn log_softmax_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
-            let loss = input.log_softmax(1).sum(vec![0, 1], false);
+            let loss = input.log_softmax(1).unwrap().sum(vec![0, 1], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1496,6 +1496,9 @@ fn unary_methods_return_dtype_error_on_i64() {
         ("relu", input.relu()),
         ("sqrt", input.sqrt()),
         ("scalar_powf", input.scalar_powf(2.0)),
+        ("log_sum_exp", input.log_sum_exp(vec![0])),
+        ("log_softmax", input.log_softmax(0)),
+        ("softmax", input.softmax(0)),
     ];
 
     // Assert
@@ -1974,7 +1977,7 @@ fn log_sum_exp_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
-            let output = input.log_sum_exp(vec![1]);
+            let output = input.log_sum_exp(vec![1]).unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -2001,7 +2004,7 @@ fn log_sum_exp_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
-            let loss = input.log_sum_exp(vec![1]).sum(vec![0], false);
+            let loss = input.log_sum_exp(vec![1]).unwrap().sum(vec![0], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
