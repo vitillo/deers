@@ -17,7 +17,9 @@ use deers::checkpoint;
 use deers::dataset::TokenBinDataset;
 use deers::models::gpt::{GPT, GPTConfig, RopeScaling};
 use deers::nn::{ParamStore, Parameter};
-use deers::optim::{AdamW, AdamWConfig, AdamWParamGroup, LrSchedule, WarmupWarmdown, clip_grad_norm};
+use deers::optim::{
+    AdamW, AdamWConfig, AdamWParamGroup, LrSchedule, WarmupWarmdown, clip_grad_norm,
+};
 use deers::tokenizer::{Gpt2Tokenizer, TokenBinPaths, Tokenizer, prepare_text_token_bins};
 use deers::{Device, GradientStore, Tensor, loss};
 
@@ -208,7 +210,8 @@ fn split_decay_params(store: &ParamStore) -> (Vec<Parameter>, Vec<Parameter>) {
     (decayed, excluded)
 }
 
-fn train_step(    model: &GPT,
+fn train_step(
+    model: &GPT,
     parameters: &[Parameter],
     opt: &mut deers::optim::AdamW,
     dataset: &TokenBinDataset,
@@ -336,7 +339,10 @@ fn resolve_token_bins(options: &TrainOptions, tokenizer: &impl Tokenizer) -> Tok
     {
         if !options.text_path.exists() {
             let url = "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt";
-            println!("Dataset not found at {}. Downloading from Hugging Face...", options.text_path.display());
+            println!(
+                "Dataset not found at {}. Downloading from Hugging Face...",
+                options.text_path.display()
+            );
             if let Some(parent) = options.text_path.parent() {
                 fs::create_dir_all(parent).unwrap_or_else(|e| {
                     eprintln!("error: failed to create directory {}: {e}", parent.display());
@@ -851,9 +857,7 @@ fn usage(message: &str) -> ! {
 
     eprintln!("Usage: cargo run --release --example tinystories_train -- [options]");
     eprintln!("  --device cpu|cuda|mps");
-    eprintln!(
-        "  note: CUDA builds require `--features cuda`, for example:"
-    );
+    eprintln!("  note: CUDA builds require `--features cuda`, for example:");
     eprintln!(
         "        cargo run --release --features cuda --example tinystories_train -- --device cuda"
     );
