@@ -288,10 +288,10 @@ impl AdamW {
                 let decayed =
                     if weight_decay > 0.0 { &w * (1.0 - self.lr * weight_decay) } else { w };
 
-            // Parameter update: w = w_decayed - lr * m̂ / (√v̂ + ε)
-            let update = &m_hat / &(&v_hat.sqrt() + self.eps);
-            let updated = (&decayed - &(&update * self.lr)).attach();
-            param.set(&updated)?;
+                // Parameter update: w = w_decayed - lr * m̂ / (√v̂ + ε)
+                let update = &m_hat / &(&v_hat.sqrt() + self.eps);
+                let updated = (&decayed - &(&update * self.lr)).attach();
+                param.set(&updated)?;
             }
         }
 
@@ -529,8 +529,7 @@ mod tests {
         };
         let single_params = make_params();
         let grouped_params = make_params();
-        let mut single =
-            AdamWConfig::new(0.05).weight_decay(0.1).build(single_params.clone());
+        let mut single = AdamWConfig::new(0.05).weight_decay(0.1).build(single_params.clone());
         let mut grouped = AdamWConfig::new(0.05).build_with_groups(vec![
             AdamWParamGroup::new(vec![grouped_params[0].clone()], 0.1),
             AdamWParamGroup::new(vec![grouped_params[1].clone()], 0.1),

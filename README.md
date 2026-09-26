@@ -88,7 +88,7 @@ See [`examples/mnist_train.rs`](examples/mnist_train.rs) for a simpler MNIST cla
 
 **Modules** — `Linear`, `Embedding`, `RMSNorm`, `LayerNorm`, `ReLU`, `Dropout`, `Sequential`, `CausalSelfAttention`, `MLP`, `Block`, `GPT`
 
-**Optimizers** — SGD, AdamW (decoupled weight decay, bias correction)
+**Optimizers** — SGD, AdamW (decoupled weight decay with per-parameter-group overrides, bias correction)
 
 **LR Schedules** — warmup/constant/warmdown scheduler
 
