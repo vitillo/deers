@@ -247,12 +247,14 @@ impl Linear {
                 .expect("uniform init with F32 dtype cannot fail"),
         );
         let bias = if bias {
-            Some(builder.param(
-                "bias",
-                Tensor::rand((out_features,), DType::F32, Device::Cpu)
-                    .and_then(|t| ((t * 2.0)? * k)? - k)
-                    .expect("uniform init with F32 dtype cannot fail"),
-            ))
+            Some(
+                builder.param(
+                    "bias",
+                    Tensor::rand((out_features,), DType::F32, Device::Cpu)
+                        .and_then(|t| ((t * 2.0)? * k)? - k)
+                        .expect("uniform init with F32 dtype cannot fail"),
+                ),
+            )
         } else {
             None
         };
@@ -302,9 +304,9 @@ impl Embedding {
     pub fn new(builder: ParamBuilder, vocab_size: usize, hidden_size: usize) -> Self {
         let weight = builder.param(
             "weight",
-                Tensor::randn((vocab_size, hidden_size), DType::F32, Device::Cpu)
-                    .expect("randn with F32 dtype cannot fail"),
-            );
+            Tensor::randn((vocab_size, hidden_size), DType::F32, Device::Cpu)
+                .expect("randn with F32 dtype cannot fail"),
+        );
         Self::from_weight(weight)
     }
 
