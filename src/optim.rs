@@ -315,24 +315,20 @@ pub fn clip_grad_norm(
         return Ok(0.0);
     }
 
-    let device = parameters[0].device();
-    let dtype = parameters[0].dtype();
-    let mut total = Tensor::zeros((1,), dtype, device);
-
-    for parameter in parameters {
-        let Some(grad) = grads.get(parameter.id()) else {
-            continue;
-        };
-        let axes = (0..grad.layout().ndim()).collect::<Vec<_>>();
-        total = &total + &(&grad * &grad).sum(axes, true);
-    }
-
-    let total_norm = total.sqrt();
-    let total_norm_value = match total_norm.dtype() {
-        DType::F16 => total_norm.to_vec::<f16>()?[0].to_f32(),
-        DType::BF16 => total_norm.to_vec::<bf16>()?[0].to_f32(),
-        DType::F32 => total_norm.to_vec::<f32>()?[0],
-        DType::I64 => total_norm.to_vec::<i64>()?[0] as f32,
+    let total_norm_value = match parameters[0].dtype() {
+        DType::F16 => {
+            let mut total = 0.0f32;
+            for parameter in parameters {
+                let Some(grad) = grads.get(parameter.id()) else {
+                    continue;
+                };
+                total += grad.to_vec::<f16>()?.iter().map(|v| v.to_f32().powi(2)).sum::<f32>();
+            }
+            total.sqrt()
+        }
+        DType::BF16 => grad_norm(parameters, grads).to_vec::<bf16>()?[0].to_f32(),
+        DType::F32 => grad_norm(parameters, grads).to_vec::<f32>()?[0],
+        DType::I64 => panic!("clip_grad_norm requires float parameters"),
     };
     if !total_norm_value.is_finite() {
         return Ok(total_norm_value);
@@ -350,6 +346,19 @@ pub fn clip_grad_norm(
     }
 
     Ok(total_norm_value)
+}
+
+/// Computes the global gradient L2 norm on device in the parameter dtype.
+fn grad_norm(parameters: &[Parameter], grads: &GradientStore) -> Tensor {
+    let mut total = Tensor::zeros((1,), parameters[0].dtype(), parameters[0].device());
+    for parameter in parameters {
+        let Some(grad) = grads.get(parameter.id()) else {
+            continue;
+        };
+        let axes = (0..grad.layout().ndim()).collect::<Vec<_>>();
+        total = &total + &(&grad * &grad).sum(axes, true);
+    }
+    total.sqrt()
 }
 
 /// A learning rate schedule maps a step number to a multiplier in [0, 1].
@@ -697,11 +706,7 @@ mod tests {
         let mut grads = GradientStore::new();
         grads.insert(
             x.id(),
-            Tensor::from_vec(
-                vec![f16::from_f32(3.0), f16::from_f32(4.0)],
-                (2,),
-                Device::Cpu,
-            ),
+            Tensor::from_vec(vec![f16::from_f32(3.0), f16::from_f32(4.0)], (2,), Device::Cpu),
         );
 
         // Act
@@ -722,6 +727,23 @@ mod tests {
     }
 
     #[test]
+    fn test_clip_grad_norm_scales_f16_gradients_with_norm_above_f16_range() {
+        // Arrange
+        let n = 65_536;
+        let x = Parameter::new(Tensor::from_vec(vec![f16::from_f32(0.0); n], (n,), Device::Cpu));
+        let mut grads = GradientStore::new();
+        grads.insert(x.id(), Tensor::from_vec(vec![f16::from_f32(1.0); n], (n,), Device::Cpu));
+
+        // Act
+        let norm = clip_grad_norm(std::slice::from_ref(&x), &mut grads, 1.0).unwrap();
+        let clipped = grads.get(x.id()).unwrap().to_vec::<f16>().unwrap();
+
+        // Assert
+        assert!((norm - 256.0).abs() < 1e-2);
+        assert!(clipped.iter().all(|v| (v.to_f32() - 1.0 / 256.0).abs() < 1e-5));
+    }
+
+    #[test]
     fn test_clip_grad_norm_scales_bf16_gradients() {
         // Arrange
         let x = Parameter::new(Tensor::from_vec(
@@ -732,11 +754,7 @@ mod tests {
         let mut grads = GradientStore::new();
         grads.insert(
             x.id(),
-            Tensor::from_vec(
-                vec![bf16::from_f32(3.0), bf16::from_f32(4.0)],
-                (2,),
-                Device::Cpu,
-            ),
+            Tensor::from_vec(vec![bf16::from_f32(3.0), bf16::from_f32(4.0)], (2,), Device::Cpu),
         );
 
         // Act
