@@ -84,7 +84,7 @@ pub fn cross_entropy_with_options(
     reduction: Reduction,
     ignore_index: Option<i64>,
 ) -> Result<Tensor> {
-    let log_probs = logits.log_softmax(1);
+    let log_probs = logits.log_softmax(1)?;
     nll_loss_with_options(&log_probs, targets, reduction, ignore_index)
 }
 

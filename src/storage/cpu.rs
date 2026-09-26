@@ -914,7 +914,9 @@ impl BackendStorage for CpuStorage {
                     .collect();
                 Ok(CpuStorage::BF16(out))
             }
-            _ => Err(Error::DTypeMismatch("log_sum_exp: unsupported dtype".into())),
+            CpuStorage::I64(_) => Err(Error::DTypeMismatch(
+                "log_sum_exp: i64 is not supported, use a float dtype".into(),
+            )),
         }
     }
 
@@ -970,7 +972,9 @@ impl BackendStorage for CpuStorage {
                     .collect();
                 Ok(CpuStorage::BF16(out))
             }
-            _ => Err(crate::error::Error::DTypeMismatch("log_softmax_fwd: unsupported dtype".into())),
+            CpuStorage::I64(_) => Err(crate::error::Error::DTypeMismatch(
+                "log_softmax_fwd: i64 is not supported, use a float dtype".into(),
+            )),
         }
     }
 
