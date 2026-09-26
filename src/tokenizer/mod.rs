@@ -37,11 +37,21 @@ pub trait Tokenizer {
     /// standard replacement character instead of panicking.
     fn decode_lossy(&self, tokens: &[u32]) -> String;
 
-    /// Returns the tokenizer vocabulary size.
+    /// Returns the vocabulary size.
     fn vocab_size(&self) -> usize;
+
+    /// Returns the end-of-text token id terminating one document.
+    ///
+    /// Corpus preparation stores this id after each input document so
+    /// training windows learn document boundaries instead of reading
+    /// concatenated documents as one uninterrupted stream.
+    fn eos_token_id(&self) -> u32;
 
     /// Tokenizes a text file, reading line by line.
     ///
+    /// Each line is one document. The [`Tokenizer::eos_token_id`] token is
+    /// stored after each document, unless that document's encoding already
+    /// ends with it, so the stream carries explicit document boundaries.
     /// Returns the full token stream. This is useful for building a
     /// [`TextDataset`](crate::dataset::TextDataset) via
     /// [`TextDataset::from_tokens`](crate::dataset::TextDataset::from_tokens).
@@ -50,6 +60,7 @@ pub trait Tokenizer {
         let mut reader = BufReader::new(input);
         let mut tokens = Vec::new();
         let mut line = String::new();
+        let eos = self.eos_token_id();
 
         loop {
             line.clear();
@@ -57,7 +68,11 @@ pub trait Tokenizer {
             if bytes_read == 0 {
                 break;
             }
-            tokens.extend(self.encode(&line));
+            let mut ids = self.encode(&line);
+            if ids.last() != Some(&eos) {
+                ids.push(eos);
+            }
+            tokens.extend(ids);
         }
 
         Ok(tokens)

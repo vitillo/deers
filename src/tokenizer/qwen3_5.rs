@@ -153,6 +153,11 @@ impl Tokenizer for Qwen3_5Tokenizer {
     fn vocab_size(&self) -> usize {
         QWEN3_5_VOCAB_SIZE
     }
+
+    fn eos_token_id(&self) -> u32 {
+        // Qwen3.5 reserves 248044 for <|endoftext|>.
+        248044
+    }
 }
 
 /// One role and content segment in a Qwen3.5 chat prompt.
