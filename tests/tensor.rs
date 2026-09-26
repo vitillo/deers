@@ -1409,7 +1409,7 @@ fn rand_forward_has_valid_range() {
     let results: Vec<(Device, Vec<f32>)> = devices()
         .into_iter()
         .map(|device| {
-            let output = Tensor::rand((len,), deers::DType::F32, device);
+            let output = Tensor::rand((len,), deers::DType::F32, device).unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1431,7 +1431,7 @@ fn randn_forward_has_finite_values() {
     let results: Vec<(Device, Vec<f32>)> = devices()
         .into_iter()
         .map(|device| {
-            let output = Tensor::randn((len,), deers::DType::F32, device);
+            let output = Tensor::randn((len,), deers::DType::F32, device).unwrap();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1442,6 +1442,36 @@ fn randn_forward_has_finite_values() {
         assert_eq!(actual.len(), len, "randn length on {:?}", device);
         assert!(actual.iter().all(|value| value.is_finite()));
     }
+}
+
+#[test]
+fn rand_rejects_integer_dtype() {
+    // Arrange
+    let shape = (4,);
+
+    // Act
+    let result = Tensor::rand(shape, deers::DType::I64, Device::Cpu);
+
+    // Assert
+    let err = result.expect_err("rand on i64 must fail");
+    let message = err.to_string();
+    assert!(message.contains("rand"), "message must name the op: {message}");
+    assert!(message.contains("I64"), "message must name the dtype: {message}");
+}
+
+#[test]
+fn randn_rejects_integer_dtype() {
+    // Arrange
+    let shape = (4,);
+
+    // Act
+    let result = Tensor::randn(shape, deers::DType::I64, Device::Cpu);
+
+    // Assert
+    let err = result.expect_err("randn on i64 must fail");
+    let message = err.to_string();
+    assert!(message.contains("randn"), "message must name the op: {message}");
+    assert!(message.contains("I64"), "message must name the dtype: {message}");
 }
 
 #[test]

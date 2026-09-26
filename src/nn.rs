@@ -242,12 +242,20 @@ impl Linear {
         let k = 1.0 / (in_features as f64).sqrt();
         let weight = builder.param(
             "weight",
-            Tensor::rand((in_features, out_features), DType::F32, Device::Cpu) * 2.0 * k - k,
+            Tensor::rand((in_features, out_features), DType::F32, Device::Cpu)
+                .expect("rand with F32 dtype cannot fail")
+                * 2.0
+                * k
+                - k,
         );
         let bias = if bias {
             Some(builder.param(
                 "bias",
-                Tensor::rand((out_features,), DType::F32, Device::Cpu) * 2.0 * k - k,
+                Tensor::rand((out_features,), DType::F32, Device::Cpu)
+                    .expect("rand with F32 dtype cannot fail")
+                    * 2.0
+                    * k
+                    - k,
             ))
         } else {
             None
@@ -296,8 +304,11 @@ pub struct Embedding {
 impl Embedding {
     /// Creates an embedding table with standard normal initialization.
     pub fn new(builder: ParamBuilder, vocab_size: usize, hidden_size: usize) -> Self {
-        let weight = builder
-            .param("weight", Tensor::randn((vocab_size, hidden_size), DType::F32, Device::Cpu));
+        let weight = builder.param(
+            "weight",
+                Tensor::randn((vocab_size, hidden_size), DType::F32, Device::Cpu)
+                    .expect("randn with F32 dtype cannot fail"),
+            );
         Self::from_weight(weight)
     }
 

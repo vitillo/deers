@@ -62,7 +62,8 @@ fn bench_prompt(prompt_len: usize) -> f64 {
 
     let store = deers::nn::ParamStore::new();
     let attn = CausalSelfAttention::new(store.root(), N_EMBD, N_HEAD);
-    let x = Tensor::randn((1, total_len, N_EMBD), DType::F32, device);
+    let x = Tensor::randn((1, total_len, N_EMBD), DType::F32, device)
+        .expect("randn with F32 dtype cannot fail");
     let (cos, sin) =
         precompute_rotary_embeddings(total_len, head_dim, 10_000.0, DType::F32, device);
 

@@ -99,7 +99,7 @@ use rand::RngExt;
 
 use crate::device::Device;
 use crate::dtype::{DType, WithDType};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::layout::{Layout, Shape};
 use crate::ops::{self, TensorOp};
 use crate::storage::{BackendStorage, CpuStorage, Storage};
@@ -259,7 +259,9 @@ impl Tensor {
     }
 
     /// Create a tensor with values drawn from a uniform distribution in [0, 1).
-    pub fn rand(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
+    ///
+    /// Only float dtypes are supported; other dtypes return a dtype error.
+    pub fn rand(shape: impl Into<Shape>, dtype: DType, device: Device) -> Result<Tensor> {
         let shape: Shape = shape.into();
         let mut rng = rand::rng();
         let storage = match dtype {
@@ -277,13 +279,19 @@ impl Tensor {
                 let data: Vec<f32> = (0..shape.size()).map(|_| rng.random()).collect();
                 CpuStorage::from(data).to(device)
             }
-            _ => unimplemented!(),
+            _ => {
+                return Err(Error::DTypeMismatch(format!(
+                    "rand: unsupported dtype {dtype:?}, expected F16, BF16, or F32"
+                )));
+            }
         };
-        Tensor::from_plain_storage(storage, shape)
+        Ok(Tensor::from_plain_storage(storage, shape))
     }
 
     /// Create a tensor with values drawn from a standard normal distribution.
-    pub fn randn(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
+    ///
+    /// Only float dtypes are supported; other dtypes return a dtype error.
+    pub fn randn(shape: impl Into<Shape>, dtype: DType, device: Device) -> Result<Tensor> {
         let shape: Shape = shape.into();
         let mut rng = rand::rng();
         // Box-Muller transform
@@ -322,9 +330,13 @@ impl Tensor {
                     .collect();
                 CpuStorage::from(data).to(device)
             }
-            _ => unimplemented!(),
+            _ => {
+                return Err(Error::DTypeMismatch(format!(
+                    "randn: unsupported dtype {dtype:?}, expected F16, BF16, or F32"
+                )));
+            }
         };
-        Tensor::from_plain_storage(storage, shape)
+        Ok(Tensor::from_plain_storage(storage, shape))
     }
 
     /// Copies the tensor data into a flat `Vec`, respecting strides.

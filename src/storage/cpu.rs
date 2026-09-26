@@ -230,7 +230,10 @@ impl BackendStorage for CpuStorage {
                     let e = e as f32;
                     Ok(CpuStorage::F32(data.iter().map(|v| v.powf(e)).collect()))
                 }
-                CpuStorage::I64(_) => todo!(),
+                CpuStorage::I64(_) => Err(Error::DTypeMismatch(
+                    "ewise_powf: i64 is not supported, pow is only defined for float dtypes"
+                        .into(),
+                )),
             };
         }
 
@@ -257,7 +260,9 @@ impl BackendStorage for CpuStorage {
                 strided_unary_op(data, l.offset, strides, &mut out, shape, |v| v.powf(e));
                 Ok(CpuStorage::F32(out))
             }
-            CpuStorage::I64(_) => todo!(),
+            CpuStorage::I64(_) => Err(Error::DTypeMismatch(
+                "ewise_powf: i64 is not supported, pow is only defined for float dtypes".into(),
+            )),
         }
     }
 
@@ -275,7 +280,10 @@ impl BackendStorage for CpuStorage {
                 CpuStorage::F32(data) => {
                     Ok(CpuStorage::F32(data.iter().map(|v| op.f32(*v)).collect()))
                 }
-                CpuStorage::I64(_) => todo!(),
+                CpuStorage::I64(_) => Err(Error::DTypeMismatch(format!(
+                    "unary op '{}': i64 is not supported, use a float dtype",
+                    O::KERNEL
+                ))),
             };
         }
 
@@ -299,7 +307,10 @@ impl BackendStorage for CpuStorage {
                 strided_unary_op(data, l.offset, strides, &mut out, shape, |v| op.f32(v));
                 Ok(CpuStorage::F32(out))
             }
-            CpuStorage::I64(_) => todo!(),
+            CpuStorage::I64(_) => Err(Error::DTypeMismatch(format!(
+                "unary op '{}': i64 is not supported, use a float dtype",
+                O::KERNEL
+            ))),
         }
     }
 
