@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 use rand::RngExt;
+use rand::seq::SliceRandom;
 use std::io::Read;
 use std::path::Path;
 use std::{fs, fs::File};
@@ -196,10 +197,13 @@ impl TokenBinDataset {
     }
 
     /// Samples a random batch of contiguous token windows.
+    ///
+    /// Draws from the global RNG: reproducible after [`crate::manual_seed`].
     pub fn sample_batch(&self, batch_size: usize, device: Device) -> (Tensor, Tensor) {
-        let mut rng = rand::rng();
         let max_start = self.tokens.len() - (self.seq_len + 1);
-        let starts = (0..batch_size).map(|_| rng.random_range(0..=max_start)).collect::<Vec<_>>();
+        let starts = crate::rng::with_rng(|rng| {
+            (0..batch_size).map(|_| rng.random_range(0..=max_start)).collect::<Vec<_>>()
+        });
         self.batch_from_starts(&starts, device)
     }
 
@@ -217,6 +221,36 @@ impl TokenBinDataset {
         let shape = (starts.len(), self.seq_len);
         (Tensor::from_vec(inputs, shape, device), Tensor::from_vec(targets, shape, device))
     }
+}
+
+/// Returns a random permutation of `0..len` (Fisher-Yates) drawn from the
+/// global RNG. Reproducible after [`crate::manual_seed`].
+///
+/// Useful for shuffling a dataset's row order each epoch: gather rows with
+/// [`Tensor::index_select`](crate::Tensor::index_select), then slice
+/// sequential batches out of the shuffled tensor.
+///
+/// # Panics
+///
+/// Panics if the global RNG lock is poisoned, which only happens when another
+/// thread panicked while holding it.
+pub fn permutation(len: usize) -> Vec<usize> {
+    crate::rng::with_rng(|rng| {
+        let mut perm: Vec<usize> = (0..len).collect();
+        perm.shuffle(rng);
+        perm
+    })
+}
+
+/// Shuffles `data` in place (Fisher-Yates) using the global RNG.
+/// Reproducible after [`crate::manual_seed`].
+///
+/// # Panics
+///
+/// Panics if the global RNG lock is poisoned, which only happens when another
+/// thread panicked while holding it.
+pub fn shuffle<T>(data: &mut [T]) {
+    crate::rng::with_rng(|rng| data.shuffle(rng));
 }
 
 /// Downloads `url` to `path` if the file doesn't already exist.
@@ -258,6 +292,7 @@ fn read_u32(reader: &mut impl Read) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DType;
     use crate::layout::Shape;
 
     #[test]
@@ -302,6 +337,106 @@ mod tests {
 
         // Cleanup
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_permutation_contains_each_index_once() {
+        // Arrange — an unshuffled length.
+        let len = 1000;
+
+        // Act
+        let perm = permutation(len);
+
+        // Assert — every index appears exactly once.
+        assert_eq!(perm.len(), len);
+        let mut sorted = perm.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..len).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_shuffle_reorders_in_place_without_losing_elements() {
+        // Arrange
+        let mut data: Vec<i64> = (0..256).collect();
+        let original = data.clone();
+        crate::manual_seed(7);
+
+        // Act
+        shuffle(&mut data);
+
+        // Assert — same multiset of elements, in a different order.
+        let mut sorted = data.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, original);
+        assert_ne!(data, original);
+    }
+
+    #[test]
+    fn test_manual_seed_reproduces_all_rng_consumers() {
+        // Arrange — a small token stream for batch sampling and a ones tensor
+        // for dropout.
+        let bin = TokenBinDataset { tokens: (0..1024u16).collect(), seq_len: 16 };
+        let ones = Tensor::ones((2, 32), DType::F32, Device::Cpu);
+        let draw_all = || {
+            let rand: Vec<f32> = Tensor::rand((4, 4), DType::F32, Device::Cpu).to_vec().unwrap();
+            let randn: Vec<f32> = Tensor::randn((4, 4), DType::F32, Device::Cpu).to_vec().unwrap();
+            let dropout: Vec<f32> =
+                crate::nn::functional::dropout(&ones, 0.5, true).to_vec().unwrap();
+            let perm = permutation(64);
+            let (inputs, _) = bin.sample_batch(8, Device::Cpu);
+            (rand, randn, dropout, perm, inputs.to_vec::<i64>().unwrap())
+        };
+
+        // Act — draw from every global-RNG consumer twice with the same seed.
+        // Test threads share the global RNG, so a foreign draw landing between
+        // the two sequences breaks equality without implicating the seed; a
+        // passing comparison is always exact, so retrying until a clean window
+        // can never produce a false pass.
+        let (first, second) = (0..50)
+            .find_map(|_| {
+                crate::manual_seed(1234);
+                let first = draw_all();
+                crate::manual_seed(1234);
+                let second = draw_all();
+                (first == second).then_some((first, second))
+            })
+            .expect("global RNG never settled between test threads");
+
+        // Assert — identical seeds reproduce every consumer exactly.
+        assert_eq!(first.0, second.0);
+        assert_eq!(first.1, second.1);
+        assert_eq!(first.2, second.2);
+        assert_eq!(first.3, second.3);
+        assert_eq!(first.4, second.4);
+
+        // Act — reseed differently and draw again.
+        crate::manual_seed(999);
+        let other = draw_all();
+
+        // Assert — a different seed diverges.
+        assert_ne!(first.0, other.0);
+        assert_ne!(first.3, other.3);
+    }
+
+    #[test]
+    fn test_successive_permutations_change_epoch_order() {
+        // Arrange — fake row ids standing in for MNIST rows, shuffled once per
+        // epoch the way `mnist_train` does.
+        crate::manual_seed(2026);
+        let rows: Vec<i64> = (0..1024).collect();
+
+        // Act
+        let first_epoch: Vec<i64> = permutation(rows.len()).iter().map(|&i| rows[i]).collect();
+        let second_epoch: Vec<i64> = permutation(rows.len()).iter().map(|&i| rows[i]).collect();
+
+        // Assert — both epochs visit every row exactly once, in different orders.
+        let mut sorted = first_epoch.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, rows);
+        let mut sorted = second_epoch.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, rows);
+        assert_ne!(first_epoch, second_epoch);
     }
 
     #[test]

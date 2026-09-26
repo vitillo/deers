@@ -259,72 +259,43 @@ impl Tensor {
     }
 
     /// Create a tensor with values drawn from a uniform distribution in [0, 1).
+    ///
+    /// Draws from the global RNG: reproducible after [`crate::manual_seed`].
     pub fn rand(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
-        let mut rng = rand::rng();
-        let storage = match dtype {
-            DType::F16 => {
-                let data: Vec<f16> =
-                    (0..shape.size()).map(|_| f16::from_f32(rng.random::<f32>())).collect();
-                CpuStorage::from(data).to(device)
-            }
-            DType::BF16 => {
-                let data: Vec<bf16> =
-                    (0..shape.size()).map(|_| bf16::from_f32(rng.random::<f32>())).collect();
-                CpuStorage::from(data).to(device)
-            }
-            DType::F32 => {
-                let data: Vec<f32> = (0..shape.size()).map(|_| rng.random()).collect();
-                CpuStorage::from(data).to(device)
-            }
-            _ => unimplemented!(),
-        };
-        Tensor::from_plain_storage(storage, shape)
+        let data: Vec<f32> =
+            crate::rng::with_rng(|rng| (0..shape.size()).map(|_| rng.random()).collect());
+        Tensor::from_plain_storage(Self::f32_samples_to_storage(data, dtype).to(device), shape)
     }
 
     /// Create a tensor with values drawn from a standard normal distribution.
+    ///
+    /// Draws from the global RNG: reproducible after [`crate::manual_seed`].
     pub fn randn(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
-        let mut rng = rand::rng();
         // Box-Muller transform
-        let storage = match dtype {
-            DType::F16 => {
-                let data: Vec<f16> = (0..shape.size())
-                    .map(|_| {
-                        let u1: f32 = rng.random();
-                        let u2: f32 = rng.random();
-                        let z =
-                            (-2.0f32 * u1.ln()).sqrt() * (2.0f32 * std::f32::consts::PI * u2).cos();
-                        f16::from_f32(z)
-                    })
-                    .collect();
-                CpuStorage::from(data).to(device)
-            }
+        let data: Vec<f32> = crate::rng::with_rng(|rng| {
+            (0..shape.size())
+                .map(|_| {
+                    let u1: f32 = rng.random();
+                    let u2: f32 = rng.random();
+                    (-2.0f32 * u1.ln()).sqrt() * (2.0f32 * std::f32::consts::PI * u2).cos()
+                })
+                .collect()
+        });
+        Tensor::from_plain_storage(Self::f32_samples_to_storage(data, dtype).to(device), shape)
+    }
+
+    /// Converts host `f32` samples into CPU storage of the requested float dtype.
+    fn f32_samples_to_storage(data: Vec<f32>, dtype: DType) -> CpuStorage {
+        match dtype {
+            DType::F16 => CpuStorage::from(data.into_iter().map(f16::from_f32).collect::<Vec<_>>()),
             DType::BF16 => {
-                let data: Vec<bf16> = (0..shape.size())
-                    .map(|_| {
-                        let u1: f32 = rng.random();
-                        let u2: f32 = rng.random();
-                        let z =
-                            (-2.0f32 * u1.ln()).sqrt() * (2.0f32 * std::f32::consts::PI * u2).cos();
-                        bf16::from_f32(z)
-                    })
-                    .collect();
-                CpuStorage::from(data).to(device)
+                CpuStorage::from(data.into_iter().map(bf16::from_f32).collect::<Vec<_>>())
             }
-            DType::F32 => {
-                let data: Vec<f32> = (0..shape.size())
-                    .map(|_| {
-                        let u1: f32 = rng.random();
-                        let u2: f32 = rng.random();
-                        (-2.0f32 * u1.ln()).sqrt() * (2.0f32 * std::f32::consts::PI * u2).cos()
-                    })
-                    .collect();
-                CpuStorage::from(data).to(device)
-            }
+            DType::F32 => CpuStorage::from(data),
             _ => unimplemented!(),
-        };
-        Tensor::from_plain_storage(storage, shape)
+        }
     }
 
     /// Copies the tensor data into a flat `Vec`, respecting strides.

@@ -96,7 +96,7 @@ See [`examples/mnist_train.rs`](examples/mnist_train.rs) for a simpler MNIST cla
 
 **Tokenizer** — one BPE tokenizer type per encoding (`Gpt2Tokenizer`, `Cl100kTokenizer`, `Qwen3Tokenizer`) behind the shared `Tokenizer` trait
 
-**Data** — MNIST loader, text dataset, token-bin dataset with auto-download
+**Data** — MNIST loader, text dataset, token-bin dataset with auto-download, `shuffle`/`permutation` helpers, and `manual_seed` for reproducible runs
 
 **Checkpoints** — safetensors-based model and optimizer state serialization, plus sharded Qwen3 checkpoints with tensor-name mapping
 
