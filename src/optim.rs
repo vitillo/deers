@@ -68,16 +68,6 @@ impl AdamWParamGroup {
     pub fn new(parameters: Vec<Parameter>, weight_decay: f64) -> Self {
         Self { parameters, weight_decay }
     }
-
-    /// Returns the parameters in this group.
-    pub fn parameters(&self) -> &[Parameter] {
-        &self.parameters
-    }
-
-    /// Returns the decoupled weight decay for this group.
-    pub fn weight_decay(&self) -> f64 {
-        self.weight_decay
-    }
 }
 
 /// Configuration for the AdamW optimizer, separate from its runtime state.
@@ -183,11 +173,6 @@ impl AdamW {
     /// Sets the learning rate used on subsequent steps.
     pub fn set_lr(&mut self, lr: f64) {
         self.lr = lr;
-    }
-
-    /// Returns the parameter groups with their per-group weight decay.
-    pub fn param_groups(&self) -> &[AdamWParamGroup] {
-        &self.groups
     }
 
     /// Returns the current learning rate.
