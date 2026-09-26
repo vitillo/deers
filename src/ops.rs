@@ -1335,6 +1335,8 @@ impl TensorOp for ToDevice {
         vec![&self.arg]
     }
 }
+
+/// Gathers values along `dim` using integer indices.
 ///
 /// The index tensor must have the same rank as the input and the same shape on
 /// every non-indexed dimension. The output shape matches the index tensor.
