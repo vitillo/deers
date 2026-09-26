@@ -117,6 +117,7 @@ fn ignore_mask(
     }
     let device = targets.device();
     let safe_targets = Tensor::from_vec(safe, (batch,), device);
+    // The mask must match the loss dtype for the elementwise multiply.
     let keep = match loss_dtype {
         crate::DType::F32 => Tensor::from_vec(
             kept_flags.iter().map(|k| if *k { 1.0f32 } else { 0.0 }).collect::<Vec<f32>>(),
@@ -146,7 +147,6 @@ fn ignore_mask(
             device,
         ),
     };
-    // The mask must match the loss dtype for the elementwise multiply.
     (safe_targets, Some(keep), kept)
 }
 

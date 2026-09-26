@@ -92,7 +92,7 @@ See [`examples/mnist_train.rs`](examples/mnist_train.rs) for a simpler MNIST cla
 
 **LR Schedules** — warmup/constant/warmdown scheduler
 
-**Losses** — `cross_entropy`, `nll_loss`
+**Losses** — `cross_entropy`, `nll_loss` (`*_with_options` variants add `Reduction::{Mean, Sum, None}` and `ignore_index`)
 
 **Tokenizer** — one BPE tokenizer type per encoding (`Gpt2Tokenizer`, `Cl100kTokenizer`, `Qwen3Tokenizer`) behind the shared `Tokenizer` trait
 
