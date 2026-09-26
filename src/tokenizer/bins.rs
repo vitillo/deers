@@ -9,10 +9,8 @@ use crate::error::Result;
 
 /// Magic prefix identifying the versioned token-bin format.
 ///
-/// Versioned bins store raw little-endian `u32` ids after this header.
-/// Bins written before the header existed are raw little-endian `u16`
-/// streams; loaders still read those and widen them on load, so the header
-/// means a bin is never silently misread as the wrong width.
+/// Versioned bins store raw little-endian `u32` ids after this header, so a
+/// headerless bin from the old `u16` format is rejected instead of misread.
 pub const TOKEN_BIN_MAGIC: &[u8; 8] = b"DEERSTB\x01";
 /// Bytes per token id in the versioned format.
 const TOKEN_BIN_ITEM_BYTES: usize = 4;
