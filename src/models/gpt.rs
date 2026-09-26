@@ -805,6 +805,14 @@ impl GPT {
         parameters
     }
 
+    /// Returns the device holding the model parameters and rotary cache.
+    ///
+    /// `forward` requires token ids on this device, and [`crate::eval::score_model`]
+    /// places its inputs here so scoring never silently falls back to CPU.
+    pub fn device(&self) -> Device {
+        self.cos.device()
+    }
+
     /// Moves the model parameters and rotary caches to `device`.
     pub fn to_device(&mut self, device: Device) -> Result<()> {
         self.wte.to_device(device)?;

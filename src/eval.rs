@@ -1,4 +1,5 @@
-//! Evaluation harness: perplexity scoring over a text sample plus reference parity checks.
+//! Evaluation harness: perplexity scoring over a text sample, on-device
+//! classification accuracy helpers, and reference parity checks.
 //!
 //! Perplexity scores a language model by the average number of next-token choices it hesitates
 //! between: it exponentiates the mean negative log-probability over a corpus, so a model that
@@ -8,7 +9,7 @@
 
 use crate::models::gpt::GPT;
 use crate::tokenizer::Tokenizer;
-use crate::{DType, Device, Tensor, no_grad};
+use crate::{DType, Tensor, no_grad};
 
 /// Tiny bundled sample for the default eval. Larger corpora stay opt-in: tokenize them yourself
 /// and pass the ids to [`score_model`].
@@ -72,17 +73,99 @@ pub fn perplexity_from_logits(logits: &Tensor, targets: &Tensor) -> PerplexityRe
     PerplexityReport { token_log_probs, n_tokens, mean_nll, perplexity: mean_nll.exp() }
 }
 
+/// Fraction of batch positions where the top-scoring class matches the target.
+///
+/// `logits` has shape `[..., C]` and `targets` holds I64 class ids with the
+/// class axis dropped (`[...]`). Every leading dimension counts as batch, so a
+/// `[B, T, V]` language-model output scores `B * T` predictions. Selection
+/// reuses the existing `argmax` selector and only the predicted and target id
+/// vectors are compared on the host, so callers keep forward and loss
+/// on-device and never hand-roll the argmax loop. Returns a fraction in
+/// `[0, 1]`.
+///
+/// Ties resolve to the lowest class index (argmax order), so this always agrees
+/// with [`top_k_accuracy`] at `k = 1`. Panics on shape or dtype mismatch, on an
+/// empty batch, or on a target outside `[0, C)`.
+pub fn accuracy(logits: &Tensor, targets: &Tensor) -> f64 {
+    let (n, num_classes) = check_classification_inputs(logits, targets);
+    let preds = logits.reshape(vec![n, num_classes]).argmax(1, false);
+    let pred: Vec<i64> = preds.to_vec().expect("predicted ids must be readable as I64");
+    let actual: Vec<i64> =
+        targets.reshape(vec![n]).to_vec().expect("targets must be readable as I64");
+    let mut correct = 0usize;
+    for (p, t) in pred.iter().zip(actual.iter()) {
+        assert!(
+            (0..num_classes as i64).contains(t),
+            "target {t} out of range for {num_classes} classes"
+        );
+        if p == t {
+            correct += 1;
+        }
+    }
+    correct as f64 / n as f64
+}
+
+/// Fraction of batch positions whose target ranks among the top `k` scores.
+///
+/// Same shapes as [`accuracy`]. Selection reuses the existing `topk`
+/// selector: the top `k` are the `k` largest scores in descending order with
+/// ties broken toward the lowest class index, so a target tied at the cutoff
+/// counts only when its index orders within the first `k`. `k` equal to the
+/// class count always returns 1.0 for valid targets. Panics when `k` is zero
+/// or exceeds the class count, plus the [`accuracy`] panics.
+pub fn top_k_accuracy(logits: &Tensor, targets: &Tensor, k: usize) -> f64 {
+    let (n, num_classes) = check_classification_inputs(logits, targets);
+    assert!(k >= 1, "top-k needs k >= 1, got {k}");
+    assert!(k <= num_classes, "top-k k = {k} exceeds {num_classes} classes");
+    let (_, indices) = logits.reshape(vec![n, num_classes]).topk(k, 1);
+    let top: Vec<i64> = indices.to_vec().expect("top-k ids must be readable as I64");
+    let actual: Vec<i64> =
+        targets.reshape(vec![n]).to_vec().expect("targets must be readable as I64");
+    let mut correct = 0usize;
+    for (row, t) in top.chunks_exact(k).zip(actual.iter()) {
+        assert!(
+            (0..num_classes as i64).contains(t),
+            "target {t} out of range for {num_classes} classes"
+        );
+        if row.contains(t) {
+            correct += 1;
+        }
+    }
+    correct as f64 / n as f64
+}
+
+/// Validates classification shapes and returns `(num_predictions, num_classes)`.
+fn check_classification_inputs(logits: &Tensor, targets: &Tensor) -> (usize, usize) {
+    let shape = logits.layout().shape();
+    assert!(shape.ndim() >= 1, "logits must have shape [..., C]");
+    let num_classes = shape[shape.ndim() - 1];
+    assert!(num_classes > 0, "logits must have at least one class");
+    assert_eq!(targets.dtype(), DType::I64, "targets must hold I64 class ids");
+    assert_eq!(
+        targets.layout().shape().as_slice(),
+        &shape.as_slice()[..shape.ndim() - 1],
+        "targets must drop the logits class axis"
+    );
+    let n = logits.layout().size() / num_classes;
+    assert!(n > 0, "need at least one prediction to score");
+    (n, num_classes)
+}
+
 /// Scores a model on token ids without tracking gradients. Position `i` predicts `ids[i + 1]`,
 /// so the report holds `len - 1` predictions. Panics on fewer than two ids.
+///
+/// Inputs are placed on the model's device, so scoring follows the model to
+/// CUDA or MPS instead of silently falling back to CPU.
 pub fn score_model(model: &GPT, token_ids: &[i64]) -> PerplexityReport {
     assert!(token_ids.len() >= 2, "need at least two tokens to score one prediction");
     let seq_len = token_ids.len();
+    let device = model.device();
     no_grad(|| {
-        let idx = Tensor::from_vec(token_ids.to_vec(), (1, seq_len), Device::Cpu);
+        let idx = Tensor::from_vec(token_ids.to_vec(), (1, seq_len), device);
         let logits = model.forward(&idx).expect("eval forward must succeed");
         let vocab_size = logits.layout().shape()[2];
         let shifted = logits.narrow(1, 0, seq_len - 1).reshape(vec![seq_len - 1, vocab_size]);
-        let targets = Tensor::from_vec(token_ids[1..].to_vec(), (seq_len - 1,), Device::Cpu);
+        let targets = Tensor::from_vec(token_ids[1..].to_vec(), (seq_len - 1,), device);
         perplexity_from_logits(&shifted, &targets)
     })
 }
@@ -103,7 +186,10 @@ pub fn check_close(
 
 #[cfg(test)]
 mod tests {
-    use super::{check_close, perplexity_from_logits, sample_token_ids, score_model};
+    use super::{
+        accuracy, check_close, perplexity_from_logits, sample_token_ids, score_model,
+        top_k_accuracy,
+    };
     use crate::models::gpt::{GPTConfig, RopeScaling};
     use crate::nn::ParamStore;
     use crate::tokenizer::{Gpt2Tokenizer, Tokenizer};
@@ -193,6 +279,256 @@ mod tests {
             report.mean_nll,
             report.perplexity
         );
+    }
+
+    #[test]
+    fn accuracy_counts_correct_predictions() {
+        // Arrange
+        let logits = Tensor::from_vec(
+            vec![3.0f32, 1.0, 2.0, 0.0, 5.0, 1.0, 1.0, 1.0, 4.0],
+            (3, 3),
+            Device::Cpu,
+        );
+        let targets = Tensor::from_vec(vec![0i64, 1, 2], (3,), Device::Cpu);
+
+        // Act
+        let score = accuracy(&logits, &targets);
+
+        // Assert
+        assert_eq!(score, 1.0);
+    }
+
+    #[test]
+    fn accuracy_counts_partial_credit() {
+        // Arrange
+        let logits = Tensor::from_vec(
+            vec![3.0f32, 1.0, 2.0, 0.0, 5.0, 1.0, 1.0, 1.0, 4.0],
+            (3, 3),
+            Device::Cpu,
+        );
+        let targets = Tensor::from_vec(vec![0i64, 1, 0], (3,), Device::Cpu);
+
+        // Act
+        let score = accuracy(&logits, &targets);
+
+        // Assert
+        assert!((score - 2.0 / 3.0).abs() < 1e-12, "score={score}");
+    }
+
+    #[test]
+    fn accuracy_ties_resolve_to_lowest_index() {
+        // Arrange
+        let logits = Tensor::from_vec(vec![1.0f32, 1.0], (1, 2), Device::Cpu);
+        let first = Tensor::from_vec(vec![0i64], (1,), Device::Cpu);
+        let second = Tensor::from_vec(vec![1i64], (1,), Device::Cpu);
+
+        // Act
+        let first_score = accuracy(&logits, &first);
+        let second_score = accuracy(&logits, &second);
+
+        // Assert
+        assert_eq!(first_score, 1.0);
+        assert_eq!(second_score, 0.0);
+    }
+
+    #[test]
+    fn accuracy_flattens_leading_batch_dims() {
+        // Arrange: [2, 2, 2] scores four predictions; the last row ties to index 0.
+        let logits = Tensor::from_vec(
+            vec![3.0f32, 1.0, 0.0, 5.0, 1.0, 4.0, 2.0, 2.0],
+            (2, 2, 2),
+            Device::Cpu,
+        );
+        let targets = Tensor::from_vec(vec![0i64, 1, 0, 0], (2, 2), Device::Cpu);
+
+        // Act
+        let score = accuracy(&logits, &targets);
+
+        // Assert
+        assert_eq!(score, 0.75);
+    }
+
+    #[test]
+    fn accuracy_matches_top_k_at_k_equals_one() {
+        // Arrange
+        let logits = Tensor::from_vec(
+            vec![2.0f32, 1.0, 0.5, 0.1, 0.9, 0.8, 1.0, 1.0, 1.0],
+            (3, 3),
+            Device::Cpu,
+        );
+        let targets = Tensor::from_vec(vec![0i64, 2, 1], (3,), Device::Cpu);
+
+        // Act
+        let top1 = accuracy(&logits, &targets);
+        let top_k = top_k_accuracy(&logits, &targets, 1);
+
+        // Assert
+        assert_eq!(top1, top_k);
+    }
+
+    #[test]
+    fn top_k_hits_when_target_ranked_inside() {
+        // Arrange: target class 2 ranks second, inside the top 2.
+        let logits = Tensor::from_vec(vec![3.0f32, 1.0, 2.0], (1, 3), Device::Cpu);
+        let targets = Tensor::from_vec(vec![2i64], (1,), Device::Cpu);
+
+        // Act
+        let score = top_k_accuracy(&logits, &targets, 2);
+
+        // Assert
+        assert_eq!(score, 1.0);
+    }
+
+    #[test]
+    fn top_k_misses_when_target_ranked_outside() {
+        // Arrange: target class 2 ranks second, outside the top 1.
+        let logits = Tensor::from_vec(vec![3.0f32, 1.0, 2.0], (1, 3), Device::Cpu);
+        let targets = Tensor::from_vec(vec![2i64], (1,), Device::Cpu);
+
+        // Act
+        let score = top_k_accuracy(&logits, &targets, 1);
+
+        // Assert
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn top_k_full_class_count_always_scores_one() {
+        // Arrange
+        let logits = Tensor::from_vec(vec![3.0f32, 1.0, 2.0, 0.0, 5.0, 1.0], (2, 3), Device::Cpu);
+        let targets = Tensor::from_vec(vec![2i64, 0], (2,), Device::Cpu);
+
+        // Act
+        let score = top_k_accuracy(&logits, &targets, 3);
+
+        // Assert
+        assert_eq!(score, 1.0);
+    }
+
+    #[test]
+    fn top_k_tie_at_cutoff_uses_index_order() {
+        // Arrange: classes 1 and 2 tie; index order puts class 1 first.
+        let logits = Tensor::from_vec(vec![5.0f32, 4.0, 4.0], (1, 3), Device::Cpu);
+        let tied_out = Tensor::from_vec(vec![2i64], (1,), Device::Cpu);
+        let tied_in = Tensor::from_vec(vec![1i64], (1,), Device::Cpu);
+
+        // Act
+        let misses = top_k_accuracy(&logits, &tied_out, 2);
+        let hits = top_k_accuracy(&logits, &tied_in, 2);
+        let top1 = top_k_accuracy(&logits, &tied_in, 1);
+
+        // Assert
+        assert_eq!(misses, 0.0);
+        assert_eq!(hits, 1.0);
+        assert_eq!(top1, 0.0);
+    }
+
+    #[test]
+    fn accuracy_scores_accelerator_logits_against_host_labels() {
+        // Arrange
+        let Some(device) = [Device::Cuda, Device::Mps].into_iter().find(|d| d.is_available())
+        else {
+            return;
+        };
+        let logits = Tensor::from_vec(vec![3.0f32, 1.0, 2.0, 0.0, 5.0, 1.0], (2, 3), device);
+        let host_labels = Tensor::from_vec(vec![0i64, 1], (2,), Device::Cpu);
+        let device_labels = Tensor::from_vec(vec![0i64, 1], (2,), device);
+
+        // Act
+        let host_score = accuracy(&logits, &host_labels);
+        let device_score = accuracy(&logits, &device_labels);
+        let topk_score = top_k_accuracy(&logits, &host_labels, 2);
+
+        // Assert
+        assert_eq!(host_score, 1.0);
+        assert_eq!(device_score, 1.0);
+        assert_eq!(topk_score, 1.0);
+    }
+
+    #[test]
+    fn score_model_follows_model_device() {
+        // Arrange
+        let Some(device) = [Device::Cuda, Device::Mps].into_iter().find(|d| d.is_available())
+        else {
+            return;
+        };
+        let mut model = crate::models::gpt::GPT::new(tiny_config(8), ParamStore::new().root());
+        model.to_device(device).unwrap();
+        assert_eq!(model.device(), device);
+
+        // Act
+        let report = score_model(&model, &[1, 2, 3, 4]);
+
+        // Assert
+        assert_eq!(report.n_tokens, 3);
+        assert!(report.perplexity.is_finite(), "perplexity={}", report.perplexity);
+        assert!(report.perplexity >= 1.0, "perplexity={}", report.perplexity);
+    }
+
+    #[test]
+    #[should_panic(expected = "k >= 1")]
+    fn top_k_zero_k_panics() {
+        // Arrange
+        let logits = Tensor::from_vec(vec![1.0f32, 2.0], (1, 2), Device::Cpu);
+        let targets = Tensor::from_vec(vec![0i64], (1,), Device::Cpu);
+
+        // Act
+        top_k_accuracy(&logits, &targets, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds")]
+    fn top_k_beyond_class_count_panics() {
+        // Arrange
+        let logits = Tensor::from_vec(vec![1.0f32, 2.0], (1, 2), Device::Cpu);
+        let targets = Tensor::from_vec(vec![0i64], (1,), Device::Cpu);
+
+        // Act
+        top_k_accuracy(&logits, &targets, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "targets must hold I64")]
+    fn accuracy_rejects_non_i64_targets() {
+        // Arrange
+        let logits = Tensor::from_vec(vec![1.0f32, 2.0], (1, 2), Device::Cpu);
+        let targets = Tensor::from_vec(vec![0.0f32], (1,), Device::Cpu);
+
+        // Act
+        accuracy(&logits, &targets);
+    }
+
+    #[test]
+    #[should_panic(expected = "must drop the logits class axis")]
+    fn accuracy_rejects_shape_mismatch() {
+        // Arrange
+        let logits = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cpu);
+        let targets = Tensor::from_vec(vec![0i64, 1, 0], (3,), Device::Cpu);
+
+        // Act
+        accuracy(&logits, &targets);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn accuracy_rejects_out_of_range_target() {
+        // Arrange
+        let logits = Tensor::from_vec(vec![1.0f32, 0.0], (1, 2), Device::Cpu);
+        let targets = Tensor::from_vec(vec![5i64], (1,), Device::Cpu);
+
+        // Act
+        accuracy(&logits, &targets);
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one prediction")]
+    fn accuracy_rejects_empty_batch() {
+        // Arrange
+        let logits = Tensor::zeros((0, 4), crate::DType::F32, Device::Cpu);
+        let targets = Tensor::from_vec(Vec::<i64>::new(), (0,), Device::Cpu);
+
+        // Act
+        accuracy(&logits, &targets);
     }
 
     #[test]
