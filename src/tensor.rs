@@ -379,9 +379,11 @@ impl Tensor {
 
     /// Copies `src` into this tensor's storage in place, keeping its identity.
     ///
-    /// Shape, dtype, and device must match. The copy runs on device, so a
-    /// resident decode buffer absorbs one scalar upload per step without a
-    /// fresh allocation per token.
+    /// Shape, dtype, and device must match, and the destination must be
+    /// compact: `src` elements land compactly from the start of this
+    /// tensor's buffer. The copy runs on device, so a resident decode
+    /// buffer absorbs one scalar upload per step without a fresh allocation
+    /// per token.
     pub fn copy_from(&self, src: &Tensor) -> Result<()> {
         if self.id() == src.id() {
             return Ok(());
