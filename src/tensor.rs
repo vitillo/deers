@@ -377,6 +377,29 @@ impl Tensor {
         Tensor::new(storage, Layout::from(self.layout().shape().clone()), false, None)
     }
 
+    /// Copies `src` into this tensor's storage in place, keeping its identity.
+    ///
+    /// Shape, dtype, and device must match. The copy runs on device, so a
+    /// resident decode buffer absorbs one scalar upload per step without a
+    /// fresh allocation per token.
+    pub fn copy_from(&self, src: &Tensor) -> Result<()> {
+        if self.id() == src.id() {
+            return Ok(());
+        }
+        assert_eq!(
+            self.layout().shape(),
+            src.layout().shape(),
+            "copy_from needs matching shapes"
+        );
+        assert_eq!(self.dtype(), src.dtype(), "copy_from needs matching dtypes");
+        assert_eq!(self.device(), src.device(), "copy_from needs matching devices");
+        // Clone the source storage before taking the write lock, so `src` may
+        // share storage with this tensor without deadlocking.
+        let src_storage = src.storage().clone();
+        src_storage.copy_compact(src.layout(), &mut self.storage_mut())?;
+        Ok(())
+    }
+
     /// Creates a tensor of ones with the same shape, dtype, and device.
     pub fn ones_like(&self) -> Tensor {
         Tensor::ones(self.layout().shape().clone(), self.dtype(), self.device())

@@ -3313,3 +3313,21 @@ fn where_i64_branches_conform() {
         assert_eq!(actual, expected, "where i64 on {:?}", device);
     }
 }
+
+#[test]
+fn copy_from_updates_buffer_in_place_on_each_device() {
+    // Arrange: a resident one-token buffer plus a staged id per device.
+    // Act + Assert
+    for device in devices() {
+        let buffer = Tensor::from_vec(vec![0i64], (1, 1), device);
+        let id = buffer.id();
+        buffer.copy_from(&Tensor::from_vec(vec![7i64], (1, 1), device)).unwrap();
+        assert_eq!(buffer.id(), id, "copy_from must keep the buffer identity on {device:?}");
+        assert_eq!(
+            buffer.to_vec::<i64>().unwrap(),
+            vec![7],
+            "copy_from must write the staged id on {device:?}"
+        );
+        assert_eq!(buffer.device(), device);
+    }
+}
