@@ -199,6 +199,21 @@ impl Layout {
     pub fn is_compact(&self) -> bool {
         self.offset == 0 && self.is_contiguous()
     }
+
+    /// Returns true when the elements occupy one linear span in view order.
+    ///
+    /// Length-1 dimensions never index storage, so narrowed or transposed
+    /// views keep their parent strides there without breaking contiguity.
+    /// A layout passing this check reads exactly the span
+    /// `[offset, offset + size)` element by element.
+    pub fn has_compact_strides(&self) -> bool {
+        let expected = self.shape.compact_strides();
+        self.shape
+            .iter()
+            .zip(expected.iter())
+            .zip(self.strides.iter())
+            .all(|((&len, &want), &got)| len <= 1 || want as isize == got)
+    }
 }
 
 impl From<Shape> for Layout {
