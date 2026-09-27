@@ -1321,19 +1321,21 @@ impl TensorOp for CacheAppend {
             grown <= buf_shape[2],
             "cache append overflows its buffer; grow first"
         );
-        let new_c = self.new.compact();
+        let out_layout = self.new.layout();
         {
             let mut buf_storage = self.buf.storage_mut();
             // One `[B, H, T_new, D]` slice lands in buffer rows
             // `[offset, offset + T_new)`: each of the B*H head runs copies
-            // T_new*D contiguous elements to its own buffer row.
+            // T_new*D view-order elements to its own buffer row, so repeat
+            // broadcast views feed straight in with no pre-compact.
             let blocks = buf_shape[0] * buf_shape[1];
             let block_len = new_shape[2] * buf_shape[3];
             let dst_base = self.offset * buf_shape[3];
             let dst_stride = buf_shape[2] * buf_shape[3];
+            let new_storage = self.new.storage();
             buf_storage.copy_blocks_into(
-                &new_c.storage(),
-                new_c.layout(),
+                &new_storage,
+                out_layout,
                 blocks,
                 block_len,
                 dst_base,
