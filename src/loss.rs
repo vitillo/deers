@@ -108,11 +108,11 @@ fn ignore_mask(
         keep_i64.where_cond(targets, &Tensor::zeros((batch,), crate::DType::I64, device));
     // The mask must match the loss dtype for the elementwise multiply.
     // Integer log-probs carry no gradient; the mask dtype is irrelevant.
-    let keep = keep_i64.to_dtype(loss_dtype);
+    let keep = keep_i64.to_dtype(loss_dtype).unwrap();
     // One scalar download for the mean divisor; the F32 sum of 0/1 flags is
     // exact for every batch that fits in memory.
     let kept =
-        keep_i64.to_dtype(crate::DType::F32).sum(vec![0], false).to_vec::<f32>().unwrap()[0]
+        keep_i64.to_dtype(crate::DType::F32).unwrap().sum(vec![0], false).to_vec::<f32>().unwrap()[0]
             as usize;
     (safe_targets, Some(keep), kept)
 }

@@ -380,7 +380,7 @@ fn grad_norm_in(parameters: &[Parameter], grads: &GradientStore, dtype: DType) -
         let Some(grad) = grads.get(parameter.id()) else {
             continue;
         };
-        let grad = grad.to_dtype(dtype);
+        let grad = grad.to_dtype(dtype).unwrap();
         let axes = (0..grad.layout().ndim()).collect::<Vec<_>>();
         total = &total + &(&grad * &grad).sum(axes, true);
     }
