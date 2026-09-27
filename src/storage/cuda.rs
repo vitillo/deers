@@ -370,7 +370,7 @@ mod imp {
         unsigned int base = (out_idx / inner * dim_size) * inner + out_idx % inner;
         unsigned int best = 0;
         for (unsigned int i = 1; i < dim_size; ++i) {
-            if (rank_value(src[base + i * inner]) > rank_value(src[base + best * inner])) best = i;
+            if (rank_gt(rank_value(src[base + i * inner]), rank_value(src[base + best * inner]))) best = i;
         }
         dst[out_idx] = (index_t)best;
     }
