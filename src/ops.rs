@@ -2156,119 +2156,54 @@ impl WhereCond {
     }
 }
 
+/// Picks from `on_true` where `cond` is nonzero, else from `on_false`, on device.
+///
+/// All three tensors share one dtype here; [`Tensor::where_cond`] casts mixed
+/// conditions into the branch dtype before calling this.
+fn select_tensors(cond: &Tensor, on_true: &Tensor, on_false: &Tensor) -> Tensor {
+    let storage = Arc::new(RwLock::new(
+        cond
+            .storage()
+            .select(
+                cond.layout(),
+                &on_true.storage(),
+                on_true.layout(),
+                &on_false.storage(),
+                on_false.layout(),
+            )
+            .unwrap(),
+    ));
+    Tensor::new(storage, Layout::from(on_true.layout().shape().clone()), false, None)
+}
+
 impl TensorOp for WhereCond {
     fn forward(self) -> Result<Tensor> {
         let inputs: Vec<&Tensor> = vec![&self.cond, &self.on_true, &self.on_false];
         let _profile =
             profile_output("where", &inputs, self.on_true.layout().size(), self.on_true.dtype());
-        let shape: Vec<usize> = self.on_true.layout().shape().iter().copied().collect();
-        let device = self.on_true.device();
-        let mask = cond_mask(&self.cond)?;
-        let out = match self.on_true.dtype() {
-            crate::DType::F32 => {
-                let t = self.on_true.to_vec::<f32>()?;
-                let f = self.on_false.to_vec::<f32>()?;
-                Tensor::from_vec(
-                    mask.iter()
-                        .enumerate()
-                        .map(|(i, m)| if *m { t[i] } else { f[i] })
-                        .collect::<Vec<f32>>(),
-                    shape,
-                    device,
-                )
-            }
-            crate::DType::F16 => {
-                let t = self.on_true.to_vec::<f16>()?;
-                let f = self.on_false.to_vec::<f16>()?;
-                Tensor::from_vec(
-                    mask.iter()
-                        .enumerate()
-                        .map(|(i, m)| if *m { t[i] } else { f[i] })
-                        .collect::<Vec<f16>>(),
-                    shape,
-                    device,
-                )
-            }
-            crate::DType::BF16 => {
-                let t = self.on_true.to_vec::<bf16>()?;
-                let f = self.on_false.to_vec::<bf16>()?;
-                Tensor::from_vec(
-                    mask.iter()
-                        .enumerate()
-                        .map(|(i, m)| if *m { t[i] } else { f[i] })
-                        .collect::<Vec<bf16>>(),
-                    shape,
-                    device,
-                )
-            }
-            crate::DType::I64 => {
-                let t = self.on_true.to_vec::<i64>()?;
-                let f = self.on_false.to_vec::<i64>()?;
-                Tensor::from_vec(
-                    mask.iter()
-                        .enumerate()
-                        .map(|(i, m)| if *m { t[i] } else { f[i] })
-                        .collect::<Vec<i64>>(),
-                    shape,
-                    device,
-                )
-            }
-        };
-        Ok(Tensor::new(out.storage_clone(), out.layout().clone(), false, Some(Box::new(self))))
+        let shape = self.on_true.layout().shape().clone();
+        let selector = self.cond.ne_scalar(0.0).to_dtype(self.on_true.dtype());
+        let storage = Arc::new(RwLock::new(selector.storage().select(
+            selector.layout(),
+            &self.on_true.storage(),
+            self.on_true.layout(),
+            &self.on_false.storage(),
+            self.on_false.layout(),
+        )?));
+        Ok(Tensor::new(storage, Layout::from(shape), false, Some(Box::new(self))))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let shape: Vec<usize> = self.on_true.layout().shape().iter().copied().collect();
-        let mask = cond_mask(&self.cond)?;
-        match self.on_true.dtype() {
-            crate::DType::F32 => {
-                let go = out_grad.to_vec::<f32>()?;
-                let zero = 0.0f32;
-                let gt: Vec<f32> =
-                    mask.iter().enumerate().map(|(i, m)| if *m { go[i] } else { zero }).collect();
-                let gf: Vec<f32> =
-                    mask.iter().enumerate().map(|(i, m)| if *m { zero } else { go[i] }).collect();
-                let device = self.on_true.device();
-                grads.accumulate(&self.on_true, Tensor::from_vec(gt, shape.clone(), device));
-                let device = self.on_false.device();
-                grads.accumulate(&self.on_false, Tensor::from_vec(gf, shape, device));
-            }
-            crate::DType::F16 => {
-                let go = out_grad.to_vec::<f16>()?;
-                let zero = f16::from_f32(0.0);
-                let gt: Vec<f16> =
-                    mask.iter().enumerate().map(|(i, m)| if *m { go[i] } else { zero }).collect();
-                let gf: Vec<f16> =
-                    mask.iter().enumerate().map(|(i, m)| if *m { zero } else { go[i] }).collect();
-                let device = self.on_true.device();
-                grads.accumulate(&self.on_true, Tensor::from_vec(gt, shape.clone(), device));
-                let device = self.on_false.device();
-                grads.accumulate(&self.on_false, Tensor::from_vec(gf, shape, device));
-            }
-            crate::DType::BF16 => {
-                let go = out_grad.to_vec::<bf16>()?;
-                let zero = bf16::ZERO;
-                let gt: Vec<bf16> =
-                    mask.iter().enumerate().map(|(i, m)| if *m { go[i] } else { zero }).collect();
-                let gf: Vec<bf16> =
-                    mask.iter().enumerate().map(|(i, m)| if *m { zero } else { go[i] }).collect();
-                let device = self.on_true.device();
-                grads.accumulate(&self.on_true, Tensor::from_vec(gt, shape.clone(), device));
-                let device = self.on_false.device();
-                grads.accumulate(&self.on_false, Tensor::from_vec(gf, shape, device));
-            }
-            crate::DType::I64 => {
-                let go = out_grad.to_vec::<i64>()?;
-                let gt: Vec<i64> =
-                    mask.iter().enumerate().map(|(i, m)| if *m { go[i] } else { 0 }).collect();
-                let gf: Vec<i64> =
-                    mask.iter().enumerate().map(|(i, m)| if *m { 0 } else { go[i] }).collect();
-                let device = self.on_true.device();
-                grads.accumulate(&self.on_true, Tensor::from_vec(gt, shape.clone(), device));
-                let device = self.on_false.device();
-                grads.accumulate(&self.on_false, Tensor::from_vec(gf, shape, device));
-            }
-        }
+        // Route the output gradient to the picked branch, zeroing the other.
+        // The selector is recomputed on device; no gradient flows into `cond`.
+        let selector = self.cond.ne_scalar(0.0).to_dtype(self.on_true.dtype());
+        let zeros = Tensor::zeros(
+            self.on_true.layout().shape().clone(),
+            self.on_true.dtype(),
+            self.on_true.device(),
+        );
+        grads.accumulate(&self.on_true, select_tensors(&selector, out_grad, &zeros));
+        grads.accumulate(&self.on_false, select_tensors(&selector, &zeros, out_grad));
         Ok(())
     }
 

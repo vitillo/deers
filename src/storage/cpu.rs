@@ -467,6 +467,68 @@ impl BackendStorage for CpuStorage {
         }
     }
 
+    fn select(
+        &self,
+        cond_layout: &Layout,
+        on_true: &Self,
+        true_layout: &Layout,
+        on_false: &Self,
+        false_layout: &Layout,
+    ) -> Result<Self> {
+        match (self, on_true, on_false) {
+            (CpuStorage::F16(_), CpuStorage::F16(_), CpuStorage::F16(_)) => {
+                Ok(CpuStorage::F16(
+                    self.iter(cond_layout)
+                        .zip(on_true.iter(true_layout))
+                        .zip(on_false.iter(false_layout))
+                        .map(|((c, t), f): ((&f16, &f16), &f16)| {
+                            if c.to_f32() != 0.0 { *t } else { *f }
+                        })
+                        .collect(),
+                ))
+            }
+            (CpuStorage::BF16(_), CpuStorage::BF16(_), CpuStorage::BF16(_)) => {
+                Ok(CpuStorage::BF16(
+                    self.iter(cond_layout)
+                        .zip(on_true.iter(true_layout))
+                        .zip(on_false.iter(false_layout))
+                        .map(|((c, t), f): ((&bf16, &bf16), &bf16)| {
+                            if c.to_f32() != 0.0 { *t } else { *f }
+                        })
+                        .collect(),
+                ))
+            }
+            (CpuStorage::F32(_), CpuStorage::F32(_), CpuStorage::F32(_)) => {
+                Ok(CpuStorage::F32(
+                    self.iter(cond_layout)
+                        .zip(on_true.iter(true_layout))
+                        .zip(on_false.iter(false_layout))
+                        .map(|((c, t), f): ((&f32, &f32), &f32)| {
+                            if *c != 0.0 { *t } else { *f }
+                        })
+                        .collect(),
+                ))
+            }
+            (CpuStorage::I64(_), CpuStorage::I64(_), CpuStorage::I64(_)) => {
+                Ok(CpuStorage::I64(
+                    self.iter(cond_layout)
+                        .zip(on_true.iter(true_layout))
+                        .zip(on_false.iter(false_layout))
+                        .map(|((c, t), f): ((&i64, &i64), &i64)| {
+                            if *c != 0 { *t } else { *f }
+                        })
+                        .collect(),
+                ))
+            }
+            _ => Err(Error::DTypeMismatch(format!(
+                "select: {:?} vs {:?} vs {:?}",
+                self.dtype(),
+                on_true.dtype(),
+                on_false.dtype()
+            ))),
+        }
+    }
+
     fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
         if !layout.is_compact() {
             return Err(Error::LayoutMismatch("reduce: layout must be compact".into()));
