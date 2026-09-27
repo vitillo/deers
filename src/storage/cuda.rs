@@ -674,7 +674,7 @@ mod imp {
         unsigned int row = blockIdx.x;
         unsigned int htq = hq * tq;
         if (row >= b * htq) return;
-        __shared__ float smem[REDUCE_THREADS];
+        __shared__ float smem[1024];
         unsigned int bb = row / htq;
         unsigned int hqq = (row / tq) % hq;
         unsigned int tqq = row % tq;
@@ -1185,6 +1185,24 @@ mod imp {
         }};
     }
 
+    macro_rules! launch_mha {
+        ($runtime:expr, $kernel:expr, $outer_size:expr, $($arg:expr),+ $(,)?) => {{
+            let func = $runtime.load_function($kernel)?;
+            let mut builder = $runtime.stream.launch_builder(&func);
+            $(builder.arg($arg);)+
+            let cfg = LaunchConfig {
+                grid_dim: ($outer_size as u32, 1, 1),
+                block_dim: (1024, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            maybe_profile_launch($runtime, || {
+                unsafe { builder.launch(cfg) }
+                    .map_err(|err| Error::Cuda(format!("kernel launch failed for {}: {err}", $kernel)))?;
+                Ok(())
+            })?;
+        }};
+    }
+
     fn strided_meta(layout: &Layout) -> StridedMeta {
         assert!(layout.ndim() <= MAX_DIMS, "cuda backend supports at most {MAX_DIMS} dims");
         let mut shape = [1u32; MAX_DIMS];
@@ -1464,14 +1482,14 @@ mod imp {
             }
         }
 
-        fn compact(&self, layout: &Layout) -> Result<Self> {
+        fn compact(&self, layout: &Layout) -> Result<std::borrow::Cow<'_, Self>> {
             if layout.is_compact() && layout.offset == 0 && layout.size() == self.len() {
-                return Ok(self.clone());
+                return Ok(std::borrow::Cow::Borrowed(self));
             }
             // copy_compact writes every element, so no zeroing needed.
             let mut out = Self::uninit(layout.size(), self.dtype())?;
             self.copy_compact(layout, &mut out)?;
-            Ok(out)
+            Ok(std::borrow::Cow::Owned(out))
         }
 
         fn launch_unary_f16(&self, kernel: &str, src: &CudaSlice<f16>) -> Result<Self> {
@@ -1980,19 +1998,20 @@ mod imp {
 
             // Try to use each operand directly (CUBLAS_OP_T for transposed layouts) to avoid
             // copying. Fall back to compact for layouts with non-standard strides.
-            let lhs_compact: Option<CudaStorage> = if try_gemm_params(layout, m, k).is_none() {
+            let lhs_compact: Option<std::borrow::Cow<'_, CudaStorage>> =
+                if try_gemm_params(layout, m, k).is_none() {
                 Some(self.compact(layout)?)
             } else {
                 None
             };
-            let rhs_compact: Option<CudaStorage> = if try_gemm_params(layout_other, k, n).is_none()
-            {
+            let rhs_compact: Option<std::borrow::Cow<'_, CudaStorage>> =
+                if try_gemm_params(layout_other, k, n).is_none() {
                 Some(other.compact(layout_other)?)
             } else {
                 None
             };
-            let lhs_storage: &CudaStorage = lhs_compact.as_ref().unwrap_or(self);
-            let rhs_storage: &CudaStorage = rhs_compact.as_ref().unwrap_or(other);
+            let lhs_storage: &CudaStorage = lhs_compact.as_deref().unwrap_or(self);
+            let rhs_storage: &CudaStorage = rhs_compact.as_deref().unwrap_or(other);
             // If we compacted, the result is always normal row-major (CUBLAS_OP_N, offset=0).
             let (transb, ldb, lhs_bs, lhs_offset) = if lhs_compact.is_some() {
                 (cublasOperation_t::CUBLAS_OP_N, k as i32, (m * k) as i64, 0usize)
@@ -2876,7 +2895,7 @@ mod imp {
             match (&self.inner, &k.inner, &v.inner, &mask.inner) {
                 (CudaInner::F16(q), CudaInner::F16(k), CudaInner::F16(v), CudaInner::F16(m)) => {
                     let out = unsafe { alloc_uninit::<f16>(&self.runtime, outer * d) }?;
-                    launch_reduce!(
+                    launch_mha!(
                         &self.runtime, "mha_fwd_f16", outer,
                         q, k, v, m, &out, &probs, &scale,
                         &args[0], &args[1], &args[2], &args[3], &args[4], &args[5],
@@ -2888,7 +2907,7 @@ mod imp {
                 }
                 (CudaInner::BF16(q), CudaInner::BF16(k), CudaInner::BF16(v), CudaInner::BF16(m)) => {
                     let out = unsafe { alloc_uninit::<bf16>(&self.runtime, outer * d) }?;
-                    launch_reduce!(
+                    launch_mha!(
                         &self.runtime, "mha_fwd_bf16", outer,
                         q, k, v, m, &out, &probs, &scale,
                         &args[0], &args[1], &args[2], &args[3], &args[4], &args[5],
@@ -2900,7 +2919,7 @@ mod imp {
                 }
                 (CudaInner::F32(q), CudaInner::F32(k), CudaInner::F32(v), CudaInner::F32(m)) => {
                     let out = unsafe { alloc_uninit::<f32>(&self.runtime, outer * d) }?;
-                    launch_reduce!(
+                    launch_mha!(
                         &self.runtime, "mha_fwd_f32", outer,
                         q, k, v, m, &out, &probs, &scale,
                         &args[0], &args[1], &args[2], &args[3], &args[4], &args[5],
@@ -3201,7 +3220,7 @@ mod imp {
             // each, and the copy itself stays on-device via the copy_compact kernel.
             let compact = self.compact(layout)?;
             if compact.dtype() == dtype {
-                return Ok(compact);
+                return Ok(compact.into_owned());
             }
             match (&compact.inner, dtype) {
                 (CudaInner::F16(src), DType::F32) => {
