@@ -2048,6 +2048,13 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
+        fn silu_mul_fwd(&self, layout: &Layout, up: &Self, up_layout: &Layout) -> Result<Self> {
+            // No Metal SiLU-gate kernel yet: round-trip through the CPU fallback.
+            let inner =
+                self.as_cpu_storage().silu_mul_fwd(layout, &up.as_cpu_storage(), up_layout)?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
         fn copy_blocks_into(
             &mut self,
             src: &Self,
@@ -2473,6 +2480,9 @@ mod imp {
             Self::unavailable()
         }
         fn silu_fwd(&self, _: &Layout) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn silu_mul_fwd(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
             Self::unavailable()
         }
         fn copy_blocks_into(

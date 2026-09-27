@@ -1465,6 +1465,61 @@ impl BackendStorage for CpuStorage {
         }
     }
 
+    fn silu_mul_fwd(
+        &self,
+        layout: &Layout,
+        up: &Self,
+        up_layout: &Layout,
+    ) -> crate::error::Result<Self> {
+        assert!(layout.is_compact());
+        assert!(up_layout.is_compact());
+        assert_eq!(layout.size(), up_layout.size());
+        let gate: Vec<f32> = match self {
+            CpuStorage::F32(data) => data[layout.offset..].to_vec(),
+            CpuStorage::F16(data) => data[layout.offset..].iter().map(|v| v.to_f32()).collect(),
+            CpuStorage::BF16(data) => data[layout.offset..].iter().map(|v| v.to_f32()).collect(),
+            CpuStorage::I64(_) => {
+                return Err(crate::error::Error::DTypeMismatch(
+                    "silu_mul_fwd: i64 is not supported, use a float dtype".into(),
+                ));
+            }
+        };
+        let up_vals: Vec<f32> = match up {
+            CpuStorage::F32(data) => data[up_layout.offset..].to_vec(),
+            CpuStorage::F16(data) => {
+                data[up_layout.offset..].iter().map(|v| v.to_f32()).collect()
+            }
+            CpuStorage::BF16(data) => {
+                data[up_layout.offset..].iter().map(|v| v.to_f32()).collect()
+            }
+            CpuStorage::I64(_) => {
+                return Err(crate::error::Error::DTypeMismatch(
+                    "silu_mul_fwd: i64 is not supported, use a float dtype".into(),
+                ));
+            }
+        };
+        assert_eq!(gate.len(), layout.size());
+        assert_eq!(up_vals.len(), layout.size());
+        let out: Vec<f32> = gate
+            .iter()
+            .zip(up_vals.iter())
+            .map(|(&g, &u)| g / (1.0 + (-g).exp()) * u)
+            .collect();
+        match (self, up) {
+            (CpuStorage::F32(_), CpuStorage::F32(_)) => Ok(CpuStorage::F32(out)),
+            (CpuStorage::F16(_), CpuStorage::F16(_)) => {
+                use half::f16;
+                Ok(CpuStorage::F16(out.iter().map(|&v| f16::from_f32(v)).collect()))
+            }
+            (CpuStorage::BF16(_), CpuStorage::BF16(_)) => Ok(CpuStorage::BF16(
+                out.iter().map(|&v| bf16::from_f32(v)).collect(),
+            )),
+            _ => Err(crate::error::Error::DTypeMismatch(
+                "silu_mul_fwd: dtype mismatch between gate and up".into(),
+            )),
+        }
+    }
+
     fn copy_blocks_into(
         &mut self,
         src: &Self,
