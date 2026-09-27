@@ -2042,6 +2042,12 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
+        fn silu_fwd(&self, layout: &Layout) -> Result<Self> {
+            // No Metal SiLU kernel yet: round-trip through the CPU fallback.
+            let inner = self.as_cpu_storage().silu_fwd(layout)?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
         fn dtype(&self) -> DType {
             match &self.inner {
                 MpsInner::Accelerated { dtype, .. } => *dtype,
@@ -2440,6 +2446,9 @@ mod imp {
             _: usize,
             _: usize,
         ) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn silu_fwd(&self, _: &Layout) -> Result<Self> {
             Self::unavailable()
         }
         fn dtype(&self) -> DType {

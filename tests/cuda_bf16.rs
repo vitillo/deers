@@ -771,3 +771,38 @@ fn fused_rope_forward_and_backward_match_unfused() {
         assert_close(&actual_grad, &expected_grad, &format!("{label} bwd"));
     }
 }
+
+#[test]
+fn fused_silu_forward_and_backward_match_unfused() {
+    // Arrange
+    if !require_cuda() {
+        return;
+    }
+    for (rows, cols) in [(2usize, 1000usize), (1, 3072)] {
+        let values: Vec<f32> =
+            (0..rows * cols).map(|i| ((i * 41) % 97) as f32 / 24.0 - 2.0).collect();
+        let mk = |device: deers::Device| {
+            Tensor::from_vec(
+                values.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+                vec![rows, cols],
+                device,
+            )
+            .attach()
+        };
+        let cpu = mk(Device::Cpu);
+        let cuda = mk(Device::Cuda);
+
+        // Act: fused on CUDA against neg/exp/add/div/mul on CPU.
+        let expected_fwd = to_f32(&(&cpu * &cpu.sigmoid()));
+        let actual_fwd = to_f32(&cuda.silu());
+        let cpu_loss = (&cpu * &cpu.sigmoid()).sum(vec![0, 1], true);
+        let cuda_loss = cuda.silu().sum(vec![0, 1], true);
+        let expected_grad = to_f32(&cpu_loss.backward().unwrap().get(cpu.id()).unwrap());
+        let actual_grad = to_f32(&cuda_loss.backward().unwrap().get(cuda.id()).unwrap());
+
+        // Assert
+        let label = format!("fused silu [{rows}, {cols}]");
+        assert_close(&actual_fwd, &expected_fwd, &format!("{label} fwd"));
+        assert_close(&actual_grad, &expected_grad, &format!("{label} bwd"));
+    }
+}

@@ -553,6 +553,19 @@ mod imp {
     extern "C" __global__ void rope_fwd_f16(const half* x, const half* cos, const half* sin, half* dst, unsigned int outer_size, unsigned int head_dim, unsigned int n_heads, unsigned int t_len, unsigned int cos_t_len) { rope_fwd_kernel(x, cos, sin, dst, outer_size, head_dim, n_heads, t_len, cos_t_len); }
     extern "C" __global__ void rope_fwd_bf16(const __nv_bfloat16* x, const __nv_bfloat16* cos, const __nv_bfloat16* sin, __nv_bfloat16* dst, unsigned int outer_size, unsigned int head_dim, unsigned int n_heads, unsigned int t_len, unsigned int cos_t_len) { rope_fwd_kernel(x, cos, sin, dst, outer_size, head_dim, n_heads, t_len, cos_t_len); }
 
+    // Fused SiLU forward: dst[i] = src[i] / (1 + exp(-src[i])), fp32 math.
+    template <typename T>
+    __global__ void silu_fwd_kernel(const T* src, T* dst, unsigned int size) {
+        unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+        if (i >= size) return;
+        float v = to_float(src[i]);
+        dst[i] = from_float<T>(v / (1.0f + expf(-v)));
+    }
+
+    extern "C" __global__ void silu_fwd_f32(const float* src, float* dst, unsigned int size) { silu_fwd_kernel(src, dst, size); }
+    extern "C" __global__ void silu_fwd_f16(const half* src, half* dst, unsigned int size) { silu_fwd_kernel(src, dst, size); }
+    extern "C" __global__ void silu_fwd_bf16(const __nv_bfloat16* src, __nv_bfloat16* dst, unsigned int size) { silu_fwd_kernel(src, dst, size); }
+
     template <typename T>
     __global__ void gather_kernel(const T* src, const index_t* indices, T* dst, unsigned int left_len, unsigned int src_dim, unsigned int dst_dim, unsigned int right_len) {
         unsigned int right = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2285,7 +2298,35 @@ mod imp {
             }
         }
 
-        /// Fused RoPE forward over `[B, T, H, D]` rows: `y1 = x1*cos - x2*sin`,
+        /// Fused SiLU forward: `dst[i] = src[i] / (1 + exp(-src[i]))`.
+        ///
+        /// `layout.size()` elements are read in compact order and written to a
+        /// fresh compact buffer.
+        fn silu_fwd(&self, layout: &Layout) -> Result<Self> {
+            let src = self.compact(layout)?;
+            let len = layout.size();
+            let len_u32 = len as u32;
+            match &src.inner {
+                CudaInner::F16(s) => {
+                    let out = unsafe { alloc_uninit::<f16>(&src.runtime, len) }?;
+                    launch_1d!(&src.runtime, "silu_fwd_f16", len, s, &out, &len_u32);
+                    Ok(Self { inner: CudaInner::F16(out), runtime: src.runtime.clone() })
+                }
+                CudaInner::BF16(s) => {
+                    let out = unsafe { alloc_uninit::<bf16>(&src.runtime, len) }?;
+                    launch_1d!(&src.runtime, "silu_fwd_bf16", len, s, &out, &len_u32);
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: src.runtime.clone() })
+                }
+                CudaInner::F32(s) => {
+                    let out = unsafe { alloc_uninit::<f32>(&src.runtime, len) }?;
+                    launch_1d!(&src.runtime, "silu_fwd_f32", len, s, &out, &len_u32);
+                    Ok(Self { inner: CudaInner::F32(out), runtime: src.runtime.clone() })
+                }
+                CudaInner::I64(_) => {
+                    Err(Error::NotImplemented("cuda silu_fwd for i64 is not implemented"))
+                }
+            }
+        }
         /// `y2 = x1*sin + x2*cos`, with the cos/sin row selected per token.
         ///
         /// `outer_size * head_dim` must equal `layout.size()`. Every input is
@@ -2760,6 +2801,9 @@ mod imp {
             _: usize,
             _: usize,
         ) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn silu_fwd(&self, _: &Layout) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn dtype(&self) -> DType {

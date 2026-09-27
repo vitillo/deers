@@ -580,6 +580,11 @@ impl Tensor {
 
     /// Element-wise SiLU (swish): `x * sigmoid(x)`.
     pub fn silu(&self) -> Tensor {
+        // Decode is launch-bound on this chain, so CUDA runs one fused kernel
+        // while every other device keeps the primitive decomposition.
+        if self.device() == crate::device::Device::Cuda {
+            return ops::FusedSilu::new(self.clone()).unwrap().forward().unwrap();
+        }
         self * &self.sigmoid()
     }
 

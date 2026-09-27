@@ -1276,6 +1276,59 @@ impl TensorOp for FusedRope {
     }
 }
 
+/// Fused SiLU: `x / (1 + exp(-x))`, one CUDA kernel.
+///
+/// Replaces the neg/exp/scalar-add/div/mul chain plus the broadcast compact
+/// in `sigmoid`. The backward reuses the unfused primitive decomposition
+/// (training only; decode runs under `no_grad`), so no fused backward exists.
+#[derive(Debug)]
+pub struct FusedSilu {
+    arg: Tensor,
+    /// Saved compacted input for the backward pass.
+    saved: Option<Tensor>,
+}
+
+impl FusedSilu {
+    pub fn new(arg: Tensor) -> Result<Self> {
+        Ok(Self { arg, saved: None })
+    }
+}
+
+impl TensorOp for FusedSilu {
+    fn forward(mut self) -> Result<Tensor> {
+        let _profile = profile_like("silu", &self.arg);
+        let input = self.arg.compact();
+        let out_storage = {
+            let storage = input.storage();
+            storage.silu_fwd(input.layout())?
+        };
+        let output =
+            Tensor::new(Arc::new(RwLock::new(out_storage)), self.arg.layout().clone(), false, None);
+        self.saved = Some(input);
+        Ok(Tensor::new(
+            output.storage_clone(),
+            output.layout().clone(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let input = self.saved.as_ref().expect("forward must run before backward");
+        // y = x*sig(x); dy/dx = sig(x) * (1 + x * (1 - sig(x))).
+        let grad_c = out_grad.compact();
+        let sig = input.sigmoid();
+        let one_minus_sig = (&sig * -1.0) + 1.0;
+        let inner = (input * &one_minus_sig) + 1.0;
+        grads.accumulate(&self.arg, &grad_c * &(&sig * &inner));
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
 /// Fused RMSNorm over the last axis: `x * rsqrt(mean(x^2) + eps) * w`, one fused kernel per row on CPU and CUDA (MPS fails loudly until a Metal kernel lands).
 ///
 /// The forward compacts the input and reads the affine scale straight from the
