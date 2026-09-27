@@ -5,8 +5,8 @@
 - Prefer the simplest approach that works.
 - Keep the code easy to follow for someone learning how tensor libraries are built.
 - Compose from existing primitives unless a lower-level implementation avoids a real backend cost.
-- Be reasonably efficient on every backend. Avoid unnecessary CPU <-> accelerator copies or materialization roundtrips when work can stay on-device.
-- Follow PyTorch and candle conventions for API shape and placement when they fit the project goals.
+- Be reasonably efficient on every backend. Hot paths must never stage through host memory (no `to_vec`/`from_vec` roundtrips for casts, moves, or per-token generation work); implement per-backend on-device paths instead.
+- Follow PyTorch and candle conventions for API shape and placement when they fit the project goals; compare API choices against both for inspiration before inventing new ones.
 - Build incrementally: one small piece at a time.
 - Prioritize correctness, with tests for new behavior and gradients where applicable.
 
