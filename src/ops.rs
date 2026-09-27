@@ -1802,7 +1802,7 @@ fn topk_positions_f32(
     inner: usize,
     k: usize,
 ) -> Vec<usize> {
-    let mut out = Vec::with_capacity(outer * k * inner);
+    let mut out = vec![0; outer * k * inner];
     for o in 0..outer {
         for j in 0..inner {
             let base = (o * dim_size) * inner + j;
@@ -1812,8 +1812,8 @@ fn topk_positions_f32(
                     .partial_cmp(&vals[base + a * inner])
                     .unwrap_or(Ordering::Greater)
             });
-            for &i in order.iter().take(k) {
-                out.push(base + i * inner);
+            for (r, &i) in order.iter().take(k).enumerate() {
+                out[(o * k + r) * inner + j] = base + i * inner;
             }
         }
     }
@@ -1902,14 +1902,14 @@ pub fn topk_forward(arg: &Tensor, k: usize, dim: usize) -> Result<(Tensor, Tenso
         }
         crate::DType::I64 => {
             let vals = arg.to_vec::<i64>()?;
-            let mut pos = Vec::with_capacity(outer * k * inner);
+            let mut pos = vec![0; outer * k * inner];
             for o in 0..outer {
                 for j in 0..inner {
                     let base = (o * dim_size) * inner + j;
                     let mut order: Vec<usize> = (0..dim_size).collect();
                     order.sort_by(|&a, &b| vals[base + b * inner].cmp(&vals[base + a * inner]));
-                    for &i in order.iter().take(k) {
-                        pos.push(base + i * inner);
+                    for (r, &i) in order.iter().take(k).enumerate() {
+                        pos[(o * k + r) * inner + j] = base + i * inner;
                     }
                 }
             }

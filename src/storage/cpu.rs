@@ -326,7 +326,7 @@ fn rank_positions<V: PartialOrd>(
     k: usize,
     descending: bool,
 ) -> Vec<(usize, i64)> {
-    let mut out = Vec::with_capacity(outer * k * inner);
+    let mut out = vec![(0, 0i64); outer * k * inner];
     for o in 0..outer {
         for j in 0..inner {
             let base = (o * dim_size) * inner + j;
@@ -344,8 +344,8 @@ fn rank_positions<V: PartialOrd>(
                         .unwrap_or(Ordering::Greater)
                 });
             }
-            for &i in order.iter().take(k) {
-                out.push((base + i * inner, i as i64));
+            for (r, &i) in order.iter().take(k).enumerate() {
+                out[(o * k + r) * inner + j] = (base + i * inner, i as i64);
             }
         }
     }
