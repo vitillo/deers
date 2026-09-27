@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use candle_core::{D, Device as CDevice, Tensor as CTensor};
 use candle_nn::ops as candle_ops;
-use deers::models::gpt;
+use deers::models::qwen3;
 use deers::nn::{ParamStore, Parameter};
 use deers::{Device, Tensor};
 
@@ -167,9 +167,9 @@ fn named_candle_weights(params: &[(String, Parameter)]) -> BTreeMap<String, CTen
         .collect()
 }
 
-fn small_block() -> (gpt::Qwen3Block, Vec<(String, Parameter)>) {
+fn small_block() -> (qwen3::Qwen3Block, Vec<(String, Parameter)>) {
     let store = ParamStore::new();
-    let block = gpt::Qwen3Block::new(store.root(), 8, 4, 2, 4, 16, 1e-6);
+    let block = qwen3::Qwen3Block::new(store.root(), 8, 4, 2, 4, 16, 1e-6);
     let named = store.named_parameters();
     (block, named)
 }
@@ -181,7 +181,7 @@ fn qwen3_block_matches_candle_reference() {
     let (batch_size, seq_len) = (2, 3);
     let values = det_vec(batch_size * seq_len * 8);
     let x = Tensor::from_vec(values.clone(), (batch_size, seq_len, 8), Device::Cpu);
-    let (cos, sin) = gpt::precompute_rotary_embeddings(3, 4, 10_000.0, deers::DType::F32, Device::Cpu);
+    let (cos, sin) = qwen3::precompute_rotary_embeddings(3, 4, 10_000.0, deers::DType::F32, Device::Cpu);
     let (ccos, csin) = candle_rope_cache(3, 4, 10_000.0);
     let weights = named_candle_weights(&named);
     let expected = candle_qwen3_block(&candle_tensor(values, &[2, 3, 8]), &weights, &ccos, &csin, 4, 2, 4)
@@ -201,10 +201,10 @@ fn qwen3_block_matches_candle_reference() {
 fn qwen3_block_full_dims_shape_and_param_names() {
     // Arrange: Qwen3-0.6B block dims with a tiny two-token input.
     let store = ParamStore::new();
-    let block = gpt::Qwen3Block::new(store.root(), 1024, 16, 8, 128, 3072, 1e-6);
+    let block = qwen3::Qwen3Block::new(store.root(), 1024, 16, 8, 128, 3072, 1e-6);
     let x = Tensor::from_vec(det_vec(2 * 1024), (1, 2, 1024), Device::Cpu);
     let (cos, sin) =
-        gpt::precompute_rotary_embeddings(2, 128, 1_000_000.0, deers::DType::F32, Device::Cpu);
+        qwen3::precompute_rotary_embeddings(2, 128, 1_000_000.0, deers::DType::F32, Device::Cpu);
 
     // Act
     let out = block.forward(&x, &cos, &sin).unwrap();
@@ -263,7 +263,7 @@ fn qwen3_block_residual_carry_through() {
     }
     let values = det_vec(2 * 8);
     let x = Tensor::from_vec(values.clone(), (1, 2, 8), Device::Cpu);
-    let (cos, sin) = gpt::precompute_rotary_embeddings(2, 4, 10_000.0, deers::DType::F32, Device::Cpu);
+    let (cos, sin) = qwen3::precompute_rotary_embeddings(2, 4, 10_000.0, deers::DType::F32, Device::Cpu);
 
     // Act
     let actual = block.forward(&x, &cos, &sin).unwrap().to_vec::<f32>().unwrap();
@@ -277,7 +277,7 @@ fn qwen3_block_backward_reaches_all_parameters() {
     // Arrange
     let (block, named) = small_block();
     let x = Tensor::from_vec(det_vec(2 * 8), (1, 2, 8), Device::Cpu);
-    let (cos, sin) = gpt::precompute_rotary_embeddings(2, 4, 10_000.0, deers::DType::F32, Device::Cpu);
+    let (cos, sin) = qwen3::precompute_rotary_embeddings(2, 4, 10_000.0, deers::DType::F32, Device::Cpu);
 
     // Act
     let loss = block.forward(&x, &cos, &sin).unwrap().sum(vec![0, 1, 2], false);
@@ -309,9 +309,9 @@ fn qwen3_block_backward_reaches_all_parameters() {
 fn qwen3_block_plain_head_count_runs() {
     // Arrange: query heads equal key/value heads, so no repeat applies.
     let store = ParamStore::new();
-    let block = gpt::Qwen3Block::new(store.root(), 8, 4, 4, 4, 8, 1e-6);
+    let block = qwen3::Qwen3Block::new(store.root(), 8, 4, 4, 4, 8, 1e-6);
     let x = Tensor::from_vec(det_vec(2 * 8), (1, 2, 8), Device::Cpu);
-    let (cos, sin) = gpt::precompute_rotary_embeddings(2, 4, 10_000.0, deers::DType::F32, Device::Cpu);
+    let (cos, sin) = qwen3::precompute_rotary_embeddings(2, 4, 10_000.0, deers::DType::F32, Device::Cpu);
 
     // Act
     let out = block.forward(&x, &cos, &sin).unwrap();

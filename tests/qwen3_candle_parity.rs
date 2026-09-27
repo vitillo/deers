@@ -5,7 +5,7 @@ use candle_core::{DType as CDType, Device as CDevice, Tensor as CTensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::qwen3::{Config as CandleQwen3Config, ModelForCausalLM};
 use deers::checkpoint::map_qwen_name;
-use deers::models::gpt::{Qwen3, Qwen3Config};
+use deers::models::qwen3::{Qwen3, Qwen3Config};
 use deers::nn::ParamStore;
 use deers::tokenizer::{ChatMessage, Qwen3Tokenizer, Tokenizer};
 use deers::{Device, Tensor, no_grad};

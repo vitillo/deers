@@ -1,4 +1,4 @@
-use deers::models::gpt::{CausalSelfAttention, apply_rotary_emb, precompute_rotary_embeddings};
+use deers::models::gpt2::{CausalSelfAttention, apply_rotary_emb, precompute_rotary_embeddings};
 use deers::nn::{ParamStore, Parameter, functional};
 use deers::{DType, Device, Tensor};
 

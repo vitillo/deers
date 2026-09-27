@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use deers::models::gpt::{KvCache, Qwen3, Qwen3Config, RopeScaling};
+use deers::models::qwen3::{KvCache, Qwen3, Qwen3Config, RopeScaling};
 use deers::nn::{ParamStore, Parameter};
 use deers::sample::SamplingConfig;
 use deers::{DType, Device, Tensor, no_grad};
