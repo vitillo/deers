@@ -862,3 +862,55 @@ fn fused_silu_mul_forward_and_backward_match_unfused() {
         assert_close(&actual_gu, &expected_gu, &format!("{label} bwd up"));
     }
 }
+
+#[test]
+fn fused_masked_softmax_forward_and_backward_match_unfused() {
+    // Arrange: a small multi-query case plus the decode-shaped case
+    // (16 heads, one query, 513 keys).
+    if !require_cuda() {
+        return;
+    }
+    for (b, h, tq, tk, tm) in [(1usize, 2, 3, 130, 3), (1, 16, 1, 513, 1)] {
+        let svals: Vec<f32> = (0..b * h * tq * tk)
+            .map(|i| ((i * 31) % 79) as f32 / 79.0 * 4.0 - 2.0)
+            .collect();
+        // Row-dependent triangle: row r allows keys 0..=r plus a dense
+        // tail, so a wrong mask-row mapping cannot hide behind uniformity.
+        let mvals: Vec<f32> = (0..tm * tk)
+            .map(|i| {
+                let (r, c) = (i / tk, i % tk);
+                if c > r && c % 3 == 0 { f32::NEG_INFINITY } else { 0.0 }
+            })
+            .collect();
+        let mk = |vals: &[f32], shape: Vec<usize>, device: deers::Device| {
+            Tensor::from_vec(
+                vals.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+                shape,
+                device,
+            )
+            .attach()
+        };
+        let s_cpu = mk(&svals, vec![b, h, tq, tk], Device::Cpu);
+        let m_cpu = mk(&mvals, vec![1, 1, tm, tk], Device::Cpu);
+        let s_cuda = mk(&svals, vec![b, h, tq, tk], Device::Cuda);
+        let m_cuda = mk(&mvals, vec![1, 1, tm, tk], Device::Cuda);
+        let scale = 0.08838834764831845f64;
+
+        // Act
+        let expected_fwd = to_f32(&((&s_cpu * scale) + &m_cpu).softmax(3));
+        let actual_fwd = to_f32(&s_cuda.scaled_masked_softmax(&m_cuda, scale, 3));
+        let cpu_loss = ((&s_cpu * scale) + &m_cpu).softmax(3).sum(vec![0, 1, 2, 3], true);
+        let cuda_loss =
+            s_cuda.scaled_masked_softmax(&m_cuda, scale, 3).sum(vec![0, 1, 2, 3], true);
+        let expected_grad = to_f32(&cpu_loss.backward().unwrap().get(s_cpu.id()).unwrap());
+        let actual_grad = to_f32(&cuda_loss.backward().unwrap().get(s_cuda.id()).unwrap());
+        let expected_gm = to_f32(&cpu_loss.backward().unwrap().get(m_cpu.id()).unwrap());
+        let actual_gm = to_f32(&cuda_loss.backward().unwrap().get(m_cuda.id()).unwrap());
+
+        // Assert
+        let label = format!("fused masked_softmax [{b}, {h}, {tq}, {tk}]");
+        assert_close(&actual_fwd, &expected_fwd, &format!("{label} fwd"));
+        assert_close(&actual_grad, &expected_grad, &format!("{label} bwd"));
+        assert_close(&actual_gm, &expected_gm, &format!("{label} bwd mask"));
+    }
+}

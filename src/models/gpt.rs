@@ -491,8 +491,10 @@ impl CausalSelfAttention {
         seq_len: usize,
     ) -> Result<Tensor> {
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let scores = Tensor::einsum("b h t d, b h s d -> b h t s", q, k) * scale;
-        let attn = (&scores + &mask).softmax(3);
+        let scores = Tensor::einsum("b h t d, b h s d -> b h t s", q, k);
+        // One fused kernel on CUDA (scale, mask-add, softmax); the primitive
+        // chain everywhere else.
+        let attn = scores.scaled_masked_softmax(&mask, scale, 3);
         let y_flat = attn.matmul(v).rearrange("b h t d -> (b t) (h d)", &[]);
 
         let out = self.out_proj.forward(&y_flat)?;

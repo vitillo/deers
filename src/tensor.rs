@@ -624,6 +624,31 @@ impl Tensor {
         self.log_softmax(axis).exp()
     }
 
+    /// Scaled masked softmax along `axis`: `softmax(self*scale + mask)`.
+    ///
+    /// On CUDA with a last-axis layout and a `[1, 1, Tm, K]` mask this is one
+    /// fused kernel over the compacted scores and the mask rows, replacing
+    /// the scale multiply, the mask broadcast-add, and the log-softmax/exp
+    /// pair. All other cases run the primitive decomposition.
+    pub fn scaled_masked_softmax(&self, mask: &Tensor, scale: f64, axis: usize) -> Tensor {
+        let last_axis = self.layout().ndim() - 1;
+        let mask_shape = mask.layout().shape();
+        let standard_mask = mask_shape.ndim() == 4
+            && mask_shape[0] == 1
+            && mask_shape[1] == 1
+            && mask_shape[3] == self.layout().shape()[last_axis];
+        if axis == last_axis
+            && standard_mask
+            && self.device() == crate::device::Device::Cuda
+        {
+            return ops::FusedMaskedSoftmax::new(self.clone(), mask.clone(), scale)
+                .unwrap()
+                .forward()
+                .unwrap();
+        }
+        ((self * scale) + mask).softmax(axis)
+    }
+
     /// Mean along the given axes. If `keep_dims`, reduced axes become size 1.
     pub fn mean(&self, axes: Vec<usize>, keep_dims: bool) -> Tensor {
         let n: usize = axes.iter().map(|&a| self.layout().shape()[a]).product();
