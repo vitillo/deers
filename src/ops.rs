@@ -2182,7 +2182,7 @@ impl TensorOp for WhereCond {
         let _profile =
             profile_output("where", &inputs, self.on_true.layout().size(), self.on_true.dtype());
         let shape = self.on_true.layout().shape().clone();
-        let selector = self.cond.ne_scalar(0.0).to_dtype(self.on_true.dtype());
+        let selector = self.cond.ne_scalar(0.0).to_dtype(self.on_true.dtype())?;
         let storage = Arc::new(RwLock::new(selector.storage().select(
             selector.layout(),
             &self.on_true.storage(),
@@ -2196,7 +2196,7 @@ impl TensorOp for WhereCond {
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         // Route the output gradient to the picked branch, zeroing the other.
         // The selector is recomputed on device; no gradient flows into `cond`.
-        let selector = self.cond.ne_scalar(0.0).to_dtype(self.on_true.dtype());
+        let selector = self.cond.ne_scalar(0.0).to_dtype(self.on_true.dtype())?;
         let zeros = Tensor::zeros(
             self.on_true.layout().shape().clone(),
             self.on_true.dtype(),
