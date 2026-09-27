@@ -7,6 +7,7 @@
 
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -199,7 +200,11 @@ fn main() {
 fn split_decay_params(store: &ParamStore) -> (Vec<Parameter>, Vec<Parameter>) {
     let mut decayed = Vec::new();
     let mut excluded = Vec::new();
+    let mut seen = HashSet::new();
     for (name, parameter) in store.named_parameters() {
+        if !seen.insert(parameter.id()) {
+            continue;
+        }
         let is_1d = parameter.layout().ndim() <= 1;
         if name.ends_with(".bias") || name.contains("norm") || is_1d {
             excluded.push(parameter);
@@ -243,7 +248,11 @@ fn train_step(
 }
 
 fn accumulate_grads(dst: &mut GradientStore, parameters: &[Parameter], src: &GradientStore) {
+    let mut seen = HashSet::new();
     for parameter in parameters {
+        if !seen.insert(parameter.id()) {
+            continue;
+        }
         let Some(grad) = src.get(parameter.id()) else {
             continue;
         };
