@@ -82,7 +82,7 @@ impl Drop for NoGradGuard {
 /// use deers::{Device, DType, Tensor, no_grad};
 ///
 /// let x = Tensor::ones((2,), DType::F32, Device::Cpu).attach();
-/// let y = no_grad(|| &x * 2.0);
+/// let y = no_grad(|| (&x * 2.0).unwrap());
 /// assert!(!y.requires_grad());
 /// assert!(y.op().is_none());
 /// ```
