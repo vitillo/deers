@@ -525,7 +525,7 @@ mod imp {
     // y2 = x1*sin + x2*cos, with cos/sin rows selected by token position.
     // One block per (batch, token, head) row; all math in fp32.
     template <typename T>
-    __global__ void rope_fwd_kernel(const T* x, const T* cos, const T* sin, T* dst, unsigned int outer_size, unsigned int head_dim, unsigned int n_heads, unsigned int t_len, unsigned int cos_t_len) {
+    __global__ void rope_fwd_kernel(const T* x, const T* cos, const T* sin, T* dst, unsigned int outer_size, unsigned int head_dim, unsigned int n_heads, unsigned int t_len, unsigned int cos_t_len, unsigned int cos_base, unsigned int sin_base) {
         unsigned int row = blockIdx.x;
         if (row >= outer_size) return;
         unsigned int half = head_dim / 2;
@@ -535,23 +535,23 @@ mod imp {
             if (col < half) {
                 float x1 = to_float(x[row * head_dim + col]);
                 float x2 = to_float(x[row * head_dim + col + half]);
-                float c = to_float(cos[ct * half + col]);
-                float s = to_float(sin[ct * half + col]);
+                float c = to_float(cos[cos_base + ct * half + col]);
+                float s = to_float(sin[sin_base + ct * half + col]);
                 dst[row * head_dim + col] = from_float<T>(x1 * c - x2 * s);
             } else {
                 unsigned int h = col - half;
                 float x1 = to_float(x[row * head_dim + h]);
                 float x2 = to_float(x[row * head_dim + col]);
-                float c = to_float(cos[ct * half + h]);
-                float s = to_float(sin[ct * half + h]);
+                float c = to_float(cos[cos_base + ct * half + h]);
+                float s = to_float(sin[sin_base + ct * half + h]);
                 dst[row * head_dim + col] = from_float<T>(x1 * s + x2 * c);
             }
         }
     }
 
-    extern "C" __global__ void rope_fwd_f32(const float* x, const float* cos, const float* sin, float* dst, unsigned int outer_size, unsigned int head_dim, unsigned int n_heads, unsigned int t_len, unsigned int cos_t_len) { rope_fwd_kernel(x, cos, sin, dst, outer_size, head_dim, n_heads, t_len, cos_t_len); }
-    extern "C" __global__ void rope_fwd_f16(const half* x, const half* cos, const half* sin, half* dst, unsigned int outer_size, unsigned int head_dim, unsigned int n_heads, unsigned int t_len, unsigned int cos_t_len) { rope_fwd_kernel(x, cos, sin, dst, outer_size, head_dim, n_heads, t_len, cos_t_len); }
-    extern "C" __global__ void rope_fwd_bf16(const __nv_bfloat16* x, const __nv_bfloat16* cos, const __nv_bfloat16* sin, __nv_bfloat16* dst, unsigned int outer_size, unsigned int head_dim, unsigned int n_heads, unsigned int t_len, unsigned int cos_t_len) { rope_fwd_kernel(x, cos, sin, dst, outer_size, head_dim, n_heads, t_len, cos_t_len); }
+    extern "C" __global__ void rope_fwd_f32(const float* x, const float* cos, const float* sin, float* dst, unsigned int outer_size, unsigned int head_dim, unsigned int n_heads, unsigned int t_len, unsigned int cos_t_len, unsigned int cos_base, unsigned int sin_base) { rope_fwd_kernel(x, cos, sin, dst, outer_size, head_dim, n_heads, t_len, cos_t_len, cos_base, sin_base); }
+    extern "C" __global__ void rope_fwd_f16(const half* x, const half* cos, const half* sin, half* dst, unsigned int outer_size, unsigned int head_dim, unsigned int n_heads, unsigned int t_len, unsigned int cos_t_len, unsigned int cos_base, unsigned int sin_base) { rope_fwd_kernel(x, cos, sin, dst, outer_size, head_dim, n_heads, t_len, cos_t_len, cos_base, sin_base); }
+    extern "C" __global__ void rope_fwd_bf16(const __nv_bfloat16* x, const __nv_bfloat16* cos, const __nv_bfloat16* sin, __nv_bfloat16* dst, unsigned int outer_size, unsigned int head_dim, unsigned int n_heads, unsigned int t_len, unsigned int cos_t_len, unsigned int cos_base, unsigned int sin_base) { rope_fwd_kernel(x, cos, sin, dst, outer_size, head_dim, n_heads, t_len, cos_t_len, cos_base, sin_base); }
 
     // Fused SiLU forward: dst[i] = src[i] / (1 + exp(-src[i])), fp32 math.
     template <typename T>
@@ -847,6 +847,19 @@ mod imp {
                 Ok(())
             })?;
         }};
+    }
+
+    /// True when every dimension that indexes storage uses row-major strides.
+    /// Length-1 dimensions never index, so narrowed views keep their parent
+    /// strides there without breaking contiguity.
+    fn has_compact_strides(layout: &Layout) -> bool {
+        let expected = layout.shape().compact_strides();
+        layout
+            .shape()
+            .iter()
+            .zip(expected.iter())
+            .zip(layout.strides().iter())
+            .all(|((&len, &want), &got)| len <= 1 || want as isize == got)
     }
 
     fn strided_meta(layout: &Layout) -> StridedMeta {
@@ -2407,8 +2420,10 @@ mod imp {
         }
         /// `y2 = x1*sin + x2*cos`, with the cos/sin row selected per token.
         ///
-        /// `outer_size * head_dim` must equal `layout.size()`. Every input is
-        /// compacted first; cos/sin hold `cos_t_len` rows of `head_dim / 2`.
+        /// `outer_size * head_dim` must equal `layout.size()`. The input is
+        /// compacted; cos/sin are read in place through their view offset (the
+        /// rotary cache is narrowed per position, never copied), so they must
+        /// have compact strides.
         #[allow(clippy::too_many_arguments)]
         fn rope_fwd(
             &self,
@@ -2424,23 +2439,32 @@ mod imp {
             cos_t_len: usize,
         ) -> Result<Self> {
             let x = self.compact(layout)?;
-            let cos_c = cos.compact(cos_layout)?;
-            let sin_c = sin.compact(sin_layout)?;
+            // Narrowed views keep the parent strides on their length-1 dims
+            // (e.g. dim 0 of the `[1, T, 1, D/2]` rotary rows), so contiguity
+            // only constrains dims that actually index storage.
+            assert!(
+                has_compact_strides(cos_layout) && has_compact_strides(sin_layout),
+                "rope cos/sin must have compact strides; pass the narrowed cache view"
+            );
+            assert_eq!(cos_layout.size(), cos_t_len * head_dim / 2);
+            assert_eq!(sin_layout.size(), cos_t_len * head_dim / 2);
             let dims = [
                 outer_size as u32,
                 head_dim as u32,
                 n_heads as u32,
                 t_len as u32,
                 cos_t_len as u32,
+                cos_layout.offset as u32,
+                sin_layout.offset as u32,
             ];
-            match (&x.inner, &cos_c.inner, &sin_c.inner) {
+            match (&x.inner, &cos.inner, &sin.inner) {
                 (CudaInner::F16(xs), CudaInner::F16(cc), CudaInner::F16(ss)) => {
                     let out =
                         unsafe { alloc_uninit::<f16>(&x.runtime, outer_size * head_dim) }?;
                     launch_reduce!(
                         &x.runtime, "rope_fwd_f16", outer_size,
                         xs, cc, ss, &out,
-                        &dims[0], &dims[1], &dims[2], &dims[3], &dims[4]
+                        &dims[0], &dims[1], &dims[2], &dims[3], &dims[4], &dims[5], &dims[6]
                     );
                     Ok(Self { inner: CudaInner::F16(out), runtime: x.runtime.clone() })
                 }
@@ -2450,7 +2474,7 @@ mod imp {
                     launch_reduce!(
                         &x.runtime, "rope_fwd_bf16", outer_size,
                         xs, cc, ss, &out,
-                        &dims[0], &dims[1], &dims[2], &dims[3], &dims[4]
+                        &dims[0], &dims[1], &dims[2], &dims[3], &dims[4], &dims[5], &dims[6]
                     );
                     Ok(Self { inner: CudaInner::BF16(out), runtime: x.runtime.clone() })
                 }
@@ -2460,7 +2484,7 @@ mod imp {
                     launch_reduce!(
                         &x.runtime, "rope_fwd_f32", outer_size,
                         xs, cc, ss, &out,
-                        &dims[0], &dims[1], &dims[2], &dims[3], &dims[4]
+                        &dims[0], &dims[1], &dims[2], &dims[3], &dims[4], &dims[5], &dims[6]
                     );
                     Ok(Self { inner: CudaInner::F32(out), runtime: x.runtime.clone() })
                 }

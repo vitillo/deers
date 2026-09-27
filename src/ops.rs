@@ -1227,18 +1227,21 @@ impl TensorOp for FusedRope {
         let t_len = shape[1];
         let cos_t_len = self.cos.layout().shape()[1];
         let x_c = self.x.compact();
+        // Cos/sin stay uncompacted: the kernel reads the narrowed cache rows
+        // through their view offset, saving two tiny compacts per rope.
+        // Backward keeps compacted copies for its broadcast gradient math.
         let cos_c = self.cos.compact();
         let sin_c = self.sin.compact();
         let out_storage = {
             let x_storage = x_c.storage();
-            let cos_storage = cos_c.storage();
-            let sin_storage = sin_c.storage();
+            let cos_storage = self.cos.storage();
+            let sin_storage = self.sin.storage();
             x_storage.rope_fwd(
                 x_c.layout(),
                 &cos_storage,
-                cos_c.layout(),
+                self.cos.layout(),
                 &sin_storage,
-                sin_c.layout(),
+                self.sin.layout(),
                 outer_size,
                 head_dim,
                 n_heads,
