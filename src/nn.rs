@@ -1,6 +1,6 @@
 //! Neural network modules: traits, layers, and composition.
 
-/// Stateless neural-network helper functions.
+/// Neural-network helper functions.
 pub mod functional;
 /// Trainable tensor wrapper used by modules and optimizers.
 pub mod parameter;
