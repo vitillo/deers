@@ -647,16 +647,6 @@ kernel void eq_f16(
 
 // --- Scalar comparison (compact output, strided input) ---
 
-kernel void eq_scalar_f32(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    constant ScalarMeta& meta [[buffer(2)]],
-    uint id [[thread_position_in_grid]]
-) {
-    if (id >= meta.input.size) return;
-    output[id] = input[linear_to_offset(id, meta.input)] == meta.scalar ? 1.0f : 0.0f;
-}
-
 kernel void ne_scalar_f32(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
@@ -667,16 +657,6 @@ kernel void ne_scalar_f32(
     output[id] = input[linear_to_offset(id, meta.input)] != meta.scalar ? 1.0f : 0.0f;
 }
 
-kernel void eq_scalar_f16(
-    device const half* input [[buffer(0)]],
-    device half* output [[buffer(1)]],
-    constant ScalarMeta& meta [[buffer(2)]],
-    uint id [[thread_position_in_grid]]
-) {
-    if (id >= meta.input.size) return;
-    output[id] = input[linear_to_offset(id, meta.input)] == half(meta.scalar) ? half(1.0h) : half(0.0h);
-}
-
 kernel void ne_scalar_f16(
     device const half* input [[buffer(0)]],
     device half* output [[buffer(1)]],
@@ -685,16 +665,6 @@ kernel void ne_scalar_f16(
 ) {
     if (id >= meta.input.size) return;
     output[id] = input[linear_to_offset(id, meta.input)] != half(meta.scalar) ? half(1.0h) : half(0.0h);
-}
-
-kernel void eq_scalar_i64(
-    device const long* input [[buffer(0)]],
-    device long* output [[buffer(1)]],
-    constant ScalarI64Meta& meta [[buffer(2)]],
-    uint id [[thread_position_in_grid]]
-) {
-    if (id >= meta.input.size) return;
-    output[id] = input[linear_to_offset(id, meta.input)] == meta.scalar ? 1 : 0;
 }
 
 kernel void ne_scalar_i64(

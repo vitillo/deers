@@ -235,9 +235,6 @@ pub trait BackendStorage: Sized {
         other: &Self,
         layout_other: &Layout,
     ) -> Result<Self>;
-    /// Element-wise `== scalar`: 1 where equal, else 0, in the input dtype.
-    /// Returns compact storage and carries no gradient.
-    fn eq_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self>;
     /// Element-wise `!= scalar`: 1 where different, else 0, in the input dtype.
     /// Returns compact storage and carries no gradient.
     fn ne_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self>;
@@ -374,14 +371,6 @@ impl BackendStorage for Storage {
                 Ok(Self::Mps(storage.binary_op::<O>(layout, other, other_layout)?))
             }
             _ => Err(Error::DeviceMismatch { op: O::KERNEL }),
-        }
-    }
-
-    fn eq_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self> {
-        match self {
-            Storage::Cpu(storage) => Ok(Self::Cpu(storage.eq_scalar(layout, scalar)?)),
-            Storage::Cuda(storage) => Ok(Self::Cuda(storage.eq_scalar(layout, scalar)?)),
-            Storage::Mps(storage) => Ok(Self::Mps(storage.eq_scalar(layout, scalar)?)),
         }
     }
 

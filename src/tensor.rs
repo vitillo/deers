@@ -359,15 +359,6 @@ impl Tensor {
         ops::ToDtype::new(self.clone(), dtype)?.forward()
     }
 
-    /// Element-wise `== scalar`: 1 where equal, else 0, in the input dtype.
-    ///
-    /// Runs on device and carries no gradient, like a selector.
-    pub fn eq_scalar(&self, scalar: f64) -> Tensor {
-        let storage =
-            Arc::new(RwLock::new(self.storage().eq_scalar(&self.0.layout, scalar).unwrap()));
-        Tensor::new(storage, Layout::from(self.layout().shape().clone()), false, None)
-    }
-
     /// Element-wise `!= scalar`: 1 where different, else 0, in the input dtype.
     ///
     /// Runs on device and carries no gradient, like a selector.
