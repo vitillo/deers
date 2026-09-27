@@ -1334,7 +1334,7 @@ impl TensorOp for ToDevice {
 /// path, the same pattern [`ToDevice`] uses for device moves. Floats round to
 /// nearest-even when narrowing and truncate toward zero when targeting `I64`;
 /// integers widen exactly into floats.
- pub(crate) fn cast_to_dtype(arg: &Tensor, dtype: crate::DType) -> Result<Tensor> {
+pub(crate) fn cast_to_dtype(arg: &Tensor, dtype: crate::DType) -> Result<Tensor> {
     let shape: Vec<usize> = arg.layout().shape().iter().copied().collect();
     let device = arg.device();
     let as_f32: Vec<f32> = match arg.dtype() {
@@ -1355,11 +1355,9 @@ impl TensorOp for ToDevice {
             device,
         ),
         crate::DType::F32 => Tensor::from_vec(as_f32, shape, device),
-        crate::DType::I64 => Tensor::from_vec(
-            as_f32.iter().map(|&v| v as i64).collect::<Vec<_>>(),
-            shape,
-            device,
-        ),
+        crate::DType::I64 => {
+            Tensor::from_vec(as_f32.iter().map(|&v| v as i64).collect::<Vec<_>>(), shape, device)
+        }
     })
 }
 

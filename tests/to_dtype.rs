@@ -21,12 +21,7 @@ fn f32_to_f16_keeps_exact_values() {
     assert_eq!(output.dtype(), DType::F16);
     assert_eq!(
         output.to_vec::<f16>().unwrap(),
-        vec![
-            f16::from_f32(0.0),
-            f16::from_f32(1.0),
-            f16::from_f32(-2.0),
-            f16::from_f32(1.5),
-        ]
+        vec![f16::from_f32(0.0), f16::from_f32(1.0), f16::from_f32(-2.0), f16::from_f32(1.5),]
     );
 }
 
@@ -169,8 +164,7 @@ fn conversion_reads_strided_views() {
     let output = transposed.to_dtype(DType::F16).unwrap();
 
     // Assert: values follow the view, not the backing buffer order.
-    let values: Vec<f32> =
-        output.to_vec::<f16>().unwrap().iter().map(|v| v.to_f32()).collect();
+    let values: Vec<f32> = output.to_vec::<f16>().unwrap().iter().map(|v| v.to_f32()).collect();
     assert_eq!(values, vec![1.0, 3.0, 2.0, 4.0]);
 }
 
