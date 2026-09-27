@@ -918,19 +918,6 @@ mod imp {
         }};
     }
 
-    /// True when every dimension that indexes storage uses row-major strides.
-    /// Length-1 dimensions never index, so narrowed views keep their parent
-    /// strides there without breaking contiguity.
-    fn has_compact_strides(layout: &Layout) -> bool {
-        let expected = layout.shape().compact_strides();
-        layout
-            .shape()
-            .iter()
-            .zip(expected.iter())
-            .zip(layout.strides().iter())
-            .all(|((&len, &want), &got)| len <= 1 || want as isize == got)
-    }
-
     fn strided_meta(layout: &Layout) -> StridedMeta {
         assert!(layout.ndim() <= MAX_DIMS, "cuda backend supports at most {MAX_DIMS} dims");
         let mut shape = [1u32; MAX_DIMS];
@@ -2477,7 +2464,7 @@ mod imp {
             mask_t_len: usize,
         ) -> Result<Self> {
             let scores = self.compact(layout)?;
-            assert!(has_compact_strides(mask_layout));
+            assert!(mask_layout.has_compact_strides());
             let dims = [
                 outer_size as u32,
                 inner_size as u32,
@@ -2606,7 +2593,7 @@ mod imp {
             // (e.g. dim 0 of the `[1, T, 1, D/2]` rotary rows), so contiguity
             // only constrains dims that actually index storage.
             assert!(
-                has_compact_strides(cos_layout) && has_compact_strides(sin_layout),
+                cos_layout.has_compact_strides() && sin_layout.has_compact_strides(),
                 "rope cos/sin must have compact strides; pass the narrowed cache view"
             );
             assert_eq!(cos_layout.size(), cos_t_len * head_dim / 2);
