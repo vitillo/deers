@@ -93,6 +93,38 @@ impl Device {
         }
     }
 
+    /// Allocates a storage buffer of `size` elements without initializing.
+    ///
+    /// The caller must write every element before reading (every kernel that
+    /// consumes these buffers covers its full output). CPU keeps zeroed
+    /// storage: host memset is cheap and uninitialized host memory is not
+    /// worth the risk.
+    pub fn empty(&self, size: usize, dtype: DType) -> Storage {
+        match self {
+            Device::Cpu => self.zeros(size, dtype),
+            Device::Mps => match dtype {
+                DType::F16 => Storage::Mps(MpsStorage::empty(size, DType::F16)),
+                DType::BF16 => Storage::Mps(MpsStorage::empty(size, DType::BF16)),
+                DType::F32 => Storage::Mps(MpsStorage::empty(size, DType::F32)),
+                DType::I64 => Storage::Mps(MpsStorage::empty(size, DType::I64)),
+            },
+            Device::Cuda => match dtype {
+                DType::F16 => {
+                    Storage::Cuda(CudaStorage::uninit(size, DType::F16).expect("cuda backend unavailable"))
+                }
+                DType::BF16 => {
+                    Storage::Cuda(CudaStorage::uninit(size, DType::BF16).expect("cuda backend unavailable"))
+                }
+                DType::F32 => {
+                    Storage::Cuda(CudaStorage::uninit(size, DType::F32).expect("cuda backend unavailable"))
+                }
+                DType::I64 => {
+                    Storage::Cuda(CudaStorage::uninit(size, DType::I64).expect("cuda backend unavailable"))
+                }
+            },
+        }
+    }
+
     /// Allocates a storage buffer of `size` elements filled with ones.
     pub fn ones(&self, size: usize, dtype: DType) -> Storage {
         match (self, dtype) {

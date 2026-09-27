@@ -1677,12 +1677,9 @@ impl Compact {
 impl TensorOp for Compact {
     fn forward(self) -> Result<Tensor> {
         let _profile = profile_like("compact", &self.arg);
-        let mut storage = match self.arg.device() {
-            crate::Device::Mps => {
-                Storage::Mps(MpsStorage::empty(self.arg.layout().size(), self.arg.dtype()))
-            }
-            _ => self.arg.device().zeros(self.arg.layout().size(), self.arg.dtype()),
-        };
+        // The copy kernel writes every element, so the buffer needs no
+        // zero-init (MPS already allocated it uninitialized).
+        let mut storage = self.arg.device().empty(self.arg.layout().size(), self.arg.dtype());
         self.arg.storage().copy_compact(self.arg.layout(), &mut storage)?;
         let strides = self.arg.layout().shape().compact_strides();
         let layout = Layout::new(self.arg.layout().shape().clone(), strides, 0);

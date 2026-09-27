@@ -921,7 +921,7 @@ mod imp {
         /// # Safety
         ///
         /// The caller must write every element before reading.
-        fn uninit(size: usize, dtype: DType) -> Result<Self> {
+        pub(crate) fn uninit(size: usize, dtype: DType) -> Result<Self> {
             let runtime = runtime()?;
             let inner = match dtype {
                 DType::F16 => CudaInner::F16(unsafe { alloc_uninit::<f16>(&runtime, size) }?),
