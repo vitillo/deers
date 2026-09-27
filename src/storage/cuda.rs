@@ -275,11 +275,8 @@ mod imp {
         if (idx < size) { dst[idx] = (__bfloat162float(src[idx]) op meta.scalar ? __float2bfloat16(1.0f) : __float2bfloat16(0.0f)); } \
     }
 
-    DEFINE_CMP_SCALAR_F32(eq_scalar_f32, ==)
     DEFINE_CMP_SCALAR_F32(ne_scalar_f32, !=)
-    DEFINE_CMP_SCALAR_F16(eq_scalar_f16, ==)
     DEFINE_CMP_SCALAR_F16(ne_scalar_f16, !=)
-    DEFINE_CMP_SCALAR_BF16(eq_scalar_bf16, ==)
     DEFINE_CMP_SCALAR_BF16(ne_scalar_bf16, !=)
 
     typedef struct {
@@ -292,7 +289,6 @@ mod imp {
         if (idx < size) { dst[idx] = (src[idx] op meta.scalar ? 1LL : 0LL); } \
     }
 
-    DEFINE_CMP_SCALAR_I64(eq_scalar_i64, ==)
     DEFINE_CMP_SCALAR_I64(ne_scalar_i64, !=)
 
     #define DEFINE_WHERE(name, T, is_nonzero) \
@@ -1386,24 +1382,6 @@ mod imp {
             }
         }
 
-        fn eq_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self> {
-            let compact = self.compact(layout)?;
-            match &compact.inner {
-                CudaInner::F16(src) => {
-                    compact.launch_scalar_f16("eq_scalar_f16", src, scalar as f32)
-                }
-                CudaInner::BF16(src) => {
-                    compact.launch_scalar_bf16("eq_scalar_bf16", src, scalar as f32)
-                }
-                CudaInner::F32(src) => {
-                    compact.launch_scalar_f32("eq_scalar_f32", src, scalar as f32)
-                }
-                CudaInner::I64(src) => {
-                    compact.launch_cmp_i64("eq_scalar_i64", src, scalar as i64)
-                }
-            }
-        }
-
         fn ne_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self> {
             let compact = self.compact(layout)?;
             match &compact.inner {
@@ -2418,9 +2396,6 @@ mod imp {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn binary_op<O: BinaryOp>(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
-            Err(Error::NotImplemented("cuda backend is unavailable"))
-        }
-        fn eq_scalar(&self, _: &Layout, _: f64) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn ne_scalar(&self, _: &Layout, _: f64) -> Result<Self> {

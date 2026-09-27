@@ -925,14 +925,11 @@ mod imp {
             }
         }
 
-        fn cmp_scalar_kernel_name(eq: bool, dtype: DType) -> Option<&'static str> {
-            match (eq, dtype) {
-                (true, DType::F16) => Some("eq_scalar_f16"),
-                (true, DType::F32) => Some("eq_scalar_f32"),
-                (true, DType::I64) => Some("eq_scalar_i64"),
-                (false, DType::F16) => Some("ne_scalar_f16"),
-                (false, DType::F32) => Some("ne_scalar_f32"),
-                (false, DType::I64) => Some("ne_scalar_i64"),
+        fn ne_scalar_kernel_name(dtype: DType) -> Option<&'static str> {
+            match dtype {
+                DType::F16 => Some("ne_scalar_f16"),
+                DType::F32 => Some("ne_scalar_f32"),
+                DType::I64 => Some("ne_scalar_i64"),
                 _ => None,
             }
         }
@@ -1251,10 +1248,10 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
-        fn cmp_scalar(&self, layout: &Layout, scalar: f64, eq: bool) -> Result<Self> {
+        fn ne_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self> {
             let dtype = self.dtype();
             if let (Some(kernel), Some((ctx, input, _))) =
-                (Self::cmp_scalar_kernel_name(eq, dtype), self.accelerated(dtype))
+                (Self::ne_scalar_kernel_name(dtype), self.accelerated(dtype))
             {
                 let meta = Self::strided_meta(layout);
                 if dtype == DType::I64 {
@@ -1318,20 +1315,8 @@ mod imp {
                 });
             }
 
-            let inner = if eq {
-                self.as_cpu_storage().eq_scalar(layout, scalar)?
-            } else {
-                self.as_cpu_storage().ne_scalar(layout, scalar)?
-            };
+            let inner = self.as_cpu_storage().ne_scalar(layout, scalar)?;
             Ok(Self::from_cpu_storage(inner))
-        }
-
-        fn eq_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self> {
-            self.cmp_scalar(layout, scalar, true)
-        }
-
-        fn ne_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self> {
-            self.cmp_scalar(layout, scalar, false)
         }
 
         fn select(
@@ -2330,9 +2315,6 @@ mod imp {
             Self::unavailable()
         }
         fn binary_op<O: BinaryOp>(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
-            Self::unavailable()
-        }
-        fn eq_scalar(&self, _: &Layout, _: f64) -> Result<Self> {
             Self::unavailable()
         }
         fn ne_scalar(&self, _: &Layout, _: f64) -> Result<Self> {

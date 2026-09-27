@@ -3226,19 +3226,17 @@ fn scalar_compare_i64_conforms() {
     let targets = vec![1i64, -100, 2, -100, 0];
 
     // Act
-    let results: Vec<(Device, Vec<i64>, Vec<i64>)> = devices()
+    let results: Vec<(Device, Vec<i64>)> = devices()
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(targets.clone(), (5,), device);
-            let eq = input.eq_scalar(-100.0).to_vec::<i64>().unwrap();
             let ne = input.ne_scalar(-100.0).to_vec::<i64>().unwrap();
-            (device, eq, ne)
+            (device, ne)
         })
         .collect();
 
     // Assert
-    for (device, eq, ne) in results {
-        assert_eq!(eq, vec![0, 1, 0, 1, 0], "eq_scalar on {:?}", device);
+    for (device, ne) in results {
         assert_eq!(ne, vec![1, 0, 1, 0, 1], "ne_scalar on {:?}", device);
     }
 }
@@ -3249,19 +3247,17 @@ fn scalar_compare_f32_conforms() {
     let data = vec![0.0f32, 1.5, 1.5, -2.0];
 
     // Act
-    let results: Vec<(Device, Vec<f32>, Vec<f32>)> = devices()
+    let results: Vec<(Device, Vec<f32>)> = devices()
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (4,), device);
-            let eq = input.eq_scalar(1.5).to_vec::<f32>().unwrap();
             let ne = input.ne_scalar(1.5).to_vec::<f32>().unwrap();
-            (device, eq, ne)
+            (device, ne)
         })
         .collect();
 
     // Assert
-    for (device, eq, ne) in results {
-        assert_close(&eq, &[0.0, 1.0, 1.0, 0.0], &format!("eq_scalar f32 on {:?}", device));
+    for (device, ne) in results {
         assert_close(&ne, &[1.0, 0.0, 0.0, 1.0], &format!("ne_scalar f32 on {:?}", device));
     }
 }
