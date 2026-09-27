@@ -768,6 +768,93 @@ mod imp {
             Self { inner, runtime }
         }
 
+        /// Copies the `layout` region to a fresh device buffer with no host traffic.
+        ///
+        /// The source is compacted on the device first when strided, then moved
+        /// with a single device-to-device copy. The result is compact.
+        pub(crate) fn copy_to_device(&self, layout: &Layout) -> Result<Self> {
+            let compact = self.compact(layout)?;
+            let mut out = Self::uninit(compact.len(), compact.dtype())?;
+            let map_err = |err| Error::Cuda(format!("cuda device copy failed: {err}"));
+            match (&compact.inner, &mut out.inner) {
+                (CudaInner::F16(src), CudaInner::F16(dst)) => {
+                    compact.runtime.stream.memcpy_dtod(src, dst).map_err(map_err)?;
+                }
+                (CudaInner::BF16(src), CudaInner::BF16(dst)) => {
+                    compact.runtime.stream.memcpy_dtod(src, dst).map_err(map_err)?;
+                }
+                (CudaInner::F32(src), CudaInner::F32(dst)) => {
+                    compact.runtime.stream.memcpy_dtod(src, dst).map_err(map_err)?;
+                }
+                (CudaInner::I64(src), CudaInner::I64(dst)) => {
+                    compact.runtime.stream.memcpy_dtod(src, dst).map_err(map_err)?;
+                }
+                _ => {
+                    return Err(Error::DTypeMismatch("to_device: dtype mismatch".into()));
+                }
+            }
+            Ok(out)
+        }
+
+        /// Downloads the `layout` region to host memory in a single copy.
+        ///
+        /// The source is compacted on the device first when strided, so the
+        /// returned host buffer is filled directly with no staging allocation.
+        pub(crate) fn copy_to_cpu(&self, layout: &Layout) -> Result<CpuStorage> {
+            let compact = self.compact(layout)?;
+            let map_err = |err| Error::Cuda(format!("cuda download failed: {err}"));
+            match &compact.inner {
+                CudaInner::F16(src) => {
+                    let mut dst = vec![f16::from_f32(0.0); src.len()];
+                    compact.runtime.stream.memcpy_dtoh(src, &mut dst[..]).map_err(map_err)?;
+                    Ok(CpuStorage::F16(dst))
+                }
+                CudaInner::BF16(src) => {
+                    let mut dst = vec![bf16::ZERO; src.len()];
+                    compact.runtime.stream.memcpy_dtoh(src, &mut dst[..]).map_err(map_err)?;
+                    Ok(CpuStorage::BF16(dst))
+                }
+                CudaInner::F32(src) => {
+                    let mut dst = vec![0.0f32; src.len()];
+                    compact.runtime.stream.memcpy_dtoh(src, &mut dst[..]).map_err(map_err)?;
+                    Ok(CpuStorage::F32(dst))
+                }
+                CudaInner::I64(src) => {
+                    let mut dst = vec![0i64; src.len()];
+                    compact.runtime.stream.memcpy_dtoh(src, &mut dst[..]).map_err(map_err)?;
+                    Ok(CpuStorage::I64(dst))
+                }
+            }
+        }
+
+        /// Uploads the `layout` region from host memory in a single copy.
+        ///
+        /// Compact sources upload straight from the caller's buffer; strided
+        /// sources are compacted into one host staging buffer first.
+        pub(crate) fn copy_from_cpu(src: &CpuStorage, layout: &Layout) -> Result<Self> {
+            let runtime = runtime()?;
+            let map_err = |err| Error::Cuda(format!("cuda upload failed: {err}"));
+            let inner = match src {
+                CpuStorage::F16(data) => {
+                    let staged = CpuStorage::borrow_or_compact(data, src, layout);
+                    CudaInner::F16(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?)
+                }
+                CpuStorage::BF16(data) => {
+                    let staged = CpuStorage::borrow_or_compact(data, src, layout);
+                    CudaInner::BF16(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?)
+                }
+                CpuStorage::F32(data) => {
+                    let staged = CpuStorage::borrow_or_compact(data, src, layout);
+                    CudaInner::F32(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?)
+                }
+                CpuStorage::I64(data) => {
+                    let staged = CpuStorage::borrow_or_compact(data, src, layout);
+                    CudaInner::I64(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?)
+                }
+            };
+            Ok(Self { inner, runtime })
+        }
+
         pub fn cat(parts: &[(&CudaStorage, usize)]) -> Result<Self> {
             if parts.is_empty() {
                 return Err(Error::LayoutMismatch("cat: empty parts".into()));
@@ -2030,6 +2117,18 @@ mod imp {
 
         pub fn from_cpu_storage(_inner: CpuStorage) -> Self {
             panic!("CUDA backend is only available on Linux with the `cuda` feature enabled")
+        }
+
+        pub(crate) fn copy_to_device(&self, _: &Layout) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+
+        pub(crate) fn copy_to_cpu(&self, _: &Layout) -> Result<CpuStorage> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+
+        pub(crate) fn copy_from_cpu(_src: &CpuStorage, _: &Layout) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
         }
 
         pub fn cat(_parts: &[(&CudaStorage, usize)]) -> Result<Self> {

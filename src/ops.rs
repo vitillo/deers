@@ -1290,9 +1290,14 @@ impl TensorOp for Compact {
 
 /// Moves tensor data to another device while keeping the autograd edge.
 ///
-/// Forward copies the values to the target device. Backward moves the output
-/// gradient back to the source device and accumulates it there, so gradients
-/// flow across the device boundary instead of stopping silently.
+/// Forward copies the values to the target device. Same-backend moves copy
+/// directly between device buffers; moves to or from the host perform a
+/// single upload or download. Only cross-vendor accelerator moves (CUDA to
+/// MPS or the reverse) still stage through a host buffer, since the two
+/// vendor APIs expose no peer-DMA path. See [`Storage::transfer`].
+/// Backward moves the output gradient back to the source device and
+/// accumulates it there, so gradients flow across the device boundary
+/// instead of stopping silently.
 #[derive(Debug)]
 pub struct ToDevice {
     arg: Tensor,
@@ -1308,14 +1313,10 @@ impl ToDevice {
 impl TensorOp for ToDevice {
     fn forward(self) -> Result<Tensor> {
         let _profile = profile_like("to_device", &self.arg);
-        let shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
-        let out = match self.arg.dtype() {
-            crate::DType::F16 => Tensor::from_vec(self.arg.to_vec::<f16>()?, shape, self.device),
-            crate::DType::BF16 => Tensor::from_vec(self.arg.to_vec::<bf16>()?, shape, self.device),
-            crate::DType::F32 => Tensor::from_vec(self.arg.to_vec::<f32>()?, shape, self.device),
-            crate::DType::I64 => Tensor::from_vec(self.arg.to_vec::<i64>()?, shape, self.device),
-        };
-        Ok(Tensor::new(out.storage_clone(), out.layout().clone(), false, Some(Box::new(self))))
+        let storage = self.arg.storage().transfer(self.arg.layout(), self.device)?;
+        let strides = self.arg.layout().shape().compact_strides();
+        let layout = Layout::new(self.arg.layout().shape().clone(), strides, 0);
+        Ok(Tensor::new(Arc::new(RwLock::new(storage)), layout, false, Some(Box::new(self))))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
