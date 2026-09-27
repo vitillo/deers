@@ -219,9 +219,9 @@ const QK_NORM_EPS: f64 = 1e-6;
 /// grouped-query repeat, shaped `[B, H_q, T_cached, D]`. Norms are
 /// token-local, so caching their output is exact. RoPE runs at each
 /// token's absolute position before the append, so stored keys stay
-/// rotated correctly with no re-rotation. Heads stay unrepeated at the
-/// key/value width: the fused inference kernel maps query heads to groups
-/// natively, and only the primitive chain repeats (training and fallback).
+/// rotated correctly with no re-rotation. Repeating up front keeps decode
+/// a plain append plus attention, at the price of a cache `group_size`
+/// wider than the key/value heads.
 ///
 /// Buffers are preallocated in whole blocks and each append writes its slice
 /// in place, so the hot path is one offset copy with no realloc: the
@@ -426,16 +426,6 @@ impl CausalSelfAttention {
     /// QK-Norm, RoPE, and the grouped-query repeat all apply here, so cached
     /// keys and values already carry them and decode never recomputes them.
     /// Also returns the batch size and sequence length of `x`.
-    /// Repeats key/value heads across their query group for the primitive
-    /// attention chain. The fused inference kernel maps groups natively and
-    /// never calls this; group 1 is an exact clone.
-    fn repeat_kv(&self, x: &Tensor) -> Tensor {
-        if self.group_size == 1 {
-            return x.clone();
-        }
-        x.repeat("b h t d -> b (h g) t d", &[("g", self.group_size)])
-    }
-
     fn project_qkv(
         &self,
         x: &Tensor,
@@ -473,10 +463,22 @@ impl CausalSelfAttention {
         let k = self.k_norm.forward(&k)?;
 
         // RoPE rotates each head independently, so one rotation serves the whole query group.
-        // Keys and values stay unrepeated: the fused inference kernel maps
-        // query heads to groups natively, and the unfused path repeats below.
+        // Repeat on fresh projections (kilobytes), never on cache views
+        // (megabytes): the append reads any strides, and attention needs the
+        // grouped width to match.
         let q = apply_rotary_emb(&q, cos, sin).rearrange("b t h d -> b h t d", &[]);
-        let k = apply_rotary_emb(&k, cos, sin).rearrange("b t h d -> b h t d", &[]);
+        let k = apply_rotary_emb(&k, cos, sin);
+        let k = if self.group_size == 1 {
+            k
+        } else {
+            k.repeat("b t kv d -> b t (kv g) d", &[("g", self.group_size)])
+        };
+        let k = k.rearrange("b t h d -> b h t d", &[]);
+        let v = if self.group_size == 1 {
+            v
+        } else {
+            v.repeat("b t kv d -> b t (kv g) d", &[("g", self.group_size)])
+        };
         let v = v.rearrange("b t h d -> b h t d", &[]);
         Ok((q, k, v, batch_size, seq_len))
     }
@@ -492,14 +494,7 @@ impl CausalSelfAttention {
         seq_len: usize,
     ) -> Result<Tensor> {
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        // Inference on CUDA runs one fused attention kernel (scores, softmax,
-        // context, group map); training and other devices keep the primitive
-        // chain, which stays the exact tested path for gradients.
-        // Grouped-query repeat for the primitive chain; keys and values
-        // arrive unrepeated from the cache.
-        let k = self.repeat_kv(k);
-        let v = self.repeat_kv(v);
-        let scores = Tensor::einsum("b h t d, b h s d -> b h t s", q, &k);
+        let scores = Tensor::einsum("b h t d, b h s d -> b h t s", q, k);
         // One fused kernel on CUDA (scale, mask-add, softmax); the primitive
         // chain everywhere else.
         let attn = scores.scaled_masked_softmax(&mask, scale, 3);
