@@ -491,11 +491,22 @@ impl CausalSelfAttention {
         seq_len: usize,
     ) -> Result<Tensor> {
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let scores = Tensor::einsum("b h t d, b h s d -> b h t s", q, k);
-        // One fused kernel on CUDA (scale, mask-add, softmax); the primitive
-        // chain everywhere else.
-        let attn = scores.scaled_masked_softmax(&mask, scale, 3);
-        let y_flat = attn.matmul(v).rearrange("b h t d -> (b t) (h d)", &[]);
+        // Inference on CUDA runs one fused attention kernel (scores, softmax,
+        // context, group map); training and other devices keep the primitive
+        // chain, which stays the exact tested path for gradients.
+        let y = if crate::tensor::no_grad_active() && q.device() == Device::Cuda {
+            crate::ops::FusedMha::new(q.clone(), k.clone(), v.clone(), mask.clone(), scale)
+                .unwrap()
+                .forward()
+                .unwrap()
+        } else {
+            let scores = Tensor::einsum("b h t d, b h s d -> b h t s", q, k);
+            // One fused kernel on CUDA (scale, mask-add, softmax); the primitive
+            // chain everywhere else.
+            let attn = scores.scaled_masked_softmax(&mask, scale, 3);
+            attn.matmul(v)
+        };
+        let y_flat = y.rearrange("b h t d -> (b t) (h d)", &[]);
 
         let out = self.out_proj.forward(&y_flat)?;
         Ok(out.rearrange("(b t) c -> b t c", &[("b", batch_size), ("t", seq_len)]))

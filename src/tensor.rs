@@ -15,7 +15,7 @@ thread_local! {
     static NO_GRAD_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
-fn no_grad_active() -> bool {
+pub(crate) fn no_grad_active() -> bool {
     NO_GRAD_DEPTH.with(|depth| depth.get() > 0)
 }
 

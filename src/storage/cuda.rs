@@ -656,6 +656,88 @@ mod imp {
     extern "C" __global__ void copy_blocks_bf16(const __nv_bfloat16* src, __nv_bfloat16* dst, StridedMeta meta, unsigned int total, unsigned int block_len, unsigned int dst_base, unsigned int dst_stride) { copy_blocks_kernel(src, dst, meta, total, block_len, dst_base, dst_stride); }
     extern "C" __global__ void copy_blocks_i64(const long long* src, long long* dst, StridedMeta meta, unsigned int total, unsigned int block_len, unsigned int dst_base, unsigned int dst_stride) { copy_blocks_kernel(src, dst, meta, total, block_len, dst_base, dst_stride); }
 
+    // Fused multi-head attention forward (decode-shaped):
+    // out[b,hq,tq] = softmax(q.K/sqrt(d) + mask) . V over tk, one block per
+    // (batch, query-head, query-position) row. Keys/values/mask address
+    // through explicit base+strides, so growing cache views and grouped-query
+    // head maps feed straight in: no repeat materialization, no read compacts.
+    // All math in fp32; the two online passes keep one row resident at a time.
+    template <typename T>
+    __global__ void mha_fwd_kernel(
+        const T* q, const T* k, const T* v, const T* mask, T* dst, float* probs, float scale,
+        unsigned int b, unsigned int hq, unsigned int tq, unsigned int tk, unsigned int d,
+        unsigned int group,
+        unsigned int q_base, unsigned int q_bs, unsigned int q_hs, unsigned int q_rs,
+        unsigned int k_base, unsigned int k_bs, unsigned int k_hs, unsigned int k_rs,
+        unsigned int v_base, unsigned int v_bs, unsigned int v_hs, unsigned int v_rs,
+        unsigned int mask_base, unsigned int mask_rs, unsigned int mask_t, unsigned int mask_bs) {
+        unsigned int row = blockIdx.x;
+        unsigned int htq = hq * tq;
+        if (row >= b * htq) return;
+        __shared__ float smem[REDUCE_THREADS];
+        unsigned int bb = row / htq;
+        unsigned int hqq = (row / tq) % hq;
+        unsigned int tqq = row % tq;
+        unsigned int hkv = hqq / group;
+        unsigned int mt = tqq % mask_t;
+        
+        unsigned int qoff = q_base + bb * q_bs + hqq * q_hs + tqq * q_rs;
+        unsigned int kb = k_base + bb * k_bs + hkv * k_hs;
+        unsigned int vb = v_base + bb * v_bs + hkv * v_hs;
+
+        // Pass 1: row max of dot(q, k[tk])*scale + mask.
+        float row_max = -1.0f / 0.0f;
+        for (unsigned int tk_idx = threadIdx.x; tk_idx < tk; tk_idx += blockDim.x) {
+            float dot = 0.0f;
+            for (unsigned int dd = 0; dd < d; dd++)
+                dot += to_float(q[qoff + dd]) * to_float(k[kb + tk_idx * k_rs + dd]);
+            float mval = to_float(mask[mask_base + bb * mask_bs + mt * mask_rs + tk_idx]);
+            row_max = fmaxf(row_max, dot * scale + mval);
+        }
+        smem[threadIdx.x] = row_max;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+            if (threadIdx.x < stride) smem[threadIdx.x] = fmaxf(smem[threadIdx.x], smem[threadIdx.x + stride]);
+            __syncthreads();
+        }
+        if (threadIdx.x < 32) smem[threadIdx.x] = warp_reduce_max(smem[threadIdx.x]);
+        __syncthreads();
+        row_max = smem[0];
+
+        // Pass 2: write normalized probs to the workspace row, then sum.
+        float acc = 0.0f;
+        for (unsigned int tk_idx = threadIdx.x; tk_idx < tk; tk_idx += blockDim.x) {
+            float dot = 0.0f;
+            for (unsigned int dd = 0; dd < d; dd++)
+                dot += to_float(q[qoff + dd]) * to_float(k[kb + tk_idx * k_rs + dd]);
+            float mval = to_float(mask[mask_base + bb * mask_bs + mt * mask_rs + tk_idx]);
+            float p = expf(dot * scale + mval - row_max);
+            probs[row * tk + tk_idx] = p;
+            acc += p;
+        }
+        smem[threadIdx.x] = acc;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+            if (threadIdx.x < stride) smem[threadIdx.x] += smem[threadIdx.x + stride];
+            __syncthreads();
+        }
+        if (threadIdx.x < 32) smem[threadIdx.x] = warp_reduce_sum(smem[threadIdx.x]);
+        __syncthreads();
+        float inv_sum = 1.0f / smem[0];
+
+        // Pass 3: each thread writes its head-dim subset from staged probs.
+        for (unsigned int dd = threadIdx.x; dd < d; dd += blockDim.x) {
+            float out = 0.0f;
+            for (unsigned int tk_idx = 0; tk_idx < tk; tk_idx++)
+                out += probs[row * tk + tk_idx] * inv_sum * to_float(v[vb + tk_idx * v_rs + dd]);
+            dst[row * d + dd] = from_float<T>(out);
+        }
+    }
+
+    extern "C" __global__ void mha_fwd_f32(const float* q, const float* k, const float* v, const float* mask, float* dst, float* probs, float scale, unsigned int b, unsigned int hq, unsigned int tq, unsigned int tk, unsigned int d, unsigned int group, unsigned int q_base, unsigned int q_bs, unsigned int q_hs, unsigned int q_rs, unsigned int k_base, unsigned int k_bs, unsigned int k_hs, unsigned int k_rs, unsigned int v_base, unsigned int v_bs, unsigned int v_hs, unsigned int v_rs, unsigned int mask_base, unsigned int mask_rs, unsigned int mask_t, unsigned int mask_bs) { mha_fwd_kernel(q, k, v, mask, dst, probs, scale, b, hq, tq, tk, d, group, q_base, q_bs, q_hs, q_rs, k_base, k_bs, k_hs, k_rs, v_base, v_bs, v_hs, v_rs, mask_base, mask_rs, mask_t, mask_bs); }
+    extern "C" __global__ void mha_fwd_f16(const half* q, const half* k, const half* v, const half* mask, half* dst, float* probs, float scale, unsigned int b, unsigned int hq, unsigned int tq, unsigned int tk, unsigned int d, unsigned int group, unsigned int q_base, unsigned int q_bs, unsigned int q_hs, unsigned int q_rs, unsigned int k_base, unsigned int k_bs, unsigned int k_hs, unsigned int k_rs, unsigned int v_base, unsigned int v_bs, unsigned int v_hs, unsigned int v_rs, unsigned int mask_base, unsigned int mask_rs, unsigned int mask_t, unsigned int mask_bs) { mha_fwd_kernel(q, k, v, mask, dst, probs, scale, b, hq, tq, tk, d, group, q_base, q_bs, q_hs, q_rs, k_base, k_bs, k_hs, k_rs, v_base, v_bs, v_hs, v_rs, mask_base, mask_rs, mask_t, mask_bs); }
+    extern "C" __global__ void mha_fwd_bf16(const __nv_bfloat16* q, const __nv_bfloat16* k, const __nv_bfloat16* v, const __nv_bfloat16* mask, __nv_bfloat16* dst, float* probs, float scale, unsigned int b, unsigned int hq, unsigned int tq, unsigned int tk, unsigned int d, unsigned int group, unsigned int q_base, unsigned int q_bs, unsigned int q_hs, unsigned int q_rs, unsigned int k_base, unsigned int k_bs, unsigned int k_hs, unsigned int k_rs, unsigned int v_base, unsigned int v_bs, unsigned int v_hs, unsigned int v_rs, unsigned int mask_base, unsigned int mask_rs, unsigned int mask_t, unsigned int mask_bs) { mha_fwd_kernel(q, k, v, mask, dst, probs, scale, b, hq, tq, tk, d, group, q_base, q_bs, q_hs, q_rs, k_base, k_bs, k_hs, k_rs, v_base, v_bs, v_hs, v_rs, mask_base, mask_rs, mask_t, mask_bs); }
+
     template <typename T>
     __global__ void gather_kernel(const T* src, const index_t* indices, T* dst, unsigned int left_len, unsigned int src_dim, unsigned int dst_dim, unsigned int right_len) {
         unsigned int right = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2718,7 +2800,121 @@ mod imp {
             }
         }
 
-        /// Fused SiLU-gate product: `dst[i] = silu(gate[i]) * up[i]`.
+        /// Fused multi-head attention forward (inference):
+        /// `out = softmax(q.K*scale + mask) . V` with grouped-query heads.
+        ///
+        /// `q` is `[B, Hq, Tq, D]` with a linear span; `k`/`v` are
+        /// `[B, Hkv, Tk, D]` read through explicit base+strides (growing cache
+        /// views feed straight in); `mask` is `[1, 1, Tm, Tk]`. `Hq` must be a
+        /// multiple of `Hkv`; the kernel maps each query head to its group.
+        #[allow(clippy::too_many_arguments)]
+        fn mha_fwd(
+            &self,
+            q_layout: &Layout,
+            k: &Self,
+            k_layout: &Layout,
+            v: &Self,
+            v_layout: &Layout,
+            mask: &Self,
+            mask_layout: &Layout,
+            scale: f32,
+        ) -> Result<Self> {
+            let qs = q_layout.shape();
+            let ks = k_layout.shape();
+            let vs = v_layout.shape();
+            let ms = mask_layout.shape();
+            assert_eq!(qs.ndim(), 4, "mha queries must be [B, H, T, D]");
+            assert_eq!(ks.ndim(), 4, "mha keys must be [B, H, T, D]");
+            assert_eq!(vs.ndim(), 4, "mha values must be [B, H, T, D]");
+            assert_eq!(ms.ndim(), 4, "mha mask must be [1, 1, Tm, Tk]");
+            let (b, hq, tq, d) = (qs[0], qs[1], qs[2], qs[3]);
+            let hkv = ks[1];
+            assert!(hq.is_multiple_of(hkv), "mha query heads must group evenly over kv heads");
+            assert_eq!((ks[0], ks[3]), (b, d), "mha keys must match batch and head width");
+            assert_eq!((vs[0], vs[1], vs[3]), (b, hkv, d), "mha values must match batch, heads, width");
+            assert!(
+                ms[0] == 1 || ms[0] == b,
+                "mha mask batch must be 1 or match queries"
+            );
+            assert_eq!(ms[1], 1, "mha mask must be head broadcast");
+            let mask_bs = if ms[0] == 1 { 0 } else { mask_layout.strides()[0] };
+            let tk = ks[2];
+            assert_eq!(vs[2], tk, "mha keys and values must cover the same positions");
+            assert_eq!(ms[3], tk, "mha mask width must match keys");
+            assert_eq!(self.dtype(), k.dtype(), "mha q/k dtype mismatch");
+            assert_eq!(self.dtype(), v.dtype(), "mha q/v dtype mismatch");
+            assert_eq!(self.dtype(), mask.dtype(), "mha q/mask dtype mismatch");
+            let group = hq / hkv;
+            let args = [
+                b as u32,
+                hq as u32,
+                tq as u32,
+                tk as u32,
+                d as u32,
+                group as u32,
+                q_layout.offset as u32,
+                q_layout.strides()[0] as u32,
+                q_layout.strides()[1] as u32,
+                q_layout.strides()[2] as u32,
+                k_layout.offset as u32,
+                k_layout.strides()[0] as u32,
+                k_layout.strides()[1] as u32,
+                k_layout.strides()[2] as u32,
+                v_layout.offset as u32,
+                v_layout.strides()[0] as u32,
+                v_layout.strides()[1] as u32,
+                v_layout.strides()[2] as u32,
+                mask_layout.offset as u32,
+                mask_layout.strides()[2] as u32,
+                ms[2] as u32,
+                mask_bs as u32,
+            ];
+            let outer = b * hq * tq;
+            // Per-row prob workspace: avoids recomputing every score per
+            // output dim in the context pass. Pooled, transient, exact-sized.
+            let probs = unsafe { alloc_uninit::<f32>(&self.runtime, outer * tk) }?;
+            match (&self.inner, &k.inner, &v.inner, &mask.inner) {
+                (CudaInner::F16(q), CudaInner::F16(k), CudaInner::F16(v), CudaInner::F16(m)) => {
+                    let out = unsafe { alloc_uninit::<f16>(&self.runtime, outer * d) }?;
+                    launch_reduce!(
+                        &self.runtime, "mha_fwd_f16", outer,
+                        q, k, v, m, &out, &probs, &scale,
+                        &args[0], &args[1], &args[2], &args[3], &args[4], &args[5],
+                        &args[6], &args[7], &args[8], &args[9], &args[10], &args[11],
+                        &args[12], &args[13], &args[14], &args[15], &args[16], &args[17],
+                        &args[18], &args[19], &args[20], &args[21]
+                    );
+                    Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
+                }
+                (CudaInner::BF16(q), CudaInner::BF16(k), CudaInner::BF16(v), CudaInner::BF16(m)) => {
+                    let out = unsafe { alloc_uninit::<bf16>(&self.runtime, outer * d) }?;
+                    launch_reduce!(
+                        &self.runtime, "mha_fwd_bf16", outer,
+                        q, k, v, m, &out, &probs, &scale,
+                        &args[0], &args[1], &args[2], &args[3], &args[4], &args[5],
+                        &args[6], &args[7], &args[8], &args[9], &args[10], &args[11],
+                        &args[12], &args[13], &args[14], &args[15], &args[16], &args[17],
+                        &args[18], &args[19], &args[20], &args[21]
+                    );
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: self.runtime.clone() })
+                }
+                (CudaInner::F32(q), CudaInner::F32(k), CudaInner::F32(v), CudaInner::F32(m)) => {
+                    let out = unsafe { alloc_uninit::<f32>(&self.runtime, outer * d) }?;
+                    launch_reduce!(
+                        &self.runtime, "mha_fwd_f32", outer,
+                        q, k, v, m, &out, &probs, &scale,
+                        &args[0], &args[1], &args[2], &args[3], &args[4], &args[5],
+                        &args[6], &args[7], &args[8], &args[9], &args[10], &args[11],
+                        &args[12], &args[13], &args[14], &args[15], &args[16], &args[17],
+                        &args[18], &args[19], &args[20], &args[21]
+                    );
+                    Ok(Self { inner: CudaInner::F32(out), runtime: self.runtime.clone() })
+                }
+                _ => Err(Error::DTypeMismatch(
+                    "mha_fwd: dtype mismatch across q, k, v, mask".into(),
+                )),
+            }
+        }
         ///
         /// Both inputs share `layout.size()` elements, read in compact order.
         fn silu_mul_fwd(&self, layout: &Layout, up: &Self, up_layout: &Layout) -> Result<Self> {
@@ -3280,6 +3476,20 @@ mod imp {
             _: f32,
             _: usize,
             _: usize,
+        ) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        #[allow(clippy::too_many_arguments)]
+        fn mha_fwd(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: f32,
         ) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
