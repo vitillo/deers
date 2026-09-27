@@ -3522,6 +3522,34 @@ fn argmax_host_supports_all_dtypes() {
 }
 
 #[test]
+fn argmax_host_selects_nan_as_largest() {
+    // Arrange
+    let device = Device::Cpu;
+    let expected = vec![1i64];
+
+    // Act
+    let f32_out =
+        Tensor::from_vec(vec![1.0f32, f32::NAN, 2.0], (3,), device).argmax(0, false);
+    let f16_out = Tensor::from_vec(
+        vec![f16::from_f32(1.0), f16::from_f32(f32::NAN), f16::from_f32(2.0)],
+        (3,),
+        device,
+    )
+    .argmax(0, false);
+    let bf16_out = Tensor::from_vec(
+        vec![bf16::from_f32(1.0), bf16::from_f32(f32::NAN), bf16::from_f32(2.0)],
+        (3,),
+        device,
+    )
+    .argmax(0, false);
+
+    // Assert
+    for (label, output) in [("f32", f32_out), ("f16", f16_out), ("bf16", bf16_out)] {
+        assert_eq!(output.to_vec::<i64>().unwrap(), expected, "argmax NaN host {label}");
+    }
+}
+
+#[test]
 fn topk_host_supports_all_dtypes() {
     // Arrange
     let device = Device::Cpu;

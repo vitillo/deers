@@ -1700,6 +1700,16 @@ fn argmax_cuda(arg: &Tensor, dim: usize, keep_dims: bool, shape: &[usize]) -> Re
     Ok(Tensor::new(Arc::new(RwLock::new(storage)), Shape::from(out_shape).into(), false, None))
 }
 
+fn argmax_gt(a: f32, b: f32) -> bool {
+    if a.is_nan() {
+        !b.is_nan()
+    } else if b.is_nan() {
+        false
+    } else {
+        a > b
+    }
+}
+
 pub fn argmax_forward(arg: &Tensor, dim: usize, keep_dims: bool) -> Result<Tensor> {
     check_select_dim(arg.layout().ndim(), dim, "argmax")?;
     if arg.device() == crate::Device::Cuda {
@@ -1731,7 +1741,7 @@ pub fn argmax_forward(arg: &Tensor, dim: usize, keep_dims: bool) -> Result<Tenso
                     let base = (o * dim_size) * inner + j;
                     let mut best = 0;
                     for i in 1..dim_size {
-                        if vals[base + i * inner] > vals[base + best * inner] {
+                        if argmax_gt(vals[base + i * inner], vals[base + best * inner]) {
                             best = i;
                         }
                     }
@@ -1748,7 +1758,10 @@ pub fn argmax_forward(arg: &Tensor, dim: usize, keep_dims: bool) -> Result<Tenso
                     let base = (o * dim_size) * inner + j;
                     let mut best = 0;
                     for i in 1..dim_size {
-                        if vals[base + i * inner].to_f32() > vals[base + best * inner].to_f32() {
+                        if argmax_gt(
+                            vals[base + i * inner].to_f32(),
+                            vals[base + best * inner].to_f32(),
+                        ) {
                             best = i;
                         }
                     }
@@ -1765,7 +1778,10 @@ pub fn argmax_forward(arg: &Tensor, dim: usize, keep_dims: bool) -> Result<Tenso
                     let base = (o * dim_size) * inner + j;
                     let mut best = 0;
                     for i in 1..dim_size {
-                        if vals[base + i * inner].to_f32() > vals[base + best * inner].to_f32() {
+                        if argmax_gt(
+                            vals[base + i * inner].to_f32(),
+                            vals[base + best * inner].to_f32(),
+                        ) {
                             best = i;
                         }
                     }
