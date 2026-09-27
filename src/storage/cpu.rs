@@ -407,7 +407,9 @@ impl BackendStorage for CpuStorage {
                 let s = f16::from_f32(scalar as f32);
                 Ok(CpuStorage::F16(
                     self.iter(layout)
-                        .map(|v: &f16| if *v != s { f16::from_f32(1.0) } else { f16::from_f32(0.0) })
+                        .map(
+                            |v: &f16| if *v != s { f16::from_f32(1.0) } else { f16::from_f32(0.0) },
+                        )
                         .collect(),
                 ))
             }
@@ -425,7 +427,9 @@ impl BackendStorage for CpuStorage {
                     self.iter(layout).map(|v: &f32| if *v != s { 1.0 } else { 0.0 }).collect(),
                 ))
             }
-            CpuStorage::I64(_) => Err(Error::DTypeMismatch("ne_scalar requires float dtype".into())),
+            CpuStorage::I64(_) => {
+                Err(Error::DTypeMismatch("ne_scalar requires float dtype".into()))
+            }
         }
     }
 
@@ -447,50 +451,44 @@ impl BackendStorage for CpuStorage {
         false_layout: &Layout,
     ) -> Result<Self> {
         match (self, on_true, on_false) {
-            (CpuStorage::F16(_), CpuStorage::F16(_), CpuStorage::F16(_)) => {
-                Ok(CpuStorage::F16(
-                    self.iter(cond_layout)
-                        .zip(on_true.iter(true_layout))
-                        .zip(on_false.iter(false_layout))
-                        .map(|((c, t), f): ((&f16, &f16), &f16)| {
+            (CpuStorage::F16(_), CpuStorage::F16(_), CpuStorage::F16(_)) => Ok(CpuStorage::F16(
+                self.iter(cond_layout)
+                    .zip(on_true.iter(true_layout))
+                    .zip(on_false.iter(false_layout))
+                    .map(
+                        |((c, t), f): ((&f16, &f16), &f16)| {
                             if c.to_f32() != 0.0 { *t } else { *f }
-                        })
-                        .collect(),
-                ))
-            }
+                        },
+                    )
+                    .collect(),
+            )),
             (CpuStorage::BF16(_), CpuStorage::BF16(_), CpuStorage::BF16(_)) => {
                 Ok(CpuStorage::BF16(
                     self.iter(cond_layout)
                         .zip(on_true.iter(true_layout))
                         .zip(on_false.iter(false_layout))
-                        .map(|((c, t), f): ((&bf16, &bf16), &bf16)| {
-                            if c.to_f32() != 0.0 { *t } else { *f }
-                        })
+                        .map(
+                            |((c, t), f): ((&bf16, &bf16), &bf16)| {
+                                if c.to_f32() != 0.0 { *t } else { *f }
+                            },
+                        )
                         .collect(),
                 ))
             }
-            (CpuStorage::F32(_), CpuStorage::F32(_), CpuStorage::F32(_)) => {
-                Ok(CpuStorage::F32(
-                    self.iter(cond_layout)
-                        .zip(on_true.iter(true_layout))
-                        .zip(on_false.iter(false_layout))
-                        .map(|((c, t), f): ((&f32, &f32), &f32)| {
-                            if *c != 0.0 { *t } else { *f }
-                        })
-                        .collect(),
-                ))
-            }
-            (CpuStorage::I64(_), CpuStorage::I64(_), CpuStorage::I64(_)) => {
-                Ok(CpuStorage::I64(
-                    self.iter(cond_layout)
-                        .zip(on_true.iter(true_layout))
-                        .zip(on_false.iter(false_layout))
-                        .map(|((c, t), f): ((&i64, &i64), &i64)| {
-                            if *c != 0 { *t } else { *f }
-                        })
-                        .collect(),
-                ))
-            }
+            (CpuStorage::F32(_), CpuStorage::F32(_), CpuStorage::F32(_)) => Ok(CpuStorage::F32(
+                self.iter(cond_layout)
+                    .zip(on_true.iter(true_layout))
+                    .zip(on_false.iter(false_layout))
+                    .map(|((c, t), f): ((&f32, &f32), &f32)| if *c != 0.0 { *t } else { *f })
+                    .collect(),
+            )),
+            (CpuStorage::I64(_), CpuStorage::I64(_), CpuStorage::I64(_)) => Ok(CpuStorage::I64(
+                self.iter(cond_layout)
+                    .zip(on_true.iter(true_layout))
+                    .zip(on_false.iter(false_layout))
+                    .map(|((c, t), f): ((&i64, &i64), &i64)| if *c != 0 { *t } else { *f })
+                    .collect(),
+            )),
             _ => Err(Error::DTypeMismatch(format!(
                 "select: {:?} vs {:?} vs {:?}",
                 self.dtype(),

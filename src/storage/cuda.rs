@@ -1403,9 +1403,7 @@ mod imp {
         fn ne_scalar_i64(&self, layout: &Layout, scalar: i64) -> Result<Self> {
             let compact = self.compact(layout)?;
             match &compact.inner {
-                CudaInner::I64(src) => {
-                    compact.launch_cmp_i64("ne_scalar_i64", src, scalar)
-                }
+                CudaInner::I64(src) => compact.launch_cmp_i64("ne_scalar_i64", src, scalar),
                 _ => Err(Error::DTypeMismatch("ne_scalar_i64 requires i64 dtype".into())),
             }
         }
@@ -2414,14 +2412,7 @@ mod imp {
         fn ne_scalar_i64(&self, _: &Layout, _: i64) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
-        fn select(
-            &self,
-            _: &Layout,
-            _: &Self,
-            _: &Layout,
-            _: &Self,
-            _: &Layout,
-        ) -> Result<Self> {
+        fn select(&self, _: &Layout, _: &Self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn reduce<O: ReduceOp>(&self, _: &Layout, _: &mut Self) -> Result<()> {

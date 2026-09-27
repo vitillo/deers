@@ -2162,8 +2162,7 @@ impl WhereCond {
 /// conditions into the branch dtype before calling this.
 fn select_tensors(cond: &Tensor, on_true: &Tensor, on_false: &Tensor) -> Tensor {
     let storage = Arc::new(RwLock::new(
-        cond
-            .storage()
+        cond.storage()
             .select(
                 cond.layout(),
                 &on_true.storage(),
@@ -2177,11 +2176,7 @@ fn select_tensors(cond: &Tensor, on_true: &Tensor, on_false: &Tensor) -> Tensor 
 }
 
 fn cond_nonzero(cond: &Tensor) -> Tensor {
-    if cond.dtype() == crate::DType::I64 {
-        cond.ne_scalar_i64(0)
-    } else {
-        cond.ne_scalar(0.0)
-    }
+    if cond.dtype() == crate::DType::I64 { cond.ne_scalar_i64(0) } else { cond.ne_scalar(0.0) }
 }
 
 impl TensorOp for WhereCond {
