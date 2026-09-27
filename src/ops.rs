@@ -14,7 +14,7 @@ use crate::backprop::GradientStore;
 use crate::error::{Error, Result};
 use crate::layout::{Layout, Shape};
 use crate::profiler;
-use crate::storage::{self, BackendStorage, MpsStorage, ReduceMax, ReduceSum, Storage};
+use crate::storage::{self, BackendStorage, ReduceMax, ReduceSum, Storage};
 use crate::tensor::Tensor;
 
 fn allocated_bytes(elements: usize, dtype: crate::DType) -> usize {

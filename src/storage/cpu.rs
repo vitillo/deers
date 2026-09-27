@@ -1570,7 +1570,7 @@ impl BackendStorage for CpuStorage {
                 slice
                     .iter()
                     .zip(mrow.iter())
-                    .map(|(&x, &m)| ((x * scale + m - max).exp() / sum))
+                    .map(|(&x, &m)| (x * scale + m - max).exp() / sum)
                     .collect::<Vec<_>>()
             })
             .collect();
