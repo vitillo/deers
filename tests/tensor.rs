@@ -3313,3 +3313,48 @@ fn where_i64_branches_conform() {
         assert_eq!(actual, expected, "where i64 on {:?}", device);
     }
 }
+
+#[test]
+fn copy_from_updates_buffer_in_place_on_each_device() {
+    // Arrange: a resident one-token buffer plus a staged id per device.
+    // Act + Assert
+    for device in devices() {
+        let buffer = Tensor::from_vec(vec![0i64], (1, 1), device);
+        let id = buffer.id();
+        buffer.copy_from(&Tensor::from_vec(vec![7i64], (1, 1), device)).unwrap();
+        assert_eq!(buffer.id(), id, "copy_from must keep the buffer identity on {device:?}");
+        assert_eq!(
+            buffer.to_vec::<i64>().unwrap(),
+            vec![7],
+            "copy_from must write the staged id on {device:?}"
+        );
+        assert_eq!(buffer.device(), device);
+    }
+}
+
+#[test]
+#[should_panic(expected = "copy_from needs a compact destination")]
+fn copy_from_rejects_non_compact_destination() {
+    // Arrange: a transposed view with strided, non-compact layout.
+    let base = Tensor::from_vec(vec![1i64, 2, 3, 4], (2, 2), Device::Cpu);
+    let dst = base.transpose(None);
+    let src = Tensor::from_vec(vec![5i64, 6, 7, 8], (2, 2), Device::Cpu);
+
+    // Act: the strided destination must fail loudly instead of writing
+    // the source elements at the wrong buffer offsets.
+    dst.copy_from(&src).unwrap();
+}
+
+#[test]
+fn copy_from_into_compact_prefix_view_writes_prefix() {
+    // Arrange: a compact narrow over a larger buffer plus staged values.
+    // Act + Assert
+    for device in devices() {
+        let base = Tensor::from_vec(vec![1i64, 2, 3, 4], (4,), device);
+        let dst = base.narrow(0, 0, 2);
+        assert!(dst.is_compact());
+        dst.copy_from(&Tensor::from_vec(vec![5i64, 6], (2,), device)).unwrap();
+        assert_eq!(dst.to_vec::<i64>().unwrap(), vec![5, 6]);
+        assert_eq!(base.to_vec::<i64>().unwrap(), vec![5, 6, 3, 4]);
+    }
+}

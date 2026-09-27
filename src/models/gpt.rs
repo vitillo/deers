@@ -1305,6 +1305,12 @@ impl Qwen3 {
     /// Prefill scores the prompt once, then each step decodes one token and
     /// samples the last-position logits under `config`. Returns only the new
     /// ids, without the prompt.
+    ///
+    /// Token inputs live on the model device: the prompt uploads once and a
+    /// resident one-token buffer is updated in place each step, so decode
+    /// never allocates or uploads a fresh input tensor per token. Sampling
+    /// runs on the host from one downloaded vocabulary row per token; that
+    /// single row read is the per-token host-traffic floor.
     pub fn generate(
         &self,
         prompt: &[u32],
@@ -1313,24 +1319,31 @@ impl Qwen3 {
     ) -> Result<Vec<u32>> {
         no_grad(|| {
             assert!(!prompt.is_empty(), "Qwen3 generate needs a non-empty prompt");
-            let mut caches: Vec<KvCache> =
-                (0..self.layers.len()).map(|_| KvCache::new()).collect();
+            let device = self.device();
+            let mut caches: Vec<KvCache> = (0..self.layers.len()).map(|_| KvCache::new()).collect();
             let ids: Vec<i64> = prompt.iter().map(|&id| id as i64).collect();
-            let idx = Tensor::from_vec(ids, (1, prompt.len()), Device::Cpu);
+            let idx = Tensor::from_vec(ids, (1, prompt.len()), device);
             let logits = self.prefill(&idx, &mut caches)?;
             let mut generated = vec![self.sample_last(&logits, prompt.len(), config)?];
+            let token = Tensor::from_vec(vec![generated[0] as i64], (1, 1), device);
 
             for _ in 1..max_tokens {
-                let last = *generated.last().expect("prompt produced one token");
-                let token = Tensor::from_vec(vec![last as i64], (1, 1), Device::Cpu);
-                let logits = self.decode(&token, prompt.len() + generated.len() - 1, &mut caches)?;
+                let logits =
+                    self.decode(&token, prompt.len() + generated.len() - 1, &mut caches)?;
                 generated.push(self.sample_last(&logits, 1, config)?);
+                let last = *generated.last().expect("prompt produced one token");
+                token.copy_from(&Tensor::from_vec(vec![last as i64], (1, 1), device))?;
             }
             Ok(generated)
         })
     }
 
     /// Samples the last position of `logits` shaped `[1, T, V]` under `config`.
+    ///
+    /// The row downloads once in its native dtype and converts to F32 on the
+    /// host for the sampler. Sampling stays on the host, so this one
+    /// vocabulary-row read is the per-token host-traffic floor: no cast
+    /// uploads a second copy back to the device first.
     fn sample_last(
         &self,
         logits: &Tensor,
@@ -1338,7 +1351,12 @@ impl Qwen3 {
         config: &SamplingConfig,
     ) -> Result<u32> {
         let row = logits.narrow(1, seq_len - 1, 1).reshape(vec![self.vocab_size]);
-        let probs = cast_tensor(&row, DType::F32)?.to_vec::<f32>()?;
+        let probs: Vec<f32> = match row.dtype() {
+            DType::F32 => row.to_vec()?,
+            DType::F16 => row.to_vec::<f16>()?.iter().map(|v| v.to_f32()).collect(),
+            DType::BF16 => row.to_vec::<bf16>()?.iter().map(|v| v.to_f32()).collect(),
+            other => panic!("Qwen3 sample_last needs float logits, got {other}"),
+        };
         Ok(sample_token(&probs, config))
     }
 
@@ -1362,6 +1380,14 @@ impl Qwen3 {
         }
         parameters.extend(self.norm.parameters());
         parameters
+    }
+
+    /// Returns the device holding the model parameters and rotary cache.
+    ///
+    /// `prefill` and `decode` require token ids on this device, and
+    /// `generate` builds its prompt and resident decode buffer here.
+    pub fn device(&self) -> Device {
+        self.cos.device()
     }
 
     /// Moves the model parameters and rotary caches to `device`.
