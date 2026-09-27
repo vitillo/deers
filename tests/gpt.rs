@@ -374,6 +374,9 @@ fn tiny_extension_config(sequence_len: usize) -> gpt::GPTConfig {
         rms_norm_eps: 1e-5,
         rope_base: 10_000.0,
         rope_scaling: gpt::RopeScaling::None,
+        norm: gpt::GptNormKind::RmsNorm,
+        mlp: gpt::GptMlpKind::ReluSquared,
+        tie_embeddings: false,
     }
 }
 
