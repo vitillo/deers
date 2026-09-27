@@ -102,7 +102,7 @@ fn ignore_mask(
     debug_assert_eq!(targets.layout().shape().as_slice(), &[batch]);
     let device = targets.device();
     // 1 where kept, 0 where ignored.
-    let keep_i64 = targets.ne_scalar(ignored as f64);
+    let keep_i64 = targets.ne_scalar_i64(ignored);
     // Ignored positions read class 0 so the gather stays in bounds.
     let safe_targets =
         keep_i64.where_cond(targets, &Tensor::zeros((batch,), crate::DType::I64, device));

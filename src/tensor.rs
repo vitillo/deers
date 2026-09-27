@@ -368,6 +368,15 @@ impl Tensor {
         Tensor::new(storage, Layout::from(self.layout().shape().clone()), false, None)
     }
 
+    /// Element-wise `!= scalar` for integer storage: 1 where different, else 0.
+    ///
+    /// Runs on device and carries no gradient, like a selector.
+    pub fn ne_scalar_i64(&self, scalar: i64) -> Tensor {
+        let storage =
+            Arc::new(RwLock::new(self.storage().ne_scalar_i64(&self.0.layout, scalar).unwrap()));
+        Tensor::new(storage, Layout::from(self.layout().shape().clone()), false, None)
+    }
+
     /// Creates a tensor of ones with the same shape, dtype, and device.
     pub fn ones_like(&self) -> Tensor {
         Tensor::ones(self.layout().shape().clone(), self.dtype(), self.device())

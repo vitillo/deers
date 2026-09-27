@@ -2176,13 +2176,21 @@ fn select_tensors(cond: &Tensor, on_true: &Tensor, on_false: &Tensor) -> Tensor 
     Tensor::new(storage, Layout::from(on_true.layout().shape().clone()), false, None)
 }
 
+fn cond_nonzero(cond: &Tensor) -> Tensor {
+    if cond.dtype() == crate::DType::I64 {
+        cond.ne_scalar_i64(0)
+    } else {
+        cond.ne_scalar(0.0)
+    }
+}
+
 impl TensorOp for WhereCond {
     fn forward(self) -> Result<Tensor> {
         let inputs: Vec<&Tensor> = vec![&self.cond, &self.on_true, &self.on_false];
         let _profile =
             profile_output("where", &inputs, self.on_true.layout().size(), self.on_true.dtype());
         let shape = self.on_true.layout().shape().clone();
-        let selector = self.cond.ne_scalar(0.0).to_dtype(self.on_true.dtype())?;
+        let selector = cond_nonzero(&self.cond).to_dtype(self.on_true.dtype())?;
         let storage = Arc::new(RwLock::new(selector.storage().select(
             selector.layout(),
             &self.on_true.storage(),
@@ -2196,7 +2204,7 @@ impl TensorOp for WhereCond {
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         // Route the output gradient to the picked branch, zeroing the other.
         // The selector is recomputed on device; no gradient flows into `cond`.
-        let selector = self.cond.ne_scalar(0.0).to_dtype(self.on_true.dtype())?;
+        let selector = cond_nonzero(&self.cond).to_dtype(self.on_true.dtype())?;
         let zeros = Tensor::zeros(
             self.on_true.layout().shape().clone(),
             self.on_true.dtype(),
