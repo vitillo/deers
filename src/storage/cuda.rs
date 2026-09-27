@@ -1389,16 +1389,16 @@ mod imp {
         fn eq_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self> {
             let compact = self.compact(layout)?;
             match &compact.inner {
-                (CudaInner::F16(src)) => {
+                CudaInner::F16(src) => {
                     compact.launch_scalar_f16("eq_scalar_f16", src, scalar as f32)
                 }
-                (CudaInner::BF16(src)) => {
+                CudaInner::BF16(src) => {
                     compact.launch_scalar_bf16("eq_scalar_bf16", src, scalar as f32)
                 }
-                (CudaInner::F32(src)) => {
+                CudaInner::F32(src) => {
                     compact.launch_scalar_f32("eq_scalar_f32", src, scalar as f32)
                 }
-                (CudaInner::I64(src)) => {
+                CudaInner::I64(src) => {
                     compact.launch_cmp_i64("eq_scalar_i64", src, scalar as i64)
                 }
             }
@@ -1407,16 +1407,16 @@ mod imp {
         fn ne_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self> {
             let compact = self.compact(layout)?;
             match &compact.inner {
-                (CudaInner::F16(src)) => {
+                CudaInner::F16(src) => {
                     compact.launch_scalar_f16("ne_scalar_f16", src, scalar as f32)
                 }
-                (CudaInner::BF16(src)) => {
+                CudaInner::BF16(src) => {
                     compact.launch_scalar_bf16("ne_scalar_bf16", src, scalar as f32)
                 }
-                (CudaInner::F32(src)) => {
+                CudaInner::F32(src) => {
                     compact.launch_scalar_f32("ne_scalar_f32", src, scalar as f32)
                 }
-                (CudaInner::I64(src)) => {
+                CudaInner::I64(src) => {
                     compact.launch_cmp_i64("ne_scalar_i64", src, scalar as i64)
                 }
             }

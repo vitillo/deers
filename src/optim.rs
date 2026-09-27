@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use half::{bf16, f16};
+use half::bf16;
 
 use crate::DType;
 use crate::GradientStore;
@@ -815,6 +815,7 @@ impl LrSchedule for OneCycle {
 mod tests {
     use super::*;
     use crate::{Device, Tensor};
+    use half::f16;
 
     #[test]
     fn test_sgd_step() {
