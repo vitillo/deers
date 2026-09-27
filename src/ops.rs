@@ -1928,7 +1928,12 @@ pub fn topk_forward(arg: &Tensor, k: usize, dim: usize) -> Result<(Tensor, Tenso
 }
 
 /// Runs sort on CUDA, returning compact (values, I64 indices) on the device.
-fn sort_cuda(arg: &Tensor, dim: usize, descending: bool, shape: &[usize]) -> Result<(Tensor, Tensor)> {
+fn sort_cuda(
+    arg: &Tensor,
+    dim: usize,
+    descending: bool,
+    shape: &[usize],
+) -> Result<(Tensor, Tensor)> {
     let (values, indices) = arg.storage().sort(arg.layout(), dim, descending)?;
     let layout: Layout = Shape::from(shape.to_vec()).into();
     Ok((

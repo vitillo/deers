@@ -134,8 +134,8 @@ pub fn top_k_accuracy(logits: &Tensor, targets: &Tensor, k: usize) -> f64 {
     correct as f64 / n as f64
 }
 
-/// Reads `[..., C]` logits to the host once as `[n, C]`, so CPU-only selectors
-/// do not upload their ids back to an accelerator.
+/// Reads `[..., C]` logits to the host once as `[n, C]`, so the selectors run
+/// on the host copy instead of uploading their ids back to an accelerator.
 fn host_logits(logits: &Tensor, n: usize, num_classes: usize) -> Tensor {
     logits
         .reshape(vec![n, num_classes])
