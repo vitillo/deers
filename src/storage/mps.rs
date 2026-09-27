@@ -4,6 +4,8 @@
 use std::borrow::Borrow;
 
 #[cfg(target_os = "macos")]
+use crate::error::Error;
+#[cfg(target_os = "macos")]
 use half::bf16;
 use half::f16;
 
@@ -1746,6 +1748,25 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
+        fn where_cond(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+        ) -> Result<Self> {
+            Err(Error::NotImplemented(
+                "mps where_cond is not implemented; move the inputs to the host first",
+            ))
+        }
+
+        fn masked_fill(&self, _: &Layout, _: &Self, _: &Layout, _: f64) -> Result<Self> {
+            Err(Error::NotImplemented(
+                "mps masked_fill is not implemented; move the inputs to the host first",
+            ))
+        }
+
         fn index_select(
             &self,
             layout: &Layout,
@@ -2350,6 +2371,19 @@ mod imp {
             Self::unavailable()
         }
         fn index_select(&self, _: &Layout, _: usize, _: &Self, _: &Layout) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn where_cond(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+        ) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn masked_fill(&self, _: &Layout, _: &Self, _: &Layout, _: f64) -> Result<Self> {
             Self::unavailable()
         }
         fn index_add(

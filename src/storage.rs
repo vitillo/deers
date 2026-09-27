@@ -275,6 +275,31 @@ pub trait BackendStorage: Sized {
         indices_layout: &Layout,
         dst_shape: &[usize],
     ) -> Result<Self>;
+    /// Picks per element from `on_true` where `cond` is nonzero, else from `on_false`.
+    ///
+    /// All three layouts share one shape. The returned compact storage carries
+    /// the branch dtype. Backends compute on device; unsupported backends or
+    /// dtypes return an error instead of roundtripping through the host.
+    fn where_cond(
+        &self,
+        cond_layout: &Layout,
+        on_true: &Self,
+        true_layout: &Layout,
+        on_false: &Self,
+        false_layout: &Layout,
+    ) -> Result<Self>;
+    /// Replaces elements with `value` where `mask` is nonzero.
+    ///
+    /// Both layouts share one shape. The returned compact storage matches
+    /// `layout` with the source dtype. Backends compute on device; unsupported
+    /// backends or dtypes return an error instead of roundtripping.
+    fn masked_fill(
+        &self,
+        layout: &Layout,
+        mask: &Self,
+        mask_layout: &Layout,
+        value: f64,
+    ) -> Result<Self>;
     /// Selects slices along `dim` using a compact 1-D integer index tensor.
     /// The output matches `layout` except the length at `dim` becomes `indices.len()`.
     fn index_select(
@@ -584,6 +609,49 @@ impl BackendStorage for Storage {
                 dst_shape,
             )?)),
             _ => Err(Error::DeviceMismatch { op: "scatter_add" }),
+        }
+    }
+
+    fn where_cond(
+        &self,
+        cond_layout: &Layout,
+        on_true: &Self,
+        true_layout: &Layout,
+        on_false: &Self,
+        false_layout: &Layout,
+    ) -> Result<Self> {
+        match (self, on_true, on_false) {
+            (Storage::Cpu(cond), Storage::Cpu(t), Storage::Cpu(f)) => {
+                Ok(Self::Cpu(cond.where_cond(cond_layout, t, true_layout, f, false_layout)?))
+            }
+            (Storage::Cuda(cond), Storage::Cuda(t), Storage::Cuda(f)) => {
+                Ok(Self::Cuda(cond.where_cond(cond_layout, t, true_layout, f, false_layout)?))
+            }
+            (Storage::Mps(cond), Storage::Mps(t), Storage::Mps(f)) => {
+                Ok(Self::Mps(cond.where_cond(cond_layout, t, true_layout, f, false_layout)?))
+            }
+            _ => Err(Error::DeviceMismatch { op: "where" }),
+        }
+    }
+
+    fn masked_fill(
+        &self,
+        layout: &Layout,
+        mask: &Self,
+        mask_layout: &Layout,
+        value: f64,
+    ) -> Result<Self> {
+        match (self, mask) {
+            (Storage::Cpu(storage), Storage::Cpu(mask)) => {
+                Ok(Self::Cpu(storage.masked_fill(layout, mask, mask_layout, value)?))
+            }
+            (Storage::Cuda(storage), Storage::Cuda(mask)) => {
+                Ok(Self::Cuda(storage.masked_fill(layout, mask, mask_layout, value)?))
+            }
+            (Storage::Mps(storage), Storage::Mps(mask)) => {
+                Ok(Self::Mps(storage.masked_fill(layout, mask, mask_layout, value)?))
+            }
+            _ => Err(Error::DeviceMismatch { op: "masked_fill" }),
         }
     }
 

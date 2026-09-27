@@ -1657,6 +1657,29 @@ fn cond_mask(cond: &Tensor) -> Result<Vec<bool>> {
     }
 }
 
+/// Refuses selection ops on accelerator tensors so callers cannot silently
+/// roundtrip whole tensors through the host. Every message names the host
+/// move that fixes the call.
+fn require_host(tensors: &[&Tensor], msg: &'static str) -> Result<()> {
+    for tensor in tensors {
+        if tensor.device() != crate::Device::Cpu {
+            return Err(Error::NotImplemented(msg));
+        }
+    }
+    Ok(())
+}
+
+/// Refuses mixed-device selection inputs. Each side already reads on its own
+/// device, so accepting the mix would hide a host roundtrip.
+fn check_same_device(tensors: &[&Tensor], op: &'static str) -> Result<()> {
+    for tensor in tensors {
+        if tensor.device() != tensors[0].device() {
+            return Err(Error::DeviceMismatch { op });
+        }
+    }
+    Ok(())
+}
+
 fn check_same_shape(a: &Tensor, b: &Tensor, op: &str) -> Result<()> {
     if a.layout().shape() != b.layout().shape() {
         return Err(Error::LayoutMismatch(format!(
@@ -1669,6 +1692,10 @@ fn check_same_shape(a: &Tensor, b: &Tensor, op: &str) -> Result<()> {
 }
 
 pub fn argmax_forward(arg: &Tensor, dim: usize, keep_dims: bool) -> Result<Tensor> {
+    require_host(
+        &[arg],
+        "argmax runs on the host only; move the input to the host with to_device(Device::Cpu) first",
+    )?;
     check_select_dim(arg.layout().ndim(), dim, "argmax")?;
     let shape: Vec<usize> = arg.layout().shape().iter().copied().collect();
     let (outer, dim_size, inner) = split_dim(&shape, dim);
@@ -1781,6 +1808,10 @@ fn topk_positions_f32(
 }
 
 pub fn topk_forward(arg: &Tensor, k: usize, dim: usize) -> Result<(Tensor, Tensor)> {
+    require_host(
+        &[arg],
+        "topk runs on the host only; move the input to the host with to_device(Device::Cpu) first",
+    )?;
     check_select_dim(arg.layout().ndim(), dim, "topk")?;
     let shape: Vec<usize> = arg.layout().shape().iter().copied().collect();
     let (outer, dim_size, inner) = split_dim(&shape, dim);
@@ -1868,6 +1899,10 @@ pub fn topk_forward(arg: &Tensor, k: usize, dim: usize) -> Result<(Tensor, Tenso
 }
 
 pub fn sort_forward(arg: &Tensor, dim: usize, descending: bool) -> Result<(Tensor, Tensor)> {
+    require_host(
+        &[arg],
+        "sort runs on the host only; move the input to the host with to_device(Device::Cpu) first",
+    )?;
     check_select_dim(arg.layout().ndim(), dim, "sort")?;
     let shape: Vec<usize> = arg.layout().shape().iter().copied().collect();
     let (outer, dim_size, inner) = split_dim(&shape, dim);
@@ -2143,6 +2178,7 @@ pub struct WhereCond {
 
 impl WhereCond {
     pub fn new(cond: Tensor, on_true: Tensor, on_false: Tensor) -> Result<Self> {
+        check_same_device(&[&cond, &on_true, &on_false], "where")?;
         check_same_shape(&cond, &on_true, "where")?;
         check_same_shape(&cond, &on_false, "where")?;
         if on_true.dtype() != on_false.dtype() {
@@ -2156,62 +2192,204 @@ impl WhereCond {
     }
 }
 
-/// Picks from `on_true` where `cond` is nonzero, else from `on_false`, on device.
-///
-/// All three tensors share one dtype here; [`Tensor::where_cond`] casts mixed
-/// conditions into the branch dtype before calling this.
-fn select_tensors(cond: &Tensor, on_true: &Tensor, on_false: &Tensor) -> Tensor {
-    let storage = Arc::new(RwLock::new(
-        cond.storage()
-            .select(
-                cond.layout(),
-                &on_true.storage(),
-                on_true.layout(),
-                &on_false.storage(),
-                on_false.layout(),
-            )
-            .unwrap(),
-    ));
-    Tensor::new(storage, Layout::from(on_true.layout().shape().clone()), false, None)
-}
-
-fn cond_nonzero(cond: &Tensor) -> Tensor {
-    if cond.dtype() == crate::DType::I64 { cond.ne_scalar_i64(0) } else { cond.ne_scalar(0.0) }
-}
-
 impl TensorOp for WhereCond {
     fn forward(self) -> Result<Tensor> {
         let inputs: Vec<&Tensor> = vec![&self.cond, &self.on_true, &self.on_false];
         let _profile =
             profile_output("where", &inputs, self.on_true.layout().size(), self.on_true.dtype());
-        let shape = self.on_true.layout().shape().clone();
-        let selector = cond_nonzero(&self.cond).to_dtype(self.on_true.dtype())?;
-        let storage = Arc::new(RwLock::new(selector.storage().select(
-            selector.layout(),
-            &self.on_true.storage(),
-            self.on_true.layout(),
-            &self.on_false.storage(),
-            self.on_false.layout(),
-        )?));
-        Ok(Tensor::new(storage, Layout::from(shape), false, Some(Box::new(self))))
+        let shape: Vec<usize> = self.on_true.layout().shape().iter().copied().collect();
+        let device = self.on_true.device();
+        if device != crate::Device::Cpu {
+            return self.forward_device(device, &shape);
+        }
+        let mask = cond_mask(&self.cond)?;
+        let out = match self.on_true.dtype() {
+            crate::DType::F32 => {
+                let t = self.on_true.to_vec::<f32>()?;
+                let f = self.on_false.to_vec::<f32>()?;
+                Tensor::from_vec(
+                    mask.iter()
+                        .enumerate()
+                        .map(|(i, m)| if *m { t[i] } else { f[i] })
+                        .collect::<Vec<f32>>(),
+                    shape,
+                    device,
+                )
+            }
+            crate::DType::F16 => {
+                let t = self.on_true.to_vec::<f16>()?;
+                let f = self.on_false.to_vec::<f16>()?;
+                Tensor::from_vec(
+                    mask.iter()
+                        .enumerate()
+                        .map(|(i, m)| if *m { t[i] } else { f[i] })
+                        .collect::<Vec<f16>>(),
+                    shape,
+                    device,
+                )
+            }
+            crate::DType::BF16 => {
+                let t = self.on_true.to_vec::<bf16>()?;
+                let f = self.on_false.to_vec::<bf16>()?;
+                Tensor::from_vec(
+                    mask.iter()
+                        .enumerate()
+                        .map(|(i, m)| if *m { t[i] } else { f[i] })
+                        .collect::<Vec<bf16>>(),
+                    shape,
+                    device,
+                )
+            }
+            crate::DType::I64 => {
+                let t = self.on_true.to_vec::<i64>()?;
+                let f = self.on_false.to_vec::<i64>()?;
+                Tensor::from_vec(
+                    mask.iter()
+                        .enumerate()
+                        .map(|(i, m)| if *m { t[i] } else { f[i] })
+                        .collect::<Vec<i64>>(),
+                    shape,
+                    device,
+                )
+            }
+        };
+        Ok(Tensor::new(out.storage_clone(), out.layout().clone(), false, Some(Box::new(self))))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        // Route the output gradient to the picked branch, zeroing the other.
-        // The selector is recomputed on device; no gradient flows into `cond`.
-        let selector = cond_nonzero(&self.cond).to_dtype(self.on_true.dtype())?;
-        let zeros = Tensor::zeros(
-            self.on_true.layout().shape().clone(),
-            self.on_true.dtype(),
-            self.on_true.device(),
-        );
-        grads.accumulate(&self.on_true, select_tensors(&selector, out_grad, &zeros));
-        grads.accumulate(&self.on_false, select_tensors(&selector, &zeros, out_grad));
+        let shape: Vec<usize> = self.on_true.layout().shape().iter().copied().collect();
+        if self.on_true.device() != crate::Device::Cpu {
+            return self.backward_device(grads, out_grad, &shape);
+        }
+        let mask = cond_mask(&self.cond)?;
+        match self.on_true.dtype() {
+            crate::DType::F32 => {
+                let go = out_grad.to_vec::<f32>()?;
+                let zero = 0.0f32;
+                let gt: Vec<f32> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { go[i] } else { zero }).collect();
+                let gf: Vec<f32> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { zero } else { go[i] }).collect();
+                let device = self.on_true.device();
+                grads.accumulate(&self.on_true, Tensor::from_vec(gt, shape.clone(), device));
+                let device = self.on_false.device();
+                grads.accumulate(&self.on_false, Tensor::from_vec(gf, shape, device));
+            }
+            crate::DType::F16 => {
+                let go = out_grad.to_vec::<f16>()?;
+                let zero = f16::from_f32(0.0);
+                let gt: Vec<f16> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { go[i] } else { zero }).collect();
+                let gf: Vec<f16> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { zero } else { go[i] }).collect();
+                let device = self.on_true.device();
+                grads.accumulate(&self.on_true, Tensor::from_vec(gt, shape.clone(), device));
+                let device = self.on_false.device();
+                grads.accumulate(&self.on_false, Tensor::from_vec(gf, shape, device));
+            }
+            crate::DType::BF16 => {
+                let go = out_grad.to_vec::<bf16>()?;
+                let zero = bf16::ZERO;
+                let gt: Vec<bf16> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { go[i] } else { zero }).collect();
+                let gf: Vec<bf16> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { zero } else { go[i] }).collect();
+                let device = self.on_true.device();
+                grads.accumulate(&self.on_true, Tensor::from_vec(gt, shape.clone(), device));
+                let device = self.on_false.device();
+                grads.accumulate(&self.on_false, Tensor::from_vec(gf, shape, device));
+            }
+            crate::DType::I64 => {
+                let go = out_grad.to_vec::<i64>()?;
+                let gt: Vec<i64> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { go[i] } else { 0 }).collect();
+                let gf: Vec<i64> =
+                    mask.iter().enumerate().map(|(i, m)| if *m { 0 } else { go[i] }).collect();
+                let device = self.on_true.device();
+                grads.accumulate(&self.on_true, Tensor::from_vec(gt, shape.clone(), device));
+                let device = self.on_false.device();
+                grads.accumulate(&self.on_false, Tensor::from_vec(gf, shape, device));
+            }
+        }
         Ok(())
     }
 
     fn dependencies(&self) -> Vec<&Tensor> {
         vec![&self.cond, &self.on_true, &self.on_false]
+    }
+}
+
+impl WhereCond {
+    /// Runs the select on device. Inputs are compacted first so kernels read
+    /// plain buffers and no bytes cross to the host.
+    fn forward_device(self, device: crate::Device, shape: &[usize]) -> Result<Tensor> {
+        if device != crate::Device::Cuda {
+            return Err(Error::NotImplemented(
+                "where_cond is not implemented for MPS tensors; move the inputs to the host with to_device(Device::Cpu) first",
+            ));
+        }
+        let cond = self.cond.compact();
+        let on_true = self.on_true.compact();
+        let on_false = self.on_false.compact();
+        let cond_storage = cond.storage();
+        let true_storage = on_true.storage();
+        let false_storage = on_false.storage();
+        let storage = cond_storage.where_cond(
+            cond.layout(),
+            &true_storage,
+            on_true.layout(),
+            &false_storage,
+            on_false.layout(),
+        )?;
+        Ok(Tensor::new(
+            Arc::new(RwLock::new(storage)),
+            Shape::from(shape.to_vec()).into(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    /// Routes the output gradient to the picked branch on device.
+    fn backward_device(
+        &self,
+        grads: &mut GradientStore,
+        out_grad: &Tensor,
+        shape: &[usize],
+    ) -> Result<()> {
+        if self.on_true.device() != crate::Device::Cuda {
+            return Err(Error::NotImplemented(
+                "where_cond is not implemented for MPS tensors; move the inputs to the host with to_device(Device::Cpu) first",
+            ));
+        }
+        let cond = self.cond.compact();
+        let go = out_grad.compact();
+        let zeros = Tensor::zeros(shape.to_vec(), self.on_true.dtype(), self.on_true.device());
+        let cond_storage = cond.storage();
+        let go_storage = go.storage();
+        let zero_storage = zeros.storage();
+        let gt = cond_storage.where_cond(
+            cond.layout(),
+            &go_storage,
+            go.layout(),
+            &zero_storage,
+            zeros.layout(),
+        )?;
+        grads.accumulate(
+            &self.on_true,
+            Tensor::new(Arc::new(RwLock::new(gt)), Shape::from(shape.to_vec()).into(), false, None),
+        );
+        let gf = cond_storage.where_cond(
+            cond.layout(),
+            &zero_storage,
+            zeros.layout(),
+            &go_storage,
+            go.layout(),
+        )?;
+        grads.accumulate(
+            &self.on_false,
+            Tensor::new(Arc::new(RwLock::new(gf)), Shape::from(shape.to_vec()).into(), false, None),
+        );
+        Ok(())
     }
 }
 
@@ -2224,8 +2402,68 @@ pub struct MaskedFill {
 
 impl MaskedFill {
     pub fn new(arg: Tensor, mask: Tensor, value: f64) -> Result<Self> {
+        check_same_device(&[&arg, &mask], "masked_fill")?;
         check_same_shape(&arg, &mask, "masked_fill")?;
         Ok(Self { arg, mask, value })
+    }
+
+    /// Fills masked positions on device. Inputs are compacted first so the
+    /// kernel reads plain buffers and no bytes cross to the host.
+    fn forward_device(self, device: crate::Device, shape: &[usize]) -> Result<Tensor> {
+        if device != crate::Device::Cuda {
+            return Err(Error::NotImplemented(
+                "masked_fill is not implemented for MPS tensors; move the inputs to the host with to_device(Device::Cpu) first",
+            ));
+        }
+        let arg = self.arg.compact();
+        let mask = self.mask.compact();
+        let value = self.value;
+        let arg_storage = arg.storage();
+        let mask_storage = mask.storage();
+        let storage = arg_storage.masked_fill(arg.layout(), &mask_storage, mask.layout(), value)?;
+        Ok(Tensor::new(
+            Arc::new(RwLock::new(storage)),
+            Shape::from(shape.to_vec()).into(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    /// Zeroes the output gradient at masked positions on device.
+    fn backward_device(
+        &self,
+        grads: &mut GradientStore,
+        out_grad: &Tensor,
+        shape: &[usize],
+    ) -> Result<()> {
+        if self.arg.device() != crate::Device::Cuda {
+            return Err(Error::NotImplemented(
+                "masked_fill is not implemented for MPS tensors; move the inputs to the host with to_device(Device::Cpu) first",
+            ));
+        }
+        let mask = self.mask.compact();
+        let go = out_grad.compact();
+        let zeros = Tensor::zeros(shape.to_vec(), self.arg.dtype(), self.arg.device());
+        let mask_storage = mask.storage();
+        let go_storage = go.storage();
+        let zero_storage = zeros.storage();
+        let grad = mask_storage.where_cond(
+            mask.layout(),
+            &zero_storage,
+            zeros.layout(),
+            &go_storage,
+            go.layout(),
+        )?;
+        grads.accumulate(
+            &self.arg,
+            Tensor::new(
+                Arc::new(RwLock::new(grad)),
+                Shape::from(shape.to_vec()).into(),
+                false,
+                None,
+            ),
+        );
+        Ok(())
     }
 }
 
@@ -2234,6 +2472,9 @@ impl TensorOp for MaskedFill {
         let _profile = profile_like("masked_fill", &self.arg);
         let shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
         let device = self.arg.device();
+        if device != crate::Device::Cpu {
+            return self.forward_device(device, &shape);
+        }
         let mask = cond_mask(&self.mask)?;
         let out = match self.arg.dtype() {
             crate::DType::F32 => {
@@ -2291,6 +2532,9 @@ impl TensorOp for MaskedFill {
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
         let shape: Vec<usize> = self.arg.layout().shape().iter().copied().collect();
         let device = self.arg.device();
+        if device != crate::Device::Cpu {
+            return self.backward_device(grads, out_grad, &shape);
+        }
         let mask = cond_mask(&self.mask)?;
         match self.arg.dtype() {
             crate::DType::F32 => {

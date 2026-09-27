@@ -51,6 +51,10 @@ mod imp {
         float scalar;
     } ScalarMeta;
 
+    typedef struct {
+        long long scalar;
+    } SelectFillMeta;
+
     __device__ __forceinline__ unsigned int compact_to_strided(unsigned int idx, const StridedMeta* meta) {
         unsigned int src = meta->offset;
         unsigned int rem = idx;
@@ -301,6 +305,48 @@ mod imp {
     DEFINE_WHERE(where_f16, half, __half2float(cond[idx]) != 0.0f)
     DEFINE_WHERE(where_bf16, __nv_bfloat16, __bfloat162float(cond[idx]) != 0.0f)
     DEFINE_WHERE(where_i64, long long, cond[idx] != 0LL)
+
+    // Selection ops stay on device: every input buffer below is compact.
+    // Masks are i64 0/1 buffers produced by select_nonzero_* so the select
+    // kernels stay dtype-generic over values while conditions keep their own.
+    #define DEFINE_SELECT_NONZERO(name, ctype, nonzero) \
+    extern "C" __global__ void name(const ctype* src, index_t* dst, unsigned int size) { \
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x; \
+        if (idx < size) { dst[idx] = (nonzero) ? 1 : 0; } \
+    }
+
+    DEFINE_SELECT_NONZERO(select_nonzero_f32, float, src[idx] != 0.0f)
+    DEFINE_SELECT_NONZERO(select_nonzero_f16, half, __half2float(src[idx]) != 0.0f)
+    DEFINE_SELECT_NONZERO(select_nonzero_bf16, __nv_bfloat16, __bfloat162float(src[idx]) != 0.0f)
+    DEFINE_SELECT_NONZERO(select_nonzero_i64, index_t, src[idx] != 0)
+
+    template <typename T>
+    __global__ void select_where_kernel(const index_t* mask, const T* on_true, const T* on_false, T* dst, unsigned int size) {
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < size) { dst[idx] = mask[idx] ? on_true[idx] : on_false[idx]; }
+    }
+
+    extern "C" __global__ void select_where_f32(const index_t* mask, const float* on_true, const float* on_false, float* dst, unsigned int size) { select_where_kernel(mask, on_true, on_false, dst, size); }
+    extern "C" __global__ void select_where_f16(const index_t* mask, const half* on_true, const half* on_false, half* dst, unsigned int size) { select_where_kernel(mask, on_true, on_false, dst, size); }
+    extern "C" __global__ void select_where_bf16(const index_t* mask, const __nv_bfloat16* on_true, const __nv_bfloat16* on_false, __nv_bfloat16* dst, unsigned int size) { select_where_kernel(mask, on_true, on_false, dst, size); }
+    extern "C" __global__ void select_where_i64(const index_t* mask, const index_t* on_true, const index_t* on_false, index_t* dst, unsigned int size) { select_where_kernel(mask, on_true, on_false, dst, size); }
+
+    extern "C" __global__ void select_fill_f32(const float* src, const index_t* mask, float* dst, unsigned int size, ScalarMeta meta) {
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < size) { dst[idx] = mask[idx] ? meta.scalar : src[idx]; }
+    }
+    extern "C" __global__ void select_fill_f16(const half* src, const index_t* mask, half* dst, unsigned int size, ScalarMeta meta) {
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < size) { dst[idx] = mask[idx] ? __float2half(meta.scalar) : src[idx]; }
+    }
+    extern "C" __global__ void select_fill_bf16(const __nv_bfloat16* src, const index_t* mask, __nv_bfloat16* dst, unsigned int size, ScalarMeta meta) {
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < size) { dst[idx] = mask[idx] ? __float2bfloat16(meta.scalar) : src[idx]; }
+    }
+    extern "C" __global__ void select_fill_i64(const index_t* src, const index_t* mask, index_t* dst, unsigned int size, SelectFillMeta meta) {
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < size) { dst[idx] = mask[idx] ? meta.scalar : src[idx]; }
+    }
 
     // Warp-shuffle sum of 32 floats within a single warp — no __syncthreads needed.
     __device__ __forceinline__ float warp_reduce_sum(float v) {
@@ -578,6 +624,11 @@ mod imp {
     }
 
     unsafe impl DeviceRepr for ScalarMetaI64 {}
+    struct SelectFillMeta {
+        scalar: i64,
+    }
+
+    unsafe impl DeviceRepr for SelectFillMeta {}
 
     #[derive(Clone, Debug)]
     pub enum CudaInner {
@@ -1202,6 +1253,73 @@ mod imp {
             launch_1d!(&self.runtime, kernel, cond.len(), cond, on_true, on_false, &out, &len);
             Ok(Self { inner: CudaInner::I64(out), runtime: self.runtime.clone() })
         }
+        /// Lowers a compact condition buffer of any dtype to an i64 0/1 mask.
+        fn select_nonzero(&self) -> Result<Self> {
+            match &self.inner {
+                CudaInner::F16(src) => self.launch_nonzero_buf("select_nonzero_f16", src),
+                CudaInner::BF16(src) => self.launch_nonzero_buf("select_nonzero_bf16", src),
+                CudaInner::F32(src) => self.launch_nonzero_buf("select_nonzero_f32", src),
+                CudaInner::I64(src) => self.launch_nonzero_buf("select_nonzero_i64", src),
+            }
+        }
+
+        fn launch_nonzero_buf<T: DeviceRepr>(
+            &self,
+            kernel: &str,
+            src: &CudaSlice<T>,
+        ) -> Result<Self> {
+            let out = unsafe { alloc_uninit::<i64>(&self.runtime, src.len()) }?;
+            let len = src.len() as u32;
+            launch_1d!(&self.runtime, kernel, src.len(), src, &out, &len);
+            Ok(Self { inner: CudaInner::I64(out), runtime: self.runtime.clone() })
+        }
+
+        /// Picks per element from two compact same-dtype buffers. All three
+        /// buffers share one length; the mask holds i64 0/1 values.
+        fn launch_select_where<T: DeviceRepr>(
+            &self,
+            kernel: &str,
+            mask: &CudaSlice<i64>,
+            on_true: &CudaSlice<T>,
+            on_false: &CudaSlice<T>,
+        ) -> Result<CudaSlice<T>> {
+            let out = unsafe { alloc_uninit::<T>(&self.runtime, on_true.len()) }?;
+            let len = on_true.len() as u32;
+            launch_1d!(&self.runtime, kernel, on_true.len(), mask, on_true, on_false, &out, &len);
+            Ok(out)
+        }
+
+        /// Replaces compact source elements with a float scalar where the i64
+        /// 0/1 mask is set. The kernel converts the scalar per dtype.
+        fn launch_select_fill<T: DeviceRepr>(
+            &self,
+            kernel: &str,
+            mask: &CudaSlice<i64>,
+            src: &CudaSlice<T>,
+            scalar: f32,
+        ) -> Result<CudaSlice<T>> {
+            let out = unsafe { alloc_uninit::<T>(&self.runtime, src.len()) }?;
+            let len = src.len() as u32;
+            let meta = ScalarMeta { scalar };
+            launch_1d!(&self.runtime, kernel, src.len(), src, mask, &out, &len, &meta);
+            Ok(out)
+        }
+
+        /// Replaces compact i64 source elements with an i64 scalar where the
+        /// i64 0/1 mask is set.
+        fn launch_select_fill_i64(
+            &self,
+            kernel: &str,
+            mask: &CudaSlice<i64>,
+            src: &CudaSlice<i64>,
+            scalar: i64,
+        ) -> Result<CudaSlice<i64>> {
+            let out = unsafe { alloc_uninit::<i64>(&self.runtime, src.len()) }?;
+            let len = src.len() as u32;
+            let meta = SelectFillMeta { scalar };
+            launch_1d!(&self.runtime, kernel, src.len(), src, mask, &out, &len, &meta);
+            Ok(out)
+        }
 
         fn reduce_impl(&self, kernel: &str, outer_size: usize, reduce_size: usize) -> Result<Self> {
             match &self.inner {
@@ -1780,6 +1898,82 @@ mod imp {
                 _ => Err(Error::DTypeMismatch(
                     "gather requires floating source and i64 indices".into(),
                 )),
+            }
+        }
+
+        fn where_cond(
+            &self,
+            cond_layout: &Layout,
+            on_true: &Self,
+            true_layout: &Layout,
+            on_false: &Self,
+            false_layout: &Layout,
+        ) -> Result<Self> {
+            let cond = self.compact(cond_layout)?;
+            let on_true = on_true.compact(true_layout)?;
+            let on_false = on_false.compact(false_layout)?;
+            let mask = cond.select_nonzero()?;
+            let CudaInner::I64(mask) = &mask.inner else {
+                return Err(Error::Cuda("where_cond mask must be i64".into()));
+            };
+            match (&on_true.inner, &on_false.inner) {
+                (CudaInner::F16(t), CudaInner::F16(f)) => {
+                    let out = on_true.launch_select_where("select_where_f16", mask, t, f)?;
+                    Ok(Self { inner: CudaInner::F16(out), runtime: on_true.runtime.clone() })
+                }
+                (CudaInner::BF16(t), CudaInner::BF16(f)) => {
+                    let out = on_true.launch_select_where("select_where_bf16", mask, t, f)?;
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: on_true.runtime.clone() })
+                }
+                (CudaInner::F32(t), CudaInner::F32(f)) => {
+                    let out = on_true.launch_select_where("select_where_f32", mask, t, f)?;
+                    Ok(Self { inner: CudaInner::F32(out), runtime: on_true.runtime.clone() })
+                }
+                (CudaInner::I64(t), CudaInner::I64(f)) => {
+                    let out = on_true.launch_select_where("select_where_i64", mask, t, f)?;
+                    Ok(Self { inner: CudaInner::I64(out), runtime: on_true.runtime.clone() })
+                }
+                _ => Err(Error::DTypeMismatch(format!(
+                    "where_cond: {:?} vs {:?}",
+                    on_true.dtype(),
+                    on_false.dtype()
+                ))),
+            }
+        }
+
+        fn masked_fill(
+            &self,
+            layout: &Layout,
+            mask: &Self,
+            mask_layout: &Layout,
+            value: f64,
+        ) -> Result<Self> {
+            let src = self.compact(layout)?;
+            let mask = mask.compact(mask_layout)?;
+            let mask = mask.select_nonzero()?;
+            let CudaInner::I64(mask) = &mask.inner else {
+                return Err(Error::Cuda("masked_fill mask must be i64".into()));
+            };
+            match &src.inner {
+                CudaInner::F16(data) => {
+                    let out =
+                        src.launch_select_fill("select_fill_f16", mask, data, value as f32)?;
+                    Ok(Self { inner: CudaInner::F16(out), runtime: src.runtime.clone() })
+                }
+                CudaInner::BF16(data) => {
+                    let out =
+                        src.launch_select_fill("select_fill_bf16", mask, data, value as f32)?;
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: src.runtime.clone() })
+                }
+                CudaInner::F32(data) => {
+                    let out = src.launch_select_fill("select_fill_f32", mask, data, value as f32)?;
+                    Ok(Self { inner: CudaInner::F32(out), runtime: src.runtime.clone() })
+                }
+                CudaInner::I64(data) => {
+                    let out =
+                        src.launch_select_fill_i64("select_fill_i64", mask, data, value as i64)?;
+                    Ok(Self { inner: CudaInner::I64(out), runtime: src.runtime.clone() })
+                }
             }
         }
 
@@ -2435,6 +2629,19 @@ mod imp {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn index_select(&self, _: &Layout, _: usize, _: &Self, _: &Layout) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn where_cond(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+        ) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn masked_fill(&self, _: &Layout, _: &Self, _: &Layout, _: f64) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn index_add(

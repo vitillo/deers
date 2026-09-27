@@ -1,5 +1,6 @@
 use candle_core::{Device as CDevice, Tensor as CTensor, Var};
 use deers::{Device, Tensor};
+use half::{bf16, f16};
 
 const TOL: f32 = 1e-4;
 
@@ -25,6 +26,20 @@ fn devices() -> Vec<Device> {
         .into_iter()
         .filter(|device| device.is_available())
         .collect()
+}
+
+/// Host devices for CPU-only selectors. `argmax`, `topk`, and `sort` refuse
+/// accelerator tensors, so their conformance tests run here while refusal
+/// coverage lives in the accelerator tests below.
+fn host_devices() -> Vec<Device> {
+    vec![Device::Cpu]
+}
+
+/// Devices with on-device selection kernels. `where_cond` and `masked_fill`
+/// compute on the host and on CUDA; MPS refuses them, so its coverage lives
+/// in the refusal tests below.
+fn select_devices() -> Vec<Device> {
+    devices().into_iter().filter(|device| !matches!(device, Device::Mps)).collect()
 }
 
 #[test]
@@ -2496,7 +2511,7 @@ fn argmax_forward_drops_dim() {
     let expected = vec![1i64, 2];
 
     // Act
-    let results: Vec<(Device, Vec<i64>)> = devices()
+    let results: Vec<(Device, Vec<i64>)> = host_devices()
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
@@ -2519,7 +2534,7 @@ fn argmax_forward_keep_dims() {
     let expected = vec![1i64, 2];
 
     // Act
-    let results: Vec<(Device, Vec<i64>)> = devices()
+    let results: Vec<(Device, Vec<i64>)> = host_devices()
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
@@ -2543,7 +2558,7 @@ fn topk_forward_values_and_indices() {
     let expected_indices = vec![1i64, 2, 2, 0];
 
     // Act
-    let results: Vec<(Device, Vec<f32>, Vec<i64>)> = devices()
+    let results: Vec<(Device, Vec<f32>, Vec<i64>)> = host_devices()
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
@@ -2569,7 +2584,7 @@ fn sort_forward_ascending() {
     let expected_indices = vec![1i64, 2, 0, 2, 1, 0];
 
     // Act
-    let results: Vec<(Device, Vec<f32>, Vec<i64>)> = devices()
+    let results: Vec<(Device, Vec<f32>, Vec<i64>)> = host_devices()
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
@@ -2595,7 +2610,7 @@ fn sort_forward_descending() {
     let expected_indices = vec![0i64, 2, 1];
 
     // Act
-    let results: Vec<(Device, Vec<f32>, Vec<i64>)> = devices()
+    let results: Vec<(Device, Vec<f32>, Vec<i64>)> = host_devices()
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (3,), device);
@@ -2669,7 +2684,7 @@ fn where_forward_conforms() {
     let expected = vec![1.0f32, 20.0, 30.0, 4.0];
 
     // Act
-    let results: Vec<(Device, Vec<f32>)> = devices()
+    let results: Vec<(Device, Vec<f32>)> = select_devices()
         .into_iter()
         .map(|device| {
             let cond = Tensor::from_vec(cond.clone(), (2, 2), device);
@@ -2697,7 +2712,7 @@ fn where_backward_conforms() {
     let expected_false_grad = vec![0.0f32, 1.0, 1.0, 0.0];
 
     // Act
-    let results: Vec<(Device, Vec<f32>, Vec<f32>)> = devices()
+    let results: Vec<(Device, Vec<f32>, Vec<f32>)> = select_devices()
         .into_iter()
         .map(|device| {
             let cond = Tensor::from_vec(cond.clone(), (2, 2), device);
@@ -2734,7 +2749,7 @@ fn masked_fill_forward_conforms() {
     let expected = vec![1.0f32, 0.0, 3.0, 0.0];
 
     // Act
-    let results: Vec<(Device, Vec<f32>)> = devices()
+    let results: Vec<(Device, Vec<f32>)> = select_devices()
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
@@ -2759,7 +2774,7 @@ fn masked_fill_backward_conforms() {
     let expected_grad = vec![1.0f32, 0.0, 1.0, 0.0];
 
     // Act
-    let results: Vec<(Device, Vec<f32>)> = devices()
+    let results: Vec<(Device, Vec<f32>)> = select_devices()
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
@@ -2892,7 +2907,7 @@ fn argmax_forward_candle_conforms() {
         .collect();
 
     // Act
-    let results: Vec<(Device, Vec<i64>)> = devices()
+    let results: Vec<(Device, Vec<i64>)> = host_devices()
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
@@ -2925,7 +2940,7 @@ fn argmax_forward_dim0_candle_conforms() {
         .collect();
 
     // Act
-    let results: Vec<(Device, Vec<i64>)> = devices()
+    let results: Vec<(Device, Vec<i64>)> = host_devices()
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
@@ -3012,7 +3027,7 @@ fn where_forward_candle_conforms() {
         .unwrap();
 
     // Act
-    let results: Vec<(Device, Vec<f32>)> = devices()
+    let results: Vec<(Device, Vec<f32>)> = select_devices()
         .into_iter()
         .map(|device| {
             let cond = Tensor::from_vec(cond.clone(), (2, 2), device);
@@ -3046,7 +3061,7 @@ fn where_backward_candle_conforms() {
     let expected_false_grad = candle_grad(&candle_grads, &candle_false);
 
     // Act
-    let results: Vec<(Device, Vec<f32>, Vec<f32>)> = devices()
+    let results: Vec<(Device, Vec<f32>, Vec<f32>)> = select_devices()
         .into_iter()
         .map(|device| {
             let cond = Tensor::from_vec(cond.clone(), (2, 2), device);
@@ -3092,7 +3107,7 @@ fn sort_last_dim_candle_conforms() {
         .collect();
 
     // Act
-    let results: Vec<(Device, Vec<f32>, Vec<i64>)> = devices()
+    let results: Vec<(Device, Vec<f32>, Vec<i64>)> = host_devices()
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
@@ -3312,4 +3327,515 @@ fn where_i64_branches_conform() {
     for (device, actual) in results {
         assert_eq!(actual, expected, "where i64 on {:?}", device);
     }
+}
+// Selection ops keep whole tensors on device or refuse loudly. The tests
+// below pin both halves: host behavior across dtypes, CUDA kernel parity
+// with the host, and loud refusal off host where no kernel exists.
+
+/// Asserts an off-host call refused loudly with a message containing `wanted`.
+fn assert_refusal<T>(result: std::thread::Result<T>, op: &str, device: Device, wanted: &str) {
+    match result {
+        Ok(_) => panic!("{op} must refuse {device:?} tensors"),
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .expect("refusal must carry a message");
+            assert!(
+                message.contains(wanted),
+                "{op} refusal on {device:?} must contain {wanted:?}, got: {message}"
+            );
+        }
+    }
+}
+
+fn catch_argmax(device: Device) -> std::thread::Result<Tensor> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Tensor::from_vec(vec![1.0f32, 2.0], (2,), device).argmax(0, false)
+    }))
+}
+
+fn catch_topk(device: Device) -> std::thread::Result<(Tensor, Tensor)> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Tensor::from_vec(vec![1.0f32, 2.0], (2,), device).topk(1, 0)
+    }))
+}
+
+fn catch_sort(device: Device) -> std::thread::Result<(Tensor, Tensor)> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Tensor::from_vec(vec![1.0f32, 2.0], (2,), device).sort(0, false)
+    }))
+}
+
+#[test]
+fn argmax_refuses_accelerator_tensors() {
+    // Arrange
+    let targets: Vec<Device> = devices().into_iter().filter(|d| *d != Device::Cpu).collect();
+
+    // Act
+    let refusals: Vec<(Device, std::thread::Result<Tensor>)> =
+        targets.into_iter().map(|device| (device, catch_argmax(device))).collect();
+
+    // Assert
+    for (device, result) in refusals {
+        assert_refusal(result, "argmax", device, "host");
+    }
+}
+
+#[test]
+fn topk_refuses_accelerator_tensors() {
+    // Arrange
+    let targets: Vec<Device> = devices().into_iter().filter(|d| *d != Device::Cpu).collect();
+
+    // Act
+    let refusals: Vec<(Device, std::thread::Result<(Tensor, Tensor)>)> =
+        targets.into_iter().map(|device| (device, catch_topk(device))).collect();
+
+    // Assert
+    for (device, result) in refusals {
+        assert_refusal(result, "topk", device, "host");
+    }
+}
+
+#[test]
+fn sort_refuses_accelerator_tensors() {
+    // Arrange
+    let targets: Vec<Device> = devices().into_iter().filter(|d| *d != Device::Cpu).collect();
+
+    // Act
+    let refusals: Vec<(Device, std::thread::Result<(Tensor, Tensor)>)> =
+        targets.into_iter().map(|device| (device, catch_sort(device))).collect();
+
+    // Assert
+    for (device, result) in refusals {
+        assert_refusal(result, "sort", device, "host");
+    }
+}
+
+#[test]
+fn where_cond_refuses_mps_tensors() {
+    // Arrange: MPS is the only backend without a select kernel.
+    let targets: Vec<Device> = devices().into_iter().filter(|d| matches!(d, Device::Mps)).collect();
+
+    // Act
+    let refusals: Vec<(Device, std::thread::Result<Tensor>)> = targets
+        .into_iter()
+        .map(|device| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let cond = Tensor::from_vec(vec![1i64, 0], (2,), device);
+                let on_true = Tensor::from_vec(vec![1.0f32, 2.0], (2,), device);
+                let on_false = Tensor::from_vec(vec![10.0f32, 20.0], (2,), device);
+                cond.where_cond(&on_true, &on_false)
+            }));
+            (device, result)
+        })
+        .collect();
+
+    // Assert
+    for (device, result) in refusals {
+        assert_refusal(result, "where_cond", device, "host");
+    }
+}
+
+#[test]
+fn masked_fill_refuses_mps_tensors() {
+    // Arrange: MPS is the only backend without a select kernel.
+    let targets: Vec<Device> = devices().into_iter().filter(|d| matches!(d, Device::Mps)).collect();
+
+    // Act
+    let refusals: Vec<(Device, std::thread::Result<Tensor>)> = targets
+        .into_iter()
+        .map(|device| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let input = Tensor::from_vec(vec![1.0f32, 2.0], (2,), device);
+                let mask = Tensor::from_vec(vec![0i64, 1], (2,), device);
+                input.masked_fill(&mask, 0.0)
+            }));
+            (device, result)
+        })
+        .collect();
+
+    // Assert
+    for (device, result) in refusals {
+        assert_refusal(result, "masked_fill", device, "host");
+    }
+}
+
+#[test]
+fn where_cond_refuses_mixed_devices() {
+    // Arrange
+    if !Device::Cuda.is_available() {
+        return;
+    }
+    let cond = Tensor::from_vec(vec![1i64, 0], (2,), Device::Cpu);
+    let on_true = Tensor::from_vec(vec![1.0f32, 2.0], (2,), Device::Cuda);
+    let on_false = Tensor::from_vec(vec![10.0f32, 20.0], (2,), Device::Cuda);
+
+    // Act
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cond.where_cond(&on_true, &on_false)
+    }));
+
+    // Assert
+    assert_refusal(result, "where_cond", Device::Cuda, "DeviceMismatch");
+}
+
+#[test]
+fn masked_fill_refuses_mixed_devices() {
+    // Arrange
+    if !Device::Cuda.is_available() {
+        return;
+    }
+    let input = Tensor::from_vec(vec![1.0f32, 2.0], (2,), Device::Cuda);
+    let mask = Tensor::from_vec(vec![0i64, 1], (2,), Device::Cpu);
+
+    // Act
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| input.masked_fill(&mask, 0.0)));
+
+    // Assert
+    assert_refusal(result, "masked_fill", Device::Cuda, "DeviceMismatch");
+}
+
+#[test]
+fn argmax_host_supports_all_dtypes() {
+    // Arrange
+    let device = Device::Cpu;
+    let expected = vec![1i64];
+
+    // Act
+    let f32_out = Tensor::from_vec(vec![1.0f32, 3.0, 2.0], (3,), device).argmax(0, false);
+    let f16_out = Tensor::from_vec(
+        vec![f16::from_f32(1.0), f16::from_f32(3.0), f16::from_f32(2.0)],
+        (3,),
+        device,
+    )
+    .argmax(0, false);
+    let bf16_out = Tensor::from_vec(
+        vec![bf16::from_f32(1.0), bf16::from_f32(3.0), bf16::from_f32(2.0)],
+        (3,),
+        device,
+    )
+    .argmax(0, false);
+    let i64_out = Tensor::from_vec(vec![1i64, 3, 2], (3,), device).argmax(0, false);
+
+    // Assert
+    for (label, output) in
+        [("f32", f32_out), ("f16", f16_out), ("bf16", bf16_out), ("i64", i64_out)]
+    {
+        assert_eq!(output.to_vec::<i64>().unwrap(), expected, "argmax host {label}");
+    }
+}
+
+#[test]
+fn topk_host_supports_all_dtypes() {
+    // Arrange
+    let device = Device::Cpu;
+    let expected_indices = vec![1i64, 2];
+
+    // Act
+    let (f32_values, f32_indices) =
+        Tensor::from_vec(vec![1.0f32, 3.0, 2.0], (3,), device).topk(2, 0);
+    let (f16_values, f16_indices) = Tensor::from_vec(
+        vec![f16::from_f32(1.0), f16::from_f32(3.0), f16::from_f32(2.0)],
+        (3,),
+        device,
+    )
+    .topk(2, 0);
+    let (bf16_values, bf16_indices) = Tensor::from_vec(
+        vec![bf16::from_f32(1.0), bf16::from_f32(3.0), bf16::from_f32(2.0)],
+        (3,),
+        device,
+    )
+    .topk(2, 0);
+    let (i64_values, i64_indices) = Tensor::from_vec(vec![1i64, 3, 2], (3,), device).topk(2, 0);
+
+    // Assert
+    assert_close(&f32_values.to_vec::<f32>().unwrap(), &[3.0, 2.0], "topk host f32 values");
+    assert_eq!(f32_indices.to_vec::<i64>().unwrap(), expected_indices, "topk host f32 indices");
+    let f16_values: Vec<f32> =
+        f16_values.to_vec::<f16>().unwrap().iter().map(|v| v.to_f32()).collect();
+    assert_close(&f16_values, &[3.0, 2.0], "topk host f16 values");
+    assert_eq!(f16_indices.to_vec::<i64>().unwrap(), expected_indices, "topk host f16 indices");
+    let bf16_values: Vec<f32> =
+        bf16_values.to_vec::<bf16>().unwrap().iter().map(|v| v.to_f32()).collect();
+    assert_close(&bf16_values, &[3.0, 2.0], "topk host bf16 values");
+    assert_eq!(bf16_indices.to_vec::<i64>().unwrap(), expected_indices, "topk host bf16 indices");
+    assert_eq!(i64_values.to_vec::<i64>().unwrap(), vec![3, 2], "topk host i64 values");
+    assert_eq!(i64_indices.to_vec::<i64>().unwrap(), expected_indices, "topk host i64 indices");
+}
+
+#[test]
+fn sort_host_supports_all_dtypes() {
+    // Arrange
+    let device = Device::Cpu;
+    let expected_indices = vec![1i64, 2, 0];
+
+    // Act
+    let (f32_values, f32_indices) =
+        Tensor::from_vec(vec![3.0f32, 1.0, 2.0], (3,), device).sort(0, false);
+    let (f16_values, f16_indices) = Tensor::from_vec(
+        vec![f16::from_f32(3.0), f16::from_f32(1.0), f16::from_f32(2.0)],
+        (3,),
+        device,
+    )
+    .sort(0, false);
+    let (bf16_values, bf16_indices) = Tensor::from_vec(
+        vec![bf16::from_f32(3.0), bf16::from_f32(1.0), bf16::from_f32(2.0)],
+        (3,),
+        device,
+    )
+    .sort(0, false);
+    let (i64_values, i64_indices) = Tensor::from_vec(vec![3i64, 1, 2], (3,), device).sort(0, false);
+
+    // Assert
+    assert_close(&f32_values.to_vec::<f32>().unwrap(), &[1.0, 2.0, 3.0], "sort host f32 values");
+    assert_eq!(f32_indices.to_vec::<i64>().unwrap(), expected_indices, "sort host f32 indices");
+    let f16_values: Vec<f32> =
+        f16_values.to_vec::<f16>().unwrap().iter().map(|v| v.to_f32()).collect();
+    assert_close(&f16_values, &[1.0, 2.0, 3.0], "sort host f16 values");
+    assert_eq!(f16_indices.to_vec::<i64>().unwrap(), expected_indices, "sort host f16 indices");
+    let bf16_values: Vec<f32> =
+        bf16_values.to_vec::<bf16>().unwrap().iter().map(|v| v.to_f32()).collect();
+    assert_close(&bf16_values, &[1.0, 2.0, 3.0], "sort host bf16 values");
+    assert_eq!(bf16_indices.to_vec::<i64>().unwrap(), expected_indices, "sort host bf16 indices");
+    assert_eq!(i64_values.to_vec::<i64>().unwrap(), vec![1, 2, 3], "sort host i64 values");
+    assert_eq!(i64_indices.to_vec::<i64>().unwrap(), expected_indices, "sort host i64 indices");
+}
+
+#[test]
+fn where_host_supports_all_cond_dtypes() {
+    // Arrange
+    let device = Device::Cpu;
+    let on_true = vec![1.0f32, 2.0, 3.0, 4.0];
+    let on_false = vec![10.0f32, 20.0, 30.0, 40.0];
+    let expected = vec![1.0f32, 20.0, 30.0, 4.0];
+
+    // Act
+    let f32_cond = Tensor::from_vec(vec![1.0f32, 0.0, 0.0, 1.0], (2, 2), device);
+    let f16_cond = Tensor::from_vec(
+        vec![f16::from_f32(1.0), f16::from_f32(0.0), f16::from_f32(0.0), f16::from_f32(1.0)],
+        (2, 2),
+        device,
+    );
+    let bf16_cond = Tensor::from_vec(
+        vec![bf16::from_f32(1.0), bf16::from_f32(0.0), bf16::from_f32(0.0), bf16::from_f32(1.0)],
+        (2, 2),
+        device,
+    );
+    let i64_cond = Tensor::from_vec(vec![1i64, 0, 0, 1], (2, 2), device);
+    let outputs = [f32_cond, f16_cond, bf16_cond, i64_cond].into_iter().map(|cond| {
+        let on_true = Tensor::from_vec(on_true.clone(), (2, 2), device);
+        let on_false = Tensor::from_vec(on_false.clone(), (2, 2), device);
+        cond.where_cond(&on_true, &on_false).to_vec::<f32>().unwrap()
+    });
+
+    // Assert
+    for (dtype, actual) in ["f32", "f16", "bf16", "i64"].into_iter().zip(outputs) {
+        assert_close(&actual, &expected, &format!("where host cond {dtype}"));
+    }
+}
+
+#[test]
+fn masked_fill_host_supports_all_cond_dtypes() {
+    // Arrange
+    let device = Device::Cpu;
+    let data = vec![1.0f32, 2.0, 3.0, 4.0];
+    let expected = vec![1.0f32, 9.0, 3.0, 9.0];
+
+    // Act
+    let f32_mask = Tensor::from_vec(vec![0.0f32, 1.0, 0.0, 1.0], (2, 2), device);
+    let f16_mask = Tensor::from_vec(
+        vec![f16::from_f32(0.0), f16::from_f32(1.0), f16::from_f32(0.0), f16::from_f32(1.0)],
+        (2, 2),
+        device,
+    );
+    let bf16_mask = Tensor::from_vec(
+        vec![bf16::from_f32(0.0), bf16::from_f32(1.0), bf16::from_f32(0.0), bf16::from_f32(1.0)],
+        (2, 2),
+        device,
+    );
+    let i64_mask = Tensor::from_vec(vec![0i64, 1, 0, 1], (2, 2), device);
+    let outputs = [f32_mask, f16_mask, bf16_mask, i64_mask].into_iter().map(|mask| {
+        let input = Tensor::from_vec(data.clone(), (2, 2), device);
+        input.masked_fill(&mask, 9.0).to_vec::<f32>().unwrap()
+    });
+
+    // Assert
+    for (dtype, actual) in ["f32", "f16", "bf16", "i64"].into_iter().zip(outputs) {
+        assert_close(&actual, &expected, &format!("masked_fill host mask {dtype}"));
+    }
+}
+
+#[test]
+fn where_forward_cuda_matches_host_across_dtypes() {
+    // Arrange
+    if !Device::Cuda.is_available() {
+        return;
+    }
+
+    // Act: identical inputs on the host and on CUDA, including a transposed
+    // (non-compact) view that forces the device compact path.
+    let cond = vec![1i64, 0, 0, 1];
+    let on_true_f32 = vec![1.0f32, 2.0, 3.0, 4.0];
+    let on_false_f32 = vec![10.0f32, 20.0, 30.0, 40.0];
+    let host = Tensor::from_vec(cond.clone(), (2, 2), Device::Cpu).where_cond(
+        &Tensor::from_vec(on_true_f32.clone(), (2, 2), Device::Cpu),
+        &Tensor::from_vec(on_false_f32.clone(), (2, 2), Device::Cpu),
+    );
+    let accel = Tensor::from_vec(cond.clone(), (2, 2), Device::Cuda).where_cond(
+        &Tensor::from_vec(on_true_f32.clone(), (2, 2), Device::Cuda),
+        &Tensor::from_vec(on_false_f32.clone(), (2, 2), Device::Cuda),
+    );
+    let host_t = Tensor::from_vec(on_true_f32.clone(), (2, 2), Device::Cpu).transpose(None);
+    let host_t = Tensor::from_vec(cond.clone(), (2, 2), Device::Cpu).where_cond(
+        &host_t,
+        &Tensor::from_vec(on_false_f32.clone(), (2, 2), Device::Cpu).transpose(None),
+    );
+    let accel_t = Tensor::from_vec(on_true_f32.clone(), (2, 2), Device::Cuda).transpose(None);
+    let accel_t = Tensor::from_vec(cond.clone(), (2, 2), Device::Cuda).where_cond(
+        &accel_t,
+        &Tensor::from_vec(on_false_f32.clone(), (2, 2), Device::Cuda).transpose(None),
+    );
+    let host_i64 = Tensor::from_vec(cond.clone(), (2, 2), Device::Cpu).where_cond(
+        &Tensor::from_vec(vec![1i64, 2, 3, 4], (2, 2), Device::Cpu),
+        &Tensor::from_vec(vec![10i64, 20, 30, 40], (2, 2), Device::Cpu),
+    );
+    let accel_i64 = Tensor::from_vec(cond.clone(), (2, 2), Device::Cuda).where_cond(
+        &Tensor::from_vec(vec![1i64, 2, 3, 4], (2, 2), Device::Cuda),
+        &Tensor::from_vec(vec![10i64, 20, 30, 40], (2, 2), Device::Cuda),
+    );
+
+    // Assert
+    assert_eq!(accel.device(), Device::Cuda, "where output must stay on CUDA");
+    assert_close(
+        &accel.to_vec::<f32>().unwrap(),
+        &host.to_vec::<f32>().unwrap(),
+        "where cuda f32 matches host",
+    );
+    assert_close(
+        &accel_t.to_vec::<f32>().unwrap(),
+        &host_t.to_vec::<f32>().unwrap(),
+        "where cuda transposed matches host",
+    );
+    assert_eq!(
+        accel_i64.to_vec::<i64>().unwrap(),
+        host_i64.to_vec::<i64>().unwrap(),
+        "where cuda i64 matches host"
+    );
+}
+
+#[test]
+fn where_backward_cuda_matches_host() {
+    // Arrange
+    if !Device::Cuda.is_available() {
+        return;
+    }
+    let cond = vec![1i64, 0, 0, 1];
+    let on_true = vec![1.0f32, 2.0, 3.0, 4.0];
+    let on_false = vec![10.0f32, 20.0, 30.0, 40.0];
+
+    // Act
+    let run = |device: Device| {
+        let cond = Tensor::from_vec(cond.clone(), (2, 2), device);
+        let on_true = Tensor::from_vec(on_true.clone(), (2, 2), device).attach();
+        let on_false = Tensor::from_vec(on_false.clone(), (2, 2), device).attach();
+        let loss = cond.where_cond(&on_true, &on_false).sum(vec![0, 1], false);
+        let grads = loss.backward().unwrap();
+        (
+            grads.get(on_true.id()).unwrap().to_vec::<f32>().unwrap(),
+            grads.get(on_false.id()).unwrap().to_vec::<f32>().unwrap(),
+        )
+    };
+    let (host_true, host_false) = run(Device::Cpu);
+    let (accel_true, accel_false) = run(Device::Cuda);
+
+    // Assert
+    assert_close(&accel_true, &host_true, "where cuda true grad matches host");
+    assert_close(&accel_false, &host_false, "where cuda false grad matches host");
+}
+
+#[test]
+fn masked_fill_forward_cuda_matches_host_across_dtypes() {
+    // Arrange
+    if !Device::Cuda.is_available() {
+        return;
+    }
+    let mask = vec![0i64, 1, 0, 1];
+
+    // Act
+    let run_f32 = |device: Device| {
+        let input = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), device);
+        let mask = Tensor::from_vec(mask.clone(), (2, 2), device);
+        input.masked_fill(&mask, 9.0).to_vec::<f32>().unwrap()
+    };
+    let run_i64 = |device: Device| {
+        let input = Tensor::from_vec(vec![1i64, 2, 3, 4], (2, 2), device);
+        let mask = Tensor::from_vec(mask.clone(), (2, 2), device);
+        input.masked_fill(&mask, 7.0).to_vec::<i64>().unwrap()
+    };
+    let run_f16 = |device: Device| {
+        let input = Tensor::from_vec(
+            vec![f16::from_f32(1.0), f16::from_f32(2.0), f16::from_f32(3.0), f16::from_f32(4.0)],
+            (2, 2),
+            device,
+        );
+        let mask = Tensor::from_vec(mask.clone(), (2, 2), device);
+        input
+            .masked_fill(&mask, 9.0)
+            .to_vec::<f16>()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_f32())
+            .collect::<Vec<f32>>()
+    };
+    let run_bf16 = |device: Device| {
+        let input = Tensor::from_vec(
+            vec![
+                bf16::from_f32(1.0),
+                bf16::from_f32(2.0),
+                bf16::from_f32(3.0),
+                bf16::from_f32(4.0),
+            ],
+            (2, 2),
+            device,
+        );
+        let mask = Tensor::from_vec(mask.clone(), (2, 2), device);
+        input
+            .masked_fill(&mask, 9.0)
+            .to_vec::<bf16>()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_f32())
+            .collect::<Vec<f32>>()
+    };
+
+    // Assert
+    assert_close(&run_f32(Device::Cuda), &run_f32(Device::Cpu), "masked_fill cuda f32");
+    assert_eq!(run_i64(Device::Cuda), run_i64(Device::Cpu), "masked_fill cuda i64");
+    assert_close(&run_f16(Device::Cuda), &run_f16(Device::Cpu), "masked_fill cuda f16");
+    assert_close(&run_bf16(Device::Cuda), &run_bf16(Device::Cpu), "masked_fill cuda bf16");
+}
+
+#[test]
+fn masked_fill_backward_cuda_matches_host() {
+    // Arrange
+    if !Device::Cuda.is_available() {
+        return;
+    }
+    let data = vec![1.0f32, 2.0, 3.0, 4.0];
+    let mask = vec![0i64, 1, 0, 1];
+
+    // Act
+    let run = |device: Device| {
+        let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
+        let mask = Tensor::from_vec(mask.clone(), (2, 2), device);
+        let loss = input.masked_fill(&mask, 0.0).sum(vec![0, 1], false);
+        let grads = loss.backward().unwrap();
+        grads.get(input.id()).unwrap().to_vec::<f32>().unwrap()
+    };
+
+    // Assert
+    assert_close(&run(Device::Cuda), &run(Device::Cpu), "masked_fill cuda grad matches host");
 }

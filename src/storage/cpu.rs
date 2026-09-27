@@ -231,6 +231,40 @@ impl From<Vec<i64>> for CpuStorage {
     }
 }
 
+/// Reads a condition tensor as a compact predicate mask. Any nonzero element
+/// selects, matching the host-side `cond_mask` rule in `ops`.
+fn cond_nonzero(cond: &CpuStorage, layout: &Layout) -> Vec<bool> {
+    match cond {
+        CpuStorage::F16(_) => cond.iter::<f16>(layout).map(|v| v.to_f32() != 0.0).collect(),
+        CpuStorage::BF16(_) => cond.iter::<bf16>(layout).map(|v| v.to_f32() != 0.0).collect(),
+        CpuStorage::F32(_) => cond.iter::<f32>(layout).map(|v| *v != 0.0).collect(),
+        CpuStorage::I64(_) => cond.iter::<i64>(layout).map(|v| *v != 0).collect(),
+    }
+}
+
+/// Picks per element from two strided branch buffers using a compact mask.
+fn pick<D: WithDType + Copy>(
+    mask: &[bool],
+    on_true: &CpuStorage,
+    true_layout: &Layout,
+    on_false: &CpuStorage,
+    false_layout: &Layout,
+) -> Vec<D> {
+    let t: Vec<D> = on_true.iter(true_layout).copied().collect();
+    let f: Vec<D> = on_false.iter(false_layout).copied().collect();
+    mask.iter().enumerate().map(|(i, m)| if *m { t[i] } else { f[i] }).collect()
+}
+
+/// Replaces strided source elements with `value` where the compact mask is set.
+fn fill<D: WithDType + Copy>(
+    mask: &[bool],
+    src: &CpuStorage,
+    layout: &Layout,
+    value: D,
+) -> Vec<D> {
+    src.iter(layout).enumerate().map(|(i, v)| if mask[i] { value } else { *v }).collect()
+}
+
 impl BackendStorage for CpuStorage {
     fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self> {
         if l.is_compact() {
@@ -495,6 +529,56 @@ impl BackendStorage for CpuStorage {
                 on_true.dtype(),
                 on_false.dtype()
             ))),
+        }
+    }
+
+    fn where_cond(
+        &self,
+        cond_layout: &Layout,
+        on_true: &Self,
+        true_layout: &Layout,
+        on_false: &Self,
+        false_layout: &Layout,
+    ) -> Result<Self> {
+        let mask = cond_nonzero(self, cond_layout);
+        match (on_true, on_false) {
+            (CpuStorage::F16(_), CpuStorage::F16(_)) => {
+                Ok(CpuStorage::F16(pick(&mask, on_true, true_layout, on_false, false_layout)))
+            }
+            (CpuStorage::BF16(_), CpuStorage::BF16(_)) => {
+                Ok(CpuStorage::BF16(pick(&mask, on_true, true_layout, on_false, false_layout)))
+            }
+            (CpuStorage::F32(_), CpuStorage::F32(_)) => {
+                Ok(CpuStorage::F32(pick(&mask, on_true, true_layout, on_false, false_layout)))
+            }
+            (CpuStorage::I64(_), CpuStorage::I64(_)) => {
+                Ok(CpuStorage::I64(pick(&mask, on_true, true_layout, on_false, false_layout)))
+            }
+            _ => Err(Error::DTypeMismatch(format!(
+                "where_cond: {:?} vs {:?}",
+                on_true.dtype(),
+                on_false.dtype()
+            ))),
+        }
+    }
+
+    fn masked_fill(
+        &self,
+        layout: &Layout,
+        mask: &Self,
+        mask_layout: &Layout,
+        value: f64,
+    ) -> Result<Self> {
+        let mask = cond_nonzero(mask, mask_layout);
+        match self {
+            CpuStorage::F16(_) => {
+                Ok(CpuStorage::F16(fill(&mask, self, layout, f16::from_f32(value as f32))))
+            }
+            CpuStorage::BF16(_) => {
+                Ok(CpuStorage::BF16(fill(&mask, self, layout, bf16::from_f32(value as f32))))
+            }
+            CpuStorage::F32(_) => Ok(CpuStorage::F32(fill(&mask, self, layout, value as f32))),
+            CpuStorage::I64(_) => Ok(CpuStorage::I64(fill(&mask, self, layout, value as i64))),
         }
     }
 
