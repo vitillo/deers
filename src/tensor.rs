@@ -277,7 +277,7 @@ impl Tensor {
                 let data: Vec<f32> = (0..shape.size()).map(|_| rng.random()).collect();
                 CpuStorage::from(data).to(device)
             }
-            _ => panic!("rand: unsupported dtype {dtype:?}, expected F16, BF16, or F32"),
+            _ => unimplemented!(),
         };
         Tensor::from_plain_storage(storage, shape)
     }
@@ -322,7 +322,7 @@ impl Tensor {
                     .collect();
                 CpuStorage::from(data).to(device)
             }
-            _ => panic!("randn: unsupported dtype {dtype:?}, expected F16, BF16, or F32"),
+            _ => unimplemented!(),
         };
         Tensor::from_plain_storage(storage, shape)
     }
