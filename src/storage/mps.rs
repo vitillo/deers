@@ -2095,9 +2095,9 @@ mod imp {
             if let (Some((ctx, input, _)), Some((_, output, out_len))) =
                 (self.accelerated(DType::F16), dst.accelerated(DType::F16))
             {
-                assert_eq!(src_layout.size(), out_len);
+                assert!(src_layout.size() <= out_len);
                 let meta = Self::strided_meta(src_layout);
-                ctx.dispatch_1d("copy_compact_f16", out_len, |encoder| {
+                ctx.dispatch_1d("copy_compact_f16", src_layout.size(), |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(output), 0);
                     MpsContext::set_params(encoder, 2, &meta);
@@ -2108,9 +2108,9 @@ mod imp {
             if let (Some((ctx, input, _)), Some((_, output, out_len))) =
                 (self.accelerated(DType::F32), dst.accelerated(DType::F32))
             {
-                assert_eq!(src_layout.size(), out_len);
+                assert!(src_layout.size() <= out_len);
                 let meta = Self::strided_meta(src_layout);
-                ctx.dispatch_1d("copy_compact_f32", out_len, |encoder| {
+                ctx.dispatch_1d("copy_compact_f32", src_layout.size(), |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(output), 0);
                     MpsContext::set_params(encoder, 2, &meta);
@@ -2121,9 +2121,9 @@ mod imp {
             if let (Some((ctx, input, _)), Some((_, output, out_len))) =
                 (self.accelerated(DType::I64), dst.accelerated(DType::I64))
             {
-                assert_eq!(src_layout.size(), out_len);
+                assert!(src_layout.size() <= out_len);
                 let meta = Self::strided_meta(src_layout);
-                ctx.dispatch_1d("copy_compact_i64", out_len, |encoder| {
+                ctx.dispatch_1d("copy_compact_i64", src_layout.size(), |encoder| {
                     encoder.set_buffer(0, Some(input), 0);
                     encoder.set_buffer(1, Some(output), 0);
                     MpsContext::set_params(encoder, 2, &meta);

@@ -3344,3 +3344,17 @@ fn copy_from_rejects_non_compact_destination() {
     // the source elements at the wrong buffer offsets.
     dst.copy_from(&src).unwrap();
 }
+
+#[test]
+fn copy_from_into_compact_prefix_view_writes_prefix() {
+    // Arrange: a compact narrow over a larger buffer plus staged values.
+    // Act + Assert
+    for device in devices() {
+        let base = Tensor::from_vec(vec![1i64, 2, 3, 4], (4,), device);
+        let dst = base.narrow(0, 0, 2);
+        assert!(dst.is_compact());
+        dst.copy_from(&Tensor::from_vec(vec![5i64, 6], (2,), device)).unwrap();
+        assert_eq!(dst.to_vec::<i64>().unwrap(), vec![5, 6]);
+        assert_eq!(base.to_vec::<i64>().unwrap(), vec![5, 6, 3, 4]);
+    }
+}
