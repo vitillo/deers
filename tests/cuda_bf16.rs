@@ -773,6 +773,7 @@ fn fused_rope_forward_and_backward_match_unfused() {
         let ncos_cuda = big_cuda.narrow(1, 3, t);
         let nsin_cuda = big_cuda.narrow(1, 3, t);
         let actual_narrow = to_f32(&x_cuda.fused_rope(&ncos_cuda, &nsin_cuda));
+        let expected_narrow = to_f32(&unfused_rope(&x_cpu, &ncos_cpu, &nsin_cpu));
         let cpu_loss =
             unfused_rope(&x_cpu, &cos_cpu, &sin_cpu).sum(vec![0, 1, 2, 3], true);
         let cuda_loss =
@@ -783,7 +784,7 @@ fn fused_rope_forward_and_backward_match_unfused() {
         // Assert
         let label = format!("fused rope [{b}, {t}, {h}, {d}]");
         assert_close(&actual_fwd, &expected_fwd, &format!("{label} fwd"));
-        assert_close(&actual_narrow, &expected_fwd, &format!("{label} narrowed fwd"));
+        assert_close(&actual_narrow, &expected_narrow, &format!("{label} narrowed fwd"));
         assert_close(&actual_grad, &expected_grad, &format!("{label} bwd"));
     }
 }

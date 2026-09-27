@@ -1313,7 +1313,7 @@ impl BackendStorage for CpuStorage {
                     inner_size,
                     eps,
                     |v: f16| v.to_f32(),
-                    |v| f16::from_f32(v),
+                    f16::from_f32,
                 )))
             }
             CpuStorage::BF16(data) => {
@@ -1325,7 +1325,7 @@ impl BackendStorage for CpuStorage {
                     inner_size,
                     eps,
                     |v: bf16| v.to_f32(),
-                    |v| bf16::from_f32(v),
+                    bf16::from_f32,
                 )))
             }
             CpuStorage::I64(_) => Err(crate::error::Error::DTypeMismatch(
@@ -1570,7 +1570,7 @@ impl BackendStorage for CpuStorage {
                 slice
                     .iter()
                     .zip(mrow.iter())
-                    .map(|(&x, &m)| ((x * scale + m - max).exp() / sum))
+                    .map(|(&x, &m)| (x * scale + m - max).exp() / sum)
                     .collect::<Vec<_>>()
             })
             .collect();
