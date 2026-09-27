@@ -1181,6 +1181,101 @@ impl TensorOp for LogSumExp {
     }
 }
 
+/// Fused RoPE over `[B, T, H, D]` rows: `y1 = x1*cos - x2*sin`,
+/// `y2 = x1*sin + x2*cos`, one CUDA kernel.
+///
+/// Replaces the narrow/broadcast-mul/sub/add/cat chain (16 kernels, 10 of
+/// them compacts). The backward reuses the unfused primitive decomposition
+/// (training only; decode runs under `no_grad`), so no fused backward exists.
+#[derive(Debug)]
+pub struct FusedRope {
+    x: Tensor,
+    cos: Tensor,
+    sin: Tensor,
+    /// Saved compacted `(input, cos, sin)` for the backward pass.
+    saved: Option<(Tensor, Tensor, Tensor)>,
+}
+
+impl FusedRope {
+    pub fn new(x: Tensor, cos: Tensor, sin: Tensor) -> Result<Self> {
+        Ok(Self { x, cos, sin, saved: None })
+    }
+}
+
+impl TensorOp for FusedRope {
+    fn forward(mut self) -> Result<Tensor> {
+        let _profile = profile_like("rope", &self.x);
+        let shape = self.x.layout().shape();
+        assert_eq!(shape.ndim(), 4, "RoPE expects a 4D attention tensor");
+        let head_dim = shape[3];
+        assert!(head_dim.is_multiple_of(2), "RoPE requires an even head dimension");
+        let half_dim = head_dim / 2;
+        assert_eq!(
+            self.cos.layout().shape(),
+            self.sin.layout().shape(),
+            "RoPE cos/sin shapes must match"
+        );
+        assert_eq!(
+            self.cos.layout().shape()[3],
+            half_dim,
+            "RoPE cache last dimension must equal head_dim / 2"
+        );
+        assert_eq!(self.cos.dtype(), self.x.dtype(), "RoPE cos dtype must match input");
+        assert_eq!(self.sin.dtype(), self.x.dtype(), "RoPE sin dtype must match input");
+        let outer_size = self.x.layout().size() / head_dim;
+        let n_heads = shape[2];
+        let t_len = shape[1];
+        let cos_t_len = self.cos.layout().shape()[1];
+        let x_c = self.x.compact();
+        let cos_c = self.cos.compact();
+        let sin_c = self.sin.compact();
+        let out_storage = {
+            let x_storage = x_c.storage();
+            let cos_storage = cos_c.storage();
+            let sin_storage = sin_c.storage();
+            x_storage.rope_fwd(
+                x_c.layout(),
+                &cos_storage,
+                cos_c.layout(),
+                &sin_storage,
+                sin_c.layout(),
+                outer_size,
+                head_dim,
+                n_heads,
+                t_len,
+                cos_t_len,
+            )?
+        };
+        let output =
+            Tensor::new(Arc::new(RwLock::new(out_storage)), self.x.layout().clone(), false, None);
+        self.saved = Some((x_c, cos_c, sin_c));
+        Ok(Tensor::new(
+            output.storage_clone(),
+            output.layout().clone(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let (_, cos, sin) = self.saved.as_ref().expect("forward must run before backward");
+        let half_dim = self.x.layout().shape()[3] / 2;
+        let grad_c = out_grad.compact();
+        // y1 = x1*c - x2*s, y2 = x1*s + x2*c, so
+        // gx1 = g1*c + g2*s and gx2 = g2*c - g1*s.
+        let g1 = grad_c.narrow(3, 0, half_dim);
+        let g2 = grad_c.narrow(3, half_dim, half_dim);
+        let gx1 = (&g1 * cos) + &(&g2 * sin);
+        let gx2 = (&g2 * cos) - &(&g1 * sin);
+        grads.accumulate(&self.x, Tensor::cat(&[gx1, gx2], 3));
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.x, &self.cos, &self.sin]
+    }
+}
+
 /// Fused RMSNorm over the last axis: `x * rsqrt(mean(x^2) + eps) * w`, one CUDA kernel.
 ///
 /// The forward compacts the input and reads the affine scale straight from the

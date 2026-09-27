@@ -496,6 +496,16 @@ impl Tensor {
         ops::FusedRmsNorm::new(self.clone(), weight.cloned(), eps).unwrap().forward().unwrap()
     }
 
+    /// Fused RoPE over `[B, T, H, D]` rows: `y1 = x1*cos - x2*sin`, `y2 = x1*sin + x2*cos`.
+    ///
+    /// One kernel reads both halves plus the cos/sin row for the token position,
+    /// replacing the narrow/broadcast-mul/sub/add/cat chain. Cos/sin cover the
+    /// sequence with `head_dim / 2` elements per row, narrowing to one row per
+    /// token exactly like the unfused path.
+    pub fn fused_rope(&self, cos: &Tensor, sin: &Tensor) -> Tensor {
+        ops::FusedRope::new(self.clone(), cos.clone(), sin.clone()).unwrap().forward().unwrap()
+    }
+
     /// Matrix multiplication: `[..., m, k] @ [..., k, n] -> [..., m, n]`.
     pub fn matmul(&self, other: &Tensor) -> Tensor {
         ops::MatMul::new(self.clone(), other.clone()).unwrap().forward().unwrap()

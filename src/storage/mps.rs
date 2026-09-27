@@ -2019,6 +2019,37 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
+        #[allow(clippy::too_many_arguments)]
+        fn rope_fwd(
+            &self,
+            layout: &Layout,
+            cos: &Self,
+            cos_layout: &Layout,
+            sin: &Self,
+            sin_layout: &Layout,
+            outer_size: usize,
+            head_dim: usize,
+            n_heads: usize,
+            t_len: usize,
+            cos_t_len: usize,
+        ) -> Result<Self> {
+            // No Metal RoPE kernel yet: round-trip through the CPU fallback
+            // exactly like the fused log-softmax path.
+            let inner = self.as_cpu_storage().rope_fwd(
+                layout,
+                &cos.as_cpu_storage(),
+                cos_layout,
+                &sin.as_cpu_storage(),
+                sin_layout,
+                outer_size,
+                head_dim,
+                n_heads,
+                t_len,
+                cos_t_len,
+            )?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
         fn dtype(&self) -> DType {
             match &self.inner {
                 MpsInner::Accelerated { dtype, .. } => *dtype,
@@ -2400,6 +2431,22 @@ mod imp {
             _: usize,
             _: usize,
             _: f32,
+        ) -> Result<Self> {
+            Self::unavailable()
+        }
+        #[allow(clippy::too_many_arguments)]
+        fn rope_fwd(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
         ) -> Result<Self> {
             Self::unavailable()
         }
