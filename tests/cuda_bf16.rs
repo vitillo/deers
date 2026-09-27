@@ -667,8 +667,7 @@ fn fused_rms_norm_forward_and_backward_match_unfused() {
     for (outer, inner) in [(3usize, 300usize), (2, 128)] {
         let values: Vec<f32> =
             (0..outer * inner).map(|i| ((i * 37) % 101) as f32 / 50.0 - 1.0).collect();
-        let weights: Vec<f32> =
-            (0..inner).map(|i| 0.5 + ((i * 13) % 7) as f32 * 0.1).collect();
+        let weights: Vec<f32> = (0..inner).map(|i| 0.5 + ((i * 13) % 7) as f32 * 0.1).collect();
         let x_cpu = Tensor::from_vec(
             values.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
             vec![outer, inner],
@@ -739,8 +738,7 @@ fn fused_rope_forward_and_backward_match_unfused() {
         let half = d / 2;
         let values: Vec<f32> =
             (0..b * t * h * d).map(|i| ((i * 53) % 89) as f32 / 44.0 - 1.0).collect();
-        let table: Vec<f32> =
-            (0..t * half).map(|i| ((i * 29) % 61) as f32 / 61.0).collect();
+        let table: Vec<f32> = (0..t * half).map(|i| ((i * 29) % 61) as f32 / 61.0).collect();
         let mk = |vals: &[f32], shape: Vec<usize>, device: deers::Device| {
             Tensor::from_vec(
                 vals.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
@@ -774,10 +772,8 @@ fn fused_rope_forward_and_backward_match_unfused() {
         let nsin_cuda = big_cuda.narrow(1, 3, t);
         let actual_narrow = to_f32(&x_cuda.fused_rope(&ncos_cuda, &nsin_cuda));
         let expected_narrow = to_f32(&unfused_rope(&x_cpu, &ncos_cpu, &nsin_cpu));
-        let cpu_loss =
-            unfused_rope(&x_cpu, &cos_cpu, &sin_cpu).sum(vec![0, 1, 2, 3], true);
-        let cuda_loss =
-            x_cuda.fused_rope(&cos_cuda, &sin_cuda).sum(vec![0, 1, 2, 3], true);
+        let cpu_loss = unfused_rope(&x_cpu, &cos_cpu, &sin_cpu).sum(vec![0, 1, 2, 3], true);
+        let cuda_loss = x_cuda.fused_rope(&cos_cuda, &sin_cuda).sum(vec![0, 1, 2, 3], true);
         let expected_grad = to_f32(&cpu_loss.backward().unwrap().get(x_cpu.id()).unwrap());
         let actual_grad = to_f32(&cuda_loss.backward().unwrap().get(x_cuda.id()).unwrap());
 
@@ -872,9 +868,8 @@ fn fused_masked_softmax_forward_and_backward_match_unfused() {
         return;
     }
     for (b, h, tq, tk, tm) in [(1usize, 2, 3, 130, 3), (1, 16, 1, 513, 1)] {
-        let svals: Vec<f32> = (0..b * h * tq * tk)
-            .map(|i| ((i * 31) % 79) as f32 / 79.0 * 4.0 - 2.0)
-            .collect();
+        let svals: Vec<f32> =
+            (0..b * h * tq * tk).map(|i| ((i * 31) % 79) as f32 / 79.0 * 4.0 - 2.0).collect();
         // Row-dependent triangle: row r allows keys 0..=r plus a dense
         // tail, so a wrong mask-row mapping cannot hide behind uniformity.
         let mvals: Vec<f32> = (0..tm * tk)
@@ -901,8 +896,7 @@ fn fused_masked_softmax_forward_and_backward_match_unfused() {
         let expected_fwd = to_f32(&((&s_cpu * scale) + &m_cpu).softmax(3));
         let actual_fwd = to_f32(&s_cuda.scaled_masked_softmax(&m_cuda, scale, 3));
         let cpu_loss = ((&s_cpu * scale) + &m_cpu).softmax(3).sum(vec![0, 1, 2, 3], true);
-        let cuda_loss =
-            s_cuda.scaled_masked_softmax(&m_cuda, scale, 3).sum(vec![0, 1, 2, 3], true);
+        let cuda_loss = s_cuda.scaled_masked_softmax(&m_cuda, scale, 3).sum(vec![0, 1, 2, 3], true);
         let expected_grad = to_f32(&cpu_loss.backward().unwrap().get(s_cpu.id()).unwrap());
         let actual_grad = to_f32(&cuda_loss.backward().unwrap().get(s_cuda.id()).unwrap());
         let expected_gm = to_f32(&cpu_loss.backward().unwrap().get(m_cpu.id()).unwrap());

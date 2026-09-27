@@ -14,8 +14,9 @@ const MAX_DIMS: usize = 8;
 #[cfg(all(feature = "cuda", target_os = "linux"))]
 mod imp {
     use super::*;
+    use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::{Arc, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use half::{bf16, f16};
 
@@ -25,7 +26,8 @@ mod imp {
         cublas::{CudaBlas, result as cublas_result, sys as cublas_sys},
         driver::{
             CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DevicePtrMut,
-            DeviceRepr, LaunchConfig, PushKernelArg, sys::CUevent_flags,
+            DeviceRepr, DeviceSlice, LaunchArgs, LaunchConfig, PushKernelArg, SyncOnDrop,
+            sys::{self, CUevent_flags},
         },
         nvrtc,
     };
@@ -751,10 +753,193 @@ mod imp {
 
     #[derive(Clone, Debug)]
     pub enum CudaInner {
-        F16(CudaSlice<f16>),
-        BF16(CudaSlice<bf16>),
-        F32(CudaSlice<f32>),
-        I64(CudaSlice<i64>),
+        F16(Pooled<f16>),
+        BF16(Pooled<bf16>),
+        F32(Pooled<f32>),
+        I64(Pooled<i64>),
+    }
+
+    /// Cap on retained pooled memory: decoding repeats a few shapes, so a
+    /// small pool absorbs nearly every temporary while prefill one-offs
+    /// drain back to the driver.
+    const POOL_MAX_BYTES: usize = 256 << 20;
+    /// Cap per exact-size bucket, so a shape spike cannot pin unbounded blocks.
+    const POOL_MAX_BLOCKS_PER_BUCKET: usize = 32;
+
+    /// Stream-ordered device memory pool.
+    ///
+    /// Decode allocates thousands of same-shape temporaries per token while
+    /// the driver round trip costs ~1 us per alloc/free on the host thread,
+    /// which is wall-critical. Buckets key exact `(dtype, len)` pairs: every
+    /// decode temporary repeats every step, so hits are the norm and cold
+    /// shapes fall through to the driver. Deers runs one stream, so
+    /// last-in first-out reuse is ordering-safe by construction. Only
+    /// uninitialized temporaries pool: zeroed or transferred memory enters
+    /// freely (its content is irrelevant on checkout) but never checks out
+    /// anywhere except `alloc_uninit`. Set `DEERS_NO_POOL` to bypass the pool
+    /// when bisecting.
+    #[derive(Debug, Default)]
+    pub(crate) struct CudaPool {
+        f16: HashMap<usize, Vec<CudaSlice<f16>>>,
+        bf16: HashMap<usize, Vec<CudaSlice<bf16>>>,
+        f32: HashMap<usize, Vec<CudaSlice<f32>>>,
+        i64: HashMap<usize, Vec<CudaSlice<i64>>>,
+        buffered_bytes: usize,
+    }
+
+    static POOL: OnceLock<Mutex<CudaPool>> = OnceLock::new();
+
+    fn pool() -> &'static Mutex<CudaPool> {
+        POOL.get_or_init(|| Mutex::new(CudaPool::default()))
+    }
+
+    fn pool_enabled() -> bool {
+        static DISABLED: OnceLock<bool> = OnceLock::new();
+        !DISABLED.get_or_init(|| std::env::var("DEERS_NO_POOL").is_ok())
+    }
+
+    /// Pool bucket access per element type.
+    pub(crate) trait PoolBucket: DeviceRepr + Sized {
+        fn bucket(pool: &mut CudaPool) -> &mut HashMap<usize, Vec<CudaSlice<Self>>>;
+    }
+
+    macro_rules! pool_bucket {
+        ($t:ty, $field:ident) => {
+            impl PoolBucket for $t {
+                fn bucket(pool: &mut CudaPool) -> &mut HashMap<usize, Vec<CudaSlice<Self>>> {
+                    &mut pool.$field
+                }
+            }
+        };
+    }
+
+    pool_bucket!(f16, f16);
+    pool_bucket!(bf16, bf16);
+    pool_bucket!(f32, f32);
+    pool_bucket!(i64, i64);
+
+    fn pool_bytes<T>(len: usize) -> usize {
+        len * std::mem::size_of::<T>()
+    }
+
+    fn pool_checkout<T: PoolBucket>(len: usize) -> Option<CudaSlice<T>> {
+        if !pool_enabled() {
+            return None;
+        }
+        let mut guard = pool().lock().unwrap_or_else(|err| err.into_inner());
+        let stack = T::bucket(&mut guard).get_mut(&len)?;
+        let slice = stack.pop()?;
+        if stack.is_empty() {
+            T::bucket(&mut guard).remove(&len);
+        }
+        guard.buffered_bytes -= pool_bytes::<T>(len);
+        Some(slice)
+    }
+
+    fn pool_checkin<T: PoolBucket>(slice: CudaSlice<T>) {
+        if !pool_enabled() {
+            return;
+        }
+        let len = slice.len();
+        let mut guard = pool().lock().unwrap_or_else(|err| err.into_inner());
+        let waits_full = {
+            let stack = T::bucket(&mut guard).entry(len).or_default();
+            stack.len() >= POOL_MAX_BLOCKS_PER_BUCKET
+        };
+        if waits_full || guard.buffered_bytes + pool_bytes::<T>(len) > POOL_MAX_BYTES {
+            return;
+        }
+        guard.buffered_bytes += pool_bytes::<T>(len);
+        T::bucket(&mut guard).entry(len).or_default().push(slice);
+    }
+
+    /// Device slice with pool-aware drop: exact-size buckets in [`CudaPool`].
+    ///
+    /// Derefs to the slice, so kernels, views, and length queries work
+    /// unchanged; kernel launch args forward to the inner slice explicitly
+    /// below. Cloning deep-copies through the driver, exactly like the
+    /// wrapped slice.
+    #[derive(Debug)]
+    pub(crate) struct Pooled<T: PoolBucket> {
+        slice: Option<CudaSlice<T>>,
+    }
+
+    impl<T: PoolBucket> Pooled<T> {
+        fn fresh(slice: CudaSlice<T>) -> Self {
+            Self { slice: Some(slice) }
+        }
+    }
+
+    impl<T: PoolBucket> std::ops::Deref for Pooled<T> {
+        type Target = CudaSlice<T>;
+
+        fn deref(&self) -> &Self::Target {
+            self.slice.as_ref().expect("pooled slice taken")
+        }
+    }
+
+    impl<T: PoolBucket> std::ops::DerefMut for Pooled<T> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            self.slice.as_mut().expect("pooled slice taken")
+        }
+    }
+
+    impl<T: PoolBucket> Drop for Pooled<T> {
+        fn drop(&mut self) {
+            if let Some(slice) = self.slice.take() {
+                pool_checkin(slice);
+            }
+        }
+    }
+
+    impl<T: PoolBucket> Clone for Pooled<T> {
+        fn clone(&self) -> Self {
+            Self::fresh((**self).clone())
+        }
+    }
+
+    unsafe impl<'a, 'b: 'a, T: PoolBucket> PushKernelArg<&'b Pooled<T>> for LaunchArgs<'a> {
+        #[inline(always)]
+        fn arg(&mut self, arg: &'b Pooled<T>) -> &mut Self {
+            let inner: &CudaSlice<T> = arg;
+            self.arg(inner)
+        }
+    }
+
+    unsafe impl<'a, 'b: 'a, T: PoolBucket> PushKernelArg<&'b mut Pooled<T>> for LaunchArgs<'a> {
+        #[inline(always)]
+        fn arg(&mut self, arg: &'b mut Pooled<T>) -> &mut Self {
+            let inner: &mut CudaSlice<T> = arg;
+            self.arg(inner)
+        }
+    }
+
+    impl<T: PoolBucket> DeviceSlice<T> for Pooled<T> {
+        fn len(&self) -> usize {
+            (**self).len()
+        }
+
+        fn stream(&self) -> &Arc<CudaStream> {
+            (**self).stream()
+        }
+    }
+
+    impl<T: PoolBucket> DevicePtr<T> for Pooled<T> {
+        fn device_ptr<'a>(
+            &'a self,
+            stream: &'a CudaStream,
+        ) -> (sys::CUdeviceptr, SyncOnDrop<'a>) {
+            (**self).device_ptr(stream)
+        }
+    }
+
+    impl<T: PoolBucket> DevicePtrMut<T> for Pooled<T> {
+        fn device_ptr_mut<'a>(
+            &'a mut self,
+            stream: &'a CudaStream,
+        ) -> (sys::CUdeviceptr, SyncOnDrop<'a>) {
+            (**self).device_ptr_mut(stream)
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -943,13 +1128,17 @@ mod imp {
     /// # Safety
     ///
     /// The caller must ensure every element is written before it is read.
-    unsafe fn alloc_uninit<T: DeviceRepr>(
+    unsafe fn alloc_uninit<T: PoolBucket>(
         runtime: &CudaRuntime,
         len: usize,
-    ) -> Result<CudaSlice<T>> {
+    ) -> Result<Pooled<T>> {
         // SAFETY: the caller is responsible for writing every element before reading.
-        unsafe { runtime.stream.alloc::<T>(len) }
-            .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))
+        if let Some(slice) = pool_checkout::<T>(len) {
+            return Ok(Pooled::fresh(slice));
+        }
+        let slice = unsafe { runtime.stream.alloc::<T>(len) }
+            .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+        Ok(Pooled::fresh(slice))
     }
 
     impl CudaStorage {
@@ -976,18 +1165,18 @@ mod imp {
         pub fn zeros(size: usize, dtype: DType) -> Self {
             let runtime = runtime().expect("cuda backend unavailable");
             let inner = match dtype {
-                DType::F16 => CudaInner::F16(
+                DType::F16 => CudaInner::F16(Pooled::fresh(
                     runtime.stream.alloc_zeros::<f16>(size).expect("cuda alloc failed"),
-                ),
-                DType::BF16 => CudaInner::BF16(
+                )),
+                DType::BF16 => CudaInner::BF16(Pooled::fresh(
                     runtime.stream.alloc_zeros::<bf16>(size).expect("cuda alloc failed"),
-                ),
-                DType::F32 => CudaInner::F32(
+                )),
+                DType::F32 => CudaInner::F32(Pooled::fresh(
                     runtime.stream.alloc_zeros::<f32>(size).expect("cuda alloc failed"),
-                ),
-                DType::I64 => CudaInner::I64(
+                )),
+                DType::I64 => CudaInner::I64(Pooled::fresh(
                     runtime.stream.alloc_zeros::<i64>(size).expect("cuda alloc failed"),
-                ),
+                )),
             };
             Self { inner, runtime }
         }
@@ -1006,18 +1195,18 @@ mod imp {
         pub fn from_cpu_storage(inner: CpuStorage) -> Self {
             let runtime = runtime().expect("cuda backend unavailable");
             let inner = match inner {
-                CpuStorage::F16(data) => {
-                    CudaInner::F16(runtime.stream.clone_htod(&data).expect("cuda copy failed"))
-                }
-                CpuStorage::BF16(data) => {
-                    CudaInner::BF16(runtime.stream.clone_htod(&data).expect("cuda copy failed"))
-                }
-                CpuStorage::F32(data) => {
-                    CudaInner::F32(runtime.stream.clone_htod(&data).expect("cuda copy failed"))
-                }
-                CpuStorage::I64(data) => {
-                    CudaInner::I64(runtime.stream.clone_htod(&data).expect("cuda copy failed"))
-                }
+                CpuStorage::F16(data) => CudaInner::F16(Pooled::fresh(
+                    runtime.stream.clone_htod(&data).expect("cuda copy failed"),
+                )),
+                CpuStorage::BF16(data) => CudaInner::BF16(Pooled::fresh(
+                    runtime.stream.clone_htod(&data).expect("cuda copy failed"),
+                )),
+                CpuStorage::F32(data) => CudaInner::F32(Pooled::fresh(
+                    runtime.stream.clone_htod(&data).expect("cuda copy failed"),
+                )),
+                CpuStorage::I64(data) => CudaInner::I64(Pooled::fresh(
+                    runtime.stream.clone_htod(&data).expect("cuda copy failed"),
+                )),
             };
             Self { inner, runtime }
         }
@@ -1091,19 +1280,19 @@ mod imp {
             let inner = match src {
                 CpuStorage::F16(data) => {
                     let staged = CpuStorage::borrow_or_compact(data, src, layout);
-                    CudaInner::F16(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?)
+                    CudaInner::F16(Pooled::fresh(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?))
                 }
                 CpuStorage::BF16(data) => {
                     let staged = CpuStorage::borrow_or_compact(data, src, layout);
-                    CudaInner::BF16(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?)
+                    CudaInner::BF16(Pooled::fresh(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?))
                 }
                 CpuStorage::F32(data) => {
                     let staged = CpuStorage::borrow_or_compact(data, src, layout);
-                    CudaInner::F32(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?)
+                    CudaInner::F32(Pooled::fresh(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?))
                 }
                 CpuStorage::I64(data) => {
                     let staged = CpuStorage::borrow_or_compact(data, src, layout);
-                    CudaInner::I64(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?)
+                    CudaInner::I64(Pooled::fresh(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?))
                 }
             };
             Ok(Self { inner, runtime })
@@ -1301,11 +1490,11 @@ mod imp {
 
         /// Launches a `cast_<src>_<dst>` kernel over a compact source slice,
         /// wrapping the fresh device buffer in the matching [`CudaInner`] variant.
-        fn launch_cast<S: DeviceRepr, D: DeviceRepr>(
+        fn launch_cast<S: DeviceRepr, D: PoolBucket>(
             &self,
             kernel: &str,
             src: &CudaSlice<S>,
-            wrap: impl FnOnce(CudaSlice<D>) -> CudaInner,
+            wrap: impl FnOnce(Pooled<D>) -> CudaInner,
         ) -> Result<Self> {
             let out = unsafe { alloc_uninit::<D>(&self.runtime, src.len()) }?;
             let len = src.len() as u32;
@@ -1989,10 +2178,10 @@ mod imp {
             let right_len: usize = dst_shape[dim + 1..].iter().product();
             match (&src.inner, &indices.inner) {
                 (CudaInner::F16(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
+                    let raw = src.stream()
                         .alloc_zeros::<f16>(dst_shape.iter().product())
                         .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = Pooled::fresh(raw);
                     let left = left_len as u32;
                     let dst_dim_u32 = dst_dim as u32;
                     let index_len_u32 = index_len as u32;
@@ -2013,10 +2202,10 @@ mod imp {
                     Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
                 }
                 (CudaInner::BF16(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
+                    let raw = src.stream()
                         .alloc_zeros::<bf16>(dst_shape.iter().product())
                         .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = Pooled::fresh(raw);
                     let left = left_len as u32;
                     let dst_dim_u32 = dst_dim as u32;
                     let index_len_u32 = index_len as u32;
@@ -2037,10 +2226,10 @@ mod imp {
                     Ok(Self { inner: CudaInner::BF16(out), runtime: self.runtime.clone() })
                 }
                 (CudaInner::F32(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
+                    let raw = src.stream()
                         .alloc_zeros::<f32>(dst_shape.iter().product())
                         .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = Pooled::fresh(raw);
                     let left = left_len as u32;
                     let dst_dim_u32 = dst_dim as u32;
                     let index_len_u32 = index_len as u32;
@@ -2171,10 +2360,10 @@ mod imp {
             let right_len: usize = dst_shape[dim + 1..].iter().product();
             match (&src.inner, &indices.inner) {
                 (CudaInner::F16(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
+                    let raw = src.stream()
                         .alloc_zeros::<f16>(dst_shape.iter().product())
                         .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = Pooled::fresh(raw);
                     let left = left_len as u32;
                     let src_dim_u32 = src_dim as u32;
                     let dst_dim_u32 = dst_dim as u32;
@@ -2195,10 +2384,10 @@ mod imp {
                     Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
                 }
                 (CudaInner::BF16(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
+                    let raw = src.stream()
                         .alloc_zeros::<bf16>(dst_shape.iter().product())
                         .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = Pooled::fresh(raw);
                     let left = left_len as u32;
                     let src_dim_u32 = src_dim as u32;
                     let dst_dim_u32 = dst_dim as u32;
@@ -2219,10 +2408,10 @@ mod imp {
                     Ok(Self { inner: CudaInner::BF16(out), runtime: self.runtime.clone() })
                 }
                 (CudaInner::F32(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
+                    let raw = src.stream()
                         .alloc_zeros::<f32>(dst_shape.iter().product())
                         .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = Pooled::fresh(raw);
                     let left = left_len as u32;
                     let src_dim_u32 = src_dim as u32;
                     let dst_dim_u32 = dst_dim as u32;
