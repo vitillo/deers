@@ -21,7 +21,7 @@
 
 - Keep `Tensor` focused on general tensor operations.
 - Keep `nn` focused on modules.
-- Put stateless model-building helpers in `nn::functional`.
+- Put model-building helpers in `nn::functional`.
 
 ## Testing
 
