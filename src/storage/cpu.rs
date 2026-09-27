@@ -277,6 +277,19 @@ fn write_blocks<T: Copy>(
     }
 }
 
+/// True when every dimension that indexes storage uses row-major strides.
+/// Length-1 dimensions never index, so narrowed views keep their parent
+/// strides there without breaking contiguity.
+fn has_compact_strides(layout: &Layout) -> bool {
+    let expected = layout.shape().compact_strides();
+    layout
+        .shape()
+        .iter()
+        .zip(expected.iter())
+        .zip(layout.strides().iter())
+        .all(|((&len, &want), &got)| len <= 1 || want as isize == got)
+}
+
 impl BackendStorage for CpuStorage {
     fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self> {
         if l.is_compact() {
@@ -1366,14 +1379,16 @@ impl BackendStorage for CpuStorage {
                          layout: &Layout,
                          expect_len: usize|
          -> crate::error::Result<Vec<f32>> {
-            assert!(layout.is_compact());
+            // Linear span reads need compact strides up to length-1 dims,
+            // which narrowed rotary rows keep from their parent cache.
+            assert!(has_compact_strides(layout));
             let row: Vec<f32> = match storage {
-                CpuStorage::F32(data) => data[layout.offset..].iter().copied().collect(),
+                CpuStorage::F32(data) => data[layout.offset..].iter().take(expect_len).copied().collect(),
                 CpuStorage::F16(data) => {
-                    data[layout.offset..].iter().map(|v| v.to_f32()).collect()
+                    data[layout.offset..].iter().take(expect_len).map(|v| v.to_f32()).collect()
                 }
                 CpuStorage::BF16(data) => {
-                    data[layout.offset..].iter().map(|v| v.to_f32()).collect()
+                    data[layout.offset..].iter().take(expect_len).map(|v| v.to_f32()).collect()
                 }
                 CpuStorage::I64(_) => {
                     return Err(crate::error::Error::DTypeMismatch(

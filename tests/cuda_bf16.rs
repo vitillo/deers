@@ -748,6 +748,13 @@ fn fused_rope_forward_and_backward_match_unfused() {
                 device,
             )
         };
+        // A bigger rotary cache to narrow nonzero-offset rows from.
+        let mk_big = |vals: &[f32], t: usize, half: usize, device: deers::Device| {
+            let mut big = vec![0.0f32; 3 * half];
+            big.extend_from_slice(vals);
+            big.extend(vec![0.0f32; 2 * half]);
+            mk(&big, vec![1, t + 5, 1, half], device)
+        };
         let x_cpu = mk(&values, vec![b, t, h, d], Device::Cpu).attach();
         let x_cuda = mk(&values, vec![b, t, h, d], Device::Cuda).attach();
         let cos_cpu = mk(&table, vec![1, t, 1, half], Device::Cpu);
@@ -758,6 +765,14 @@ fn fused_rope_forward_and_backward_match_unfused() {
         // Act
         let expected_fwd = to_f32(&unfused_rope(&x_cpu, &cos_cpu, &sin_cpu));
         let actual_fwd = to_f32(&x_cuda.fused_rope(&cos_cuda, &sin_cuda));
+        // Narrowed cache rows (nonzero view offset) must read in place.
+        let big_cpu = mk_big(&table, t, half, Device::Cpu);
+        let big_cuda = mk_big(&table, t, half, Device::Cuda);
+        let ncos_cpu = big_cpu.narrow(1, 3, t);
+        let nsin_cpu = big_cpu.narrow(1, 3, t);
+        let ncos_cuda = big_cuda.narrow(1, 3, t);
+        let nsin_cuda = big_cuda.narrow(1, 3, t);
+        let actual_narrow = to_f32(&x_cuda.fused_rope(&ncos_cuda, &nsin_cuda));
         let cpu_loss =
             unfused_rope(&x_cpu, &cos_cpu, &sin_cpu).sum(vec![0, 1, 2, 3], true);
         let cuda_loss =
@@ -768,6 +783,7 @@ fn fused_rope_forward_and_backward_match_unfused() {
         // Assert
         let label = format!("fused rope [{b}, {t}, {h}, {d}]");
         assert_close(&actual_fwd, &expected_fwd, &format!("{label} fwd"));
+        assert_close(&actual_narrow, &expected_fwd, &format!("{label} narrowed fwd"));
         assert_close(&actual_grad, &expected_grad, &format!("{label} bwd"));
     }
 }
