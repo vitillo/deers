@@ -1652,6 +1652,12 @@ mod imp {
             /// passed to cuBLAS without compacting — i.e., it is row-major contiguous or
             /// has only the last two dims transposed with contiguous batch dims.
             /// Uses the same convention as candle: the last two strides determine the op.
+            ///
+            /// Batch dims with length 1 never index, and a single indexing batch
+            /// dim may use any non-overlapping stride: strided-batched GEMM
+            /// takes it explicitly, so padded batches (KV-cache prefix views)
+            /// flow straight into the call. Multiple indexing batch dims still
+            /// require dense packing, exactly as before.
             fn try_gemm_params(
                 layout: &Layout,
                 rows: usize,
@@ -1662,20 +1668,34 @@ mod imp {
                 let shape = layout.shape();
                 let m1 = strides[ndim - 1] as usize; // last stride
                 let m2 = strides[ndim - 2] as usize; // second-to-last stride
-                // Batch dims must be contiguous.
-                let mut expected = rows * cols;
-                for i in (0..ndim.saturating_sub(2)).rev() {
-                    if strides[i] as usize != expected {
+                let indexing: Vec<usize> = (0..ndim.saturating_sub(2))
+                    .filter(|&i| shape[i] > 1)
+                    .collect();
+                let batch_stride = if indexing.len() > 1 {
+                    // Batch dims must be contiguous.
+                    let mut expected = rows * cols;
+                    for &i in indexing.iter().rev() {
+                        if strides[i] as usize != expected {
+                            return None;
+                        }
+                        expected *= shape[i];
+                    }
+                    (rows * cols) as i64
+                } else if let Some(&i) = indexing.first() {
+                    let stride = strides[i] as usize;
+                    if stride < rows * cols {
                         return None;
                     }
-                    expected *= shape[i];
-                }
+                    stride as i64
+                } else {
+                    (rows * cols) as i64
+                };
                 if (m1 == 1 || cols == 1) && (m2 == cols || rows == 1) {
                     // Row-major contiguous: CUBLAS_OP_N, leading_dim = cols
-                    Some((cublasOperation_t::CUBLAS_OP_N, cols as i32, (rows * cols) as i64))
+                    Some((cublasOperation_t::CUBLAS_OP_N, cols as i32, batch_stride))
                 } else if (m1 == rows || cols == 1) && (m2 == 1 || rows == 1) {
                     // Transposed contiguous: CUBLAS_OP_T, leading_dim = rows
-                    Some((cublasOperation_t::CUBLAS_OP_T, rows as i32, (rows * cols) as i64))
+                    Some((cublasOperation_t::CUBLAS_OP_T, rows as i32, batch_stride))
                 } else {
                     None
                 }
