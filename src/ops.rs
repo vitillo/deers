@@ -912,7 +912,12 @@ impl Reshape {
                 new_shape.size()
             )));
         }
-        Ok(Self { arg: arg.compact(), new_shape })
+        // A linear-span input reshapes as a view (length-1 dims never index,
+        // so narrowed/transposed views with parent strides stay views);
+        // anything else compacts once here instead of per read downstream.
+        let arg =
+            if arg.layout().has_compact_strides() { arg } else { arg.compact() };
+        Ok(Self { arg, new_shape })
     }
 }
 
@@ -920,8 +925,12 @@ impl TensorOp for Reshape {
     fn forward(self) -> Result<Tensor> {
         let _profile = profile_view("reshape", &[&self.arg]);
         let storage = self.arg.storage_clone();
+        // The constructor guarantees a linear span, so the view reuses the
+        // input offset with compact strides instead of dropping it.
+        let strides = self.new_shape.compact_strides();
+        let layout = Layout::new(self.new_shape.clone(), strides, self.arg.layout().offset);
 
-        Ok(Tensor::new(storage, Layout::from(self.new_shape.clone()), false, Some(Box::new(self))))
+        Ok(Tensor::new(storage, layout, false, Some(Box::new(self))))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
