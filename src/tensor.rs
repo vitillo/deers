@@ -1123,6 +1123,182 @@ mod tests {
     }
 
     #[test]
+    fn test_to_device_cpu_preserves_strided_values() {
+        // Arrange: a transposed (non-contiguous) and a narrowed (offset) view.
+        let base = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+        let transposed = base.transpose(None);
+        let narrowed = base.narrow(0, 1, 1);
+        assert!(!transposed.is_compact());
+        assert!(!narrowed.is_compact());
+
+        // Act
+        let moved_transposed =
+            ops::ToDevice::new(transposed.clone(), Device::Cpu).unwrap().forward().unwrap();
+        let moved_narrowed =
+            ops::ToDevice::new(narrowed.clone(), Device::Cpu).unwrap().forward().unwrap();
+
+        // Assert
+        assert!(moved_transposed.is_compact());
+        assert!(moved_narrowed.is_compact());
+        assert_eq!(moved_transposed.to_vec::<f32>().unwrap(), transposed.to_vec::<f32>().unwrap());
+        assert_eq!(moved_narrowed.to_vec::<f32>().unwrap(), narrowed.to_vec::<f32>().unwrap());
+    }
+
+    #[test]
+    fn test_to_device_cpu_all_dtypes() {
+        // Arrange
+        let f16_tensor =
+            Tensor::from_vec(vec![f16::from_f32(1.0), f16::from_f32(2.0)], (2,), Device::Cpu);
+        let bf16_tensor =
+            Tensor::from_vec(vec![bf16::from_f32(1.0), bf16::from_f32(2.0)], (2,), Device::Cpu);
+        let f32_tensor = Tensor::from_vec(vec![1.0f32, 2.0], (2,), Device::Cpu);
+        let i64_tensor = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+        // Act
+        let moved_f16 =
+            ops::ToDevice::new(f16_tensor.clone(), Device::Cpu).unwrap().forward().unwrap();
+        let moved_bf16 =
+            ops::ToDevice::new(bf16_tensor.clone(), Device::Cpu).unwrap().forward().unwrap();
+        let moved_f32 =
+            ops::ToDevice::new(f32_tensor.clone(), Device::Cpu).unwrap().forward().unwrap();
+        let moved_i64 =
+            ops::ToDevice::new(i64_tensor.clone(), Device::Cpu).unwrap().forward().unwrap();
+
+        // Assert
+        assert_eq!(moved_f16.dtype(), DType::F16);
+        assert_eq!(moved_f16.to_vec::<f16>().unwrap(), f16_tensor.to_vec::<f16>().unwrap());
+        assert_eq!(moved_bf16.dtype(), DType::BF16);
+        assert_eq!(moved_bf16.to_vec::<bf16>().unwrap(), bf16_tensor.to_vec::<bf16>().unwrap());
+        assert_eq!(moved_f32.dtype(), DType::F32);
+        assert_eq!(moved_f32.to_vec::<f32>().unwrap(), vec![1.0, 2.0]);
+        assert_eq!(moved_i64.dtype(), DType::I64);
+        assert_eq!(moved_i64.to_vec::<i64>().unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn test_to_device_backward_strided() {
+        // Arrange
+        let base =
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu).attach();
+        let strided = base.transpose(None);
+
+        // Act
+        let moved = ops::ToDevice::new(strided.clone(), Device::Cpu).unwrap().forward().unwrap();
+        let grads = moved.sum(vec![0, 1], false).backward().unwrap();
+
+        // Assert
+        assert!(moved.requires_grad());
+        assert_eq!(moved.to_vec::<f32>().unwrap(), strided.to_vec::<f32>().unwrap());
+        assert_eq!(grads.get(base.id()).unwrap().to_vec::<f32>().unwrap(), vec![1.0; 6]);
+    }
+
+    #[test]
+    fn test_to_device_accel_roundtrip_all_dtypes() {
+        // Arrange
+        let Some(device) = [Device::Cuda, Device::Mps].into_iter().find(|d| d.is_available())
+        else {
+            return;
+        };
+
+        // Act
+        let f16_back =
+            Tensor::from_vec(vec![f16::from_f32(1.0), f16::from_f32(2.0)], (2,), Device::Cpu)
+                .to_device(device)
+                .unwrap()
+                .to_device(Device::Cpu)
+                .unwrap();
+        let bf16_back =
+            Tensor::from_vec(vec![bf16::from_f32(1.0), bf16::from_f32(2.0)], (2,), Device::Cpu)
+                .to_device(device)
+                .unwrap()
+                .to_device(Device::Cpu)
+                .unwrap();
+        let f32_moved =
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu).to_device(device).unwrap();
+        let f32_back = f32_moved.to_device(Device::Cpu).unwrap();
+        let i64_back = Tensor::from_vec(vec![1i64, 2, 3], (3,), Device::Cpu)
+            .to_device(device)
+            .unwrap()
+            .to_device(Device::Cpu)
+            .unwrap();
+
+        // Assert
+        assert_eq!(f32_moved.device(), device);
+        assert!(f32_moved.is_compact());
+        assert_eq!(f16_back.to_vec::<f16>().unwrap(), vec![f16::from_f32(1.0), f16::from_f32(2.0)]);
+        assert_eq!(
+            bf16_back.to_vec::<bf16>().unwrap(),
+            vec![bf16::from_f32(1.0), bf16::from_f32(2.0)]
+        );
+        assert_eq!(f32_back.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(i64_back.to_vec::<i64>().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_to_device_accel_strided_moves() {
+        // Arrange
+        let Some(device) = [Device::Cuda, Device::Mps].into_iter().find(|d| d.is_available())
+        else {
+            return;
+        };
+        let base = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), Device::Cpu);
+        let strided_cpu = base.transpose(None);
+        let offset_cpu = base.narrow(0, 1, 1);
+        let strided_accel = base.to_device(device).unwrap().transpose(None);
+
+        // Act
+        let uploaded = strided_cpu.to_device(device).unwrap();
+        let uploaded_offset = offset_cpu.to_device(device).unwrap();
+        let downloaded = strided_accel.to_device(Device::Cpu).unwrap();
+
+        // Assert
+        assert_eq!(uploaded.to_vec::<f32>().unwrap(), strided_cpu.to_vec::<f32>().unwrap());
+        assert_eq!(uploaded_offset.to_vec::<f32>().unwrap(), offset_cpu.to_vec::<f32>().unwrap());
+        assert_eq!(downloaded.to_vec::<f32>().unwrap(), strided_accel.to_vec::<f32>().unwrap());
+    }
+
+    #[test]
+    fn test_to_device_same_accel_direct_copy() {
+        // Arrange: bypasses Tensor::to_device's same-device clone fast path so
+        // the op performs a real device-to-device copy.
+        let Some(device) = [Device::Cuda, Device::Mps].into_iter().find(|d| d.is_available())
+        else {
+            return;
+        };
+        let tensor = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), device).attach();
+
+        // Act
+        let moved = ops::ToDevice::new(tensor.clone(), device).unwrap().forward().unwrap();
+        let grads = moved.sum(vec![0], false).backward().unwrap();
+
+        // Assert
+        assert_eq!(moved.device(), device);
+        assert!(moved.is_compact());
+        assert!(moved.requires_grad());
+        assert_eq!(moved.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(grads.get(tensor.id()).unwrap().to_vec::<f32>().unwrap(), vec![1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_to_device_cross_accel_stages_through_host() {
+        // Arrange: both accelerator backends never coexist on one machine, so
+        // this documents the remaining host-transit case wherever it can run.
+        if !(Device::Cuda.is_available() && Device::Mps.is_available()) {
+            return;
+        }
+
+        // Act
+        let tensor = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cuda);
+        let moved = tensor.to_device(Device::Mps).unwrap();
+        let back = moved.to_device(Device::Cuda).unwrap();
+
+        // Assert
+        assert_eq!(moved.device(), Device::Mps);
+        assert_eq!(back.device(), Device::Cuda);
+        assert_eq!(back.to_vec::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
     fn test_ones_like() {
         // Arrange
         let tensor = Tensor::zeros((2, 2), DType::F32, Device::Cpu);

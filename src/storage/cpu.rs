@@ -1,6 +1,6 @@
 //! CPU tensor storage backed by typed `Vec` buffers with strided kernels.
 
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 
 use half::{bf16, f16};
 
@@ -42,6 +42,21 @@ impl CpuStorage {
             CpuStorage::BF16(data) => data.len(),
             CpuStorage::F32(data) => data.len(),
             CpuStorage::I64(data) => data.len(),
+        }
+    }
+
+    /// Views the `layout` region as a contiguous slice, compacting strided
+    /// layouts into the returned owned buffer. Uploads borrow the result
+    /// directly, so compact sources move without a host staging allocation.
+    pub(crate) fn borrow_or_compact<'a, D: WithDType>(
+        data: &'a [D],
+        storage: &CpuStorage,
+        layout: &Layout,
+    ) -> Cow<'a, [D]> {
+        if layout.is_contiguous() {
+            Cow::Borrowed(&data[layout.offset..layout.offset + layout.size()])
+        } else {
+            Cow::Owned(storage.to_vec(layout))
         }
     }
 

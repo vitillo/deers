@@ -689,6 +689,77 @@ mod imp {
             }
         }
 
+        /// Copies the `layout` region to a fresh device buffer with no host traffic.
+        ///
+        /// The copy runs on the device for dtypes with a copy kernel; dtypes
+        /// without one keep their existing host roundtrip inside `copy_compact`.
+        /// The result is compact.
+        pub(crate) fn copy_to_device(&self, layout: &Layout) -> Result<Self> {
+            let mut out = Self::empty(layout.size(), self.dtype());
+            self.copy_compact(layout, &mut out)?;
+            Ok(out)
+        }
+
+        /// Downloads the `layout` region to host memory.
+        ///
+        /// The source is compacted on the device first when strided, so the
+        /// returned host buffer is filled directly with no staging allocation.
+        pub(crate) fn copy_to_cpu(&self, layout: &Layout) -> Result<CpuStorage> {
+            match &self.inner {
+                MpsInner::Cpu(storage) => {
+                    let mut dst = match storage.dtype() {
+                        DType::F16 => CpuStorage::from(vec![f16::from_f32(0.0); layout.size()]),
+                        DType::BF16 => CpuStorage::from(vec![bf16::ZERO; layout.size()]),
+                        DType::F32 => CpuStorage::from(vec![0.0f32; layout.size()]),
+                        DType::I64 => CpuStorage::from(vec![0i64; layout.size()]),
+                    };
+                    storage.copy_compact(layout, &mut dst)?;
+                    Ok(dst)
+                }
+                MpsInner::Accelerated { len, .. }
+                    if layout.is_compact() && layout.size() == *len =>
+                {
+                    Ok(self.clone().into_cpu())
+                }
+                MpsInner::Accelerated { .. } => {
+                    let mut compact = Self::empty(layout.size(), self.dtype());
+                    self.copy_compact(layout, &mut compact)?;
+                    Ok(compact.into_cpu())
+                }
+            }
+        }
+
+        /// Uploads the `layout` region from host memory in a single copy.
+        ///
+        /// Compact sources upload straight from the caller's buffer; strided
+        /// sources are compacted into one host staging buffer first.
+        pub(crate) fn copy_from_cpu(src: &CpuStorage, layout: &Layout) -> Result<Self> {
+            let ctx = MpsContext::shared();
+            let inner = match src {
+                CpuStorage::F16(data) => {
+                    let staged = CpuStorage::borrow_or_compact(data, src, layout);
+                    let buffer = ctx.buffer_from_f16(&staged);
+                    MpsInner::Accelerated { ctx, buffer, len: staged.len(), dtype: DType::F16 }
+                }
+                CpuStorage::BF16(data) => {
+                    let staged = CpuStorage::borrow_or_compact(data, src, layout);
+                    let buffer = ctx.buffer_from_bf16(&staged);
+                    MpsInner::Accelerated { ctx, buffer, len: staged.len(), dtype: DType::BF16 }
+                }
+                CpuStorage::F32(data) => {
+                    let staged = CpuStorage::borrow_or_compact(data, src, layout);
+                    let buffer = ctx.buffer_from_f32(&staged);
+                    MpsInner::Accelerated { ctx, buffer, len: staged.len(), dtype: DType::F32 }
+                }
+                CpuStorage::I64(data) => {
+                    let staged = CpuStorage::borrow_or_compact(data, src, layout);
+                    let buffer = ctx.buffer_from_i64(&staged);
+                    MpsInner::Accelerated { ctx, buffer, len: staged.len(), dtype: DType::I64 }
+                }
+            };
+            Ok(Self { inner })
+        }
+
         /// Concatenates compact MPS storages into a single output buffer.
         pub fn cat(parts: &[(&MpsStorage, usize)]) -> MpsStorage {
             assert!(!parts.is_empty());
@@ -1934,6 +2005,18 @@ mod imp {
             Self::unavailable()
         }
         pub fn into_cpu(self) -> CpuStorage {
+            Self::unavailable()
+        }
+
+        pub(crate) fn copy_to_device(&self, _: &Layout) -> Result<Self> {
+            Self::unavailable()
+        }
+
+        pub(crate) fn copy_to_cpu(&self, _: &Layout) -> Result<CpuStorage> {
+            Self::unavailable()
+        }
+
+        pub(crate) fn copy_from_cpu(_src: &CpuStorage, _: &Layout) -> Result<Self> {
             Self::unavailable()
         }
 

@@ -12,6 +12,7 @@ use std::borrow::Borrow;
 use half::f16;
 
 use crate::{
+    device::Device,
     dtype::{DType, WithDType},
     error::{Error, Result},
     layout::Layout,
@@ -566,6 +567,51 @@ impl BackendStorage for Storage {
 }
 
 impl Storage {
+    /// Copies the `layout` region of this storage onto `device`.
+    ///
+    /// The returned storage is compact and holds exactly `layout.size()`
+    /// elements. Same-backend moves copy between device buffers with no host
+    /// traffic. Moves to or from the host perform a single upload or download,
+    /// borrowing compact host sources instead of staging through a temporary.
+    ///
+    /// The remaining host-transit case is cross-vendor accelerator moves (CUDA
+    /// to MPS or the reverse), which stage through one host buffer: the two
+    /// vendor APIs expose no peer-DMA path, and the backends never coexist on
+    /// one machine, so no direct copy exists to implement.
+    pub fn transfer(&self, layout: &Layout, device: Device) -> Result<Self> {
+        match (self, device) {
+            (Storage::Cpu(src), Device::Cpu) => {
+                let Storage::Cpu(mut dst) = Device::Cpu.zeros(layout.size(), src.dtype()) else {
+                    unreachable!("cpu zeros returned non-cpu storage");
+                };
+                src.copy_compact(layout, &mut dst)?;
+                Ok(Self::Cpu(dst))
+            }
+            (Storage::Cuda(src), Device::Cuda) => Ok(Self::Cuda(src.copy_to_device(layout)?)),
+            (Storage::Mps(src), Device::Mps) => Ok(Self::Mps(src.copy_to_device(layout)?)),
+            (Storage::Cpu(src), Device::Cuda) => {
+                Ok(Self::Cuda(CudaStorage::copy_from_cpu(src, layout)?))
+            }
+            (Storage::Cpu(src), Device::Mps) => {
+                Ok(Self::Mps(MpsStorage::copy_from_cpu(src, layout)?))
+            }
+            (Storage::Cuda(src), Device::Cpu) => Ok(Self::Cpu(src.copy_to_cpu(layout)?)),
+            (Storage::Mps(src), Device::Cpu) => Ok(Self::Cpu(src.copy_to_cpu(layout)?)),
+            (Storage::Cuda(src), Device::Mps) => {
+                let cpu = src.copy_to_cpu(layout)?;
+                let compact =
+                    Layout::new(layout.shape().clone(), layout.shape().compact_strides(), 0);
+                Ok(Self::Mps(MpsStorage::copy_from_cpu(&cpu, &compact)?))
+            }
+            (Storage::Mps(src), Device::Cuda) => {
+                let cpu = src.copy_to_cpu(layout)?;
+                let compact =
+                    Layout::new(layout.shape().clone(), layout.shape().compact_strides(), 0);
+                Ok(Self::Cuda(CudaStorage::copy_from_cpu(&cpu, &compact)?))
+            }
+        }
+    }
+
     /// Concatenates compact storages into a single contiguous storage.
     /// All inputs must be compact and on the same device.
     /// Each `usize` is the number of valid elements contributed by that storage.
