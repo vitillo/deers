@@ -186,6 +186,11 @@ pub fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
 
     // Hugging Face `rotate_half` direction, matching candle's `rotary_emb`:
     // y1 = x1*cos - x2*sin, y2 = x1*sin + x2*cos.
+    // Decode is launch-bound on this chain, so CUDA runs one fused kernel
+    // while every other device keeps the primitive decomposition.
+    if x.device() == Device::Cuda {
+        return x.fused_rope(cos, sin);
+    }
     let x1 = x.narrow(3, 0, half_dim);
     let x2 = x.narrow(3, half_dim, half_dim);
     let y1 = &x1 * cos - &x2 * sin;
