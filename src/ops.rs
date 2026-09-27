@@ -1365,6 +1365,73 @@ impl TensorOp for CacheAppend {
     }
 }
 
+/// Fused SiLU-gate product: `silu(gate) * up`, one CUDA kernel.
+///
+/// Folds the SwiGLU gate multiply into the activation, dropping the SiLU
+/// intermediate, its allocation, and both launches. The backward reuses the
+/// unfused primitive decomposition (training only; decode runs under
+/// `no_grad`), so no fused backward exists.
+#[derive(Debug)]
+pub struct FusedSiluMul {
+    gate: Tensor,
+    up: Tensor,
+    /// Saved compacted `(gate, up)` for the backward pass. The SiLU output
+    /// is recomputed there, so inference pays no extra kernel.
+    saved: Option<(Tensor, Tensor)>,
+}
+
+impl FusedSiluMul {
+    pub fn new(gate: Tensor, up: Tensor) -> Result<Self> {
+        Ok(Self { gate, up, saved: None })
+    }
+}
+
+impl TensorOp for FusedSiluMul {
+    fn forward(mut self) -> Result<Tensor> {
+        let _profile = profile_like("silu_mul", &self.gate);
+        assert_eq!(
+            self.gate.layout().shape(),
+            self.up.layout().shape(),
+            "silu gate and up shapes must match"
+        );
+        assert_eq!(self.gate.dtype(), self.up.dtype(), "silu gate/up dtype mismatch");
+        let gate_c = self.gate.compact();
+        let up_c = self.up.compact();
+        let out_storage = {
+            let gate_storage = gate_c.storage();
+            let up_storage = up_c.storage();
+            gate_storage.silu_mul_fwd(gate_c.layout(), &up_storage, up_c.layout())?
+        };
+        let output =
+            Tensor::new(Arc::new(RwLock::new(out_storage)), self.gate.layout().clone(), false, None);
+        self.saved = Some((gate_c, up_c));
+        Ok(Tensor::new(
+            output.storage_clone(),
+            output.layout().clone(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let (gate, up) = self.saved.as_ref().expect("forward must run before backward");
+        // y = silu(g) * u; dy/dg = u * sig(g) * (1 + g * (1 - sig(g))), dy/du = silu(g).
+        let grad_c = out_grad.compact();
+        let sig = gate.sigmoid();
+        let one_minus_sig = (&sig * -1.0) + 1.0;
+        let dgate = &grad_c * up;
+        let dgate = &dgate * &sig;
+        let dgate = &dgate * &((gate * &one_minus_sig) + 1.0);
+        grads.accumulate(&self.gate, dgate);
+        grads.accumulate(&self.up, &grad_c * &gate.silu());
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.gate, &self.up]
+    }
+}
+
 /// Fused SiLU: `x / (1 + exp(-x))`, one CUDA kernel.
 ///
 /// Replaces the neg/exp/scalar-add/div/mul chain plus the broadcast compact

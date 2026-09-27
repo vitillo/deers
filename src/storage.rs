@@ -369,6 +369,10 @@ pub trait BackendStorage: Sized {
         dst_base: usize,
         dst_stride: usize,
     ) -> Result<()>;
+    /// Fused SiLU-gate product: `dst[i] = silu(gate[i]) * up[i]`.
+    ///
+    /// Both inputs share `layout.size()` elements, read in compact order.
+    fn silu_mul_fwd(&self, layout: &Layout, up: &Self, up_layout: &Layout) -> Result<Self>;
     /// Converts `layout` to `dtype` without leaving the device.
     ///
     /// The cast reads strided source elements and writes a compact output buffer:
@@ -639,6 +643,21 @@ impl BackendStorage for Storage {
                 dst.copy_blocks_into(s, src_layout, blocks, block_len, dst_base, dst_stride)
             }
             _ => Err(Error::DeviceMismatch { op: "copy_blocks_into" }),
+        }
+    }
+
+    fn silu_mul_fwd(&self, layout: &Layout, up: &Self, up_layout: &Layout) -> Result<Self> {
+        match (self, up) {
+            (Storage::Cpu(gate), Storage::Cpu(u)) => {
+                Ok(Self::Cpu(gate.silu_mul_fwd(layout, u, up_layout)?))
+            }
+            (Storage::Cuda(gate), Storage::Cuda(u)) => {
+                Ok(Self::Cuda(gate.silu_mul_fwd(layout, u, up_layout)?))
+            }
+            (Storage::Mps(gate), Storage::Mps(u)) => {
+                Ok(Self::Mps(gate.silu_mul_fwd(layout, u, up_layout)?))
+            }
+            _ => Err(Error::DeviceMismatch { op: "silu_mul_fwd" }),
         }
     }
 

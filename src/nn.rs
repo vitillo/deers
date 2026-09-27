@@ -526,9 +526,9 @@ impl SwiGLU {
     /// The core stays fixed rank. Only the wrapper below folds leading dims,
     /// and that fold is rank-polymorphic through the ellipsis form.
     fn forward_flat(&self, x_flat: &Tensor) -> Result<Tensor> {
-        let gate = self.gate_proj.forward(x_flat)?.silu();
+        let gate = self.gate_proj.forward(x_flat)?;
         let up = self.up_proj.forward(x_flat)?;
-        self.down_proj.forward(&(&gate * &up))
+        self.down_proj.forward(&gate.silu_mul(&up))
     }
 }
 

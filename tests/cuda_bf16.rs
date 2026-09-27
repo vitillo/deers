@@ -822,3 +822,43 @@ fn fused_silu_forward_and_backward_match_unfused() {
         assert_close(&actual_grad, &expected_grad, &format!("{label} bwd"));
     }
 }
+
+#[test]
+fn fused_silu_mul_forward_and_backward_match_unfused() {
+    // Arrange
+    if !require_cuda() {
+        return;
+    }
+    for (rows, cols) in [(2usize, 1000usize), (1, 3072)] {
+        let gvals: Vec<f32> =
+            (0..rows * cols).map(|i| ((i * 41) % 97) as f32 / 97.0 * 3.0 - 1.5).collect();
+        let uvals: Vec<f32> =
+            (0..rows * cols).map(|i| ((i * 17) % 83) as f32 / 83.0 * 2.0 - 1.0).collect();
+        let mk = |vals: &[f32], device: deers::Device| {
+            Tensor::from_vec(
+                vals.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+                vec![rows, cols],
+                device,
+            )
+            .attach()
+        };
+        let (g_cpu, u_cpu) = (mk(&gvals, Device::Cpu), mk(&uvals, Device::Cpu));
+        let (g_cuda, u_cuda) = (mk(&gvals, Device::Cuda), mk(&uvals, Device::Cuda));
+
+        // Act: fused on CUDA against silu-then-multiply on CPU.
+        let expected_fwd = to_f32(&(&g_cpu.silu() * &u_cpu));
+        let actual_fwd = to_f32(&g_cuda.silu_mul(&u_cuda));
+        let cpu_loss = (&g_cpu.silu() * &u_cpu).sum(vec![0, 1], true);
+        let cuda_loss = g_cuda.silu_mul(&u_cuda).sum(vec![0, 1], true);
+        let expected_gg = to_f32(&cpu_loss.backward().unwrap().get(g_cpu.id()).unwrap());
+        let actual_gg = to_f32(&cuda_loss.backward().unwrap().get(g_cuda.id()).unwrap());
+        let expected_gu = to_f32(&cpu_loss.backward().unwrap().get(u_cpu.id()).unwrap());
+        let actual_gu = to_f32(&cuda_loss.backward().unwrap().get(u_cuda.id()).unwrap());
+
+        // Assert
+        let label = format!("fused silu_mul [{rows}, {cols}]");
+        assert_close(&actual_fwd, &expected_fwd, &format!("{label} fwd"));
+        assert_close(&actual_gg, &expected_gg, &format!("{label} bwd gate"));
+        assert_close(&actual_gu, &expected_gu, &format!("{label} bwd up"));
+    }
+}

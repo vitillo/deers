@@ -566,6 +566,21 @@ mod imp {
     extern "C" __global__ void silu_fwd_f16(const half* src, half* dst, unsigned int size) { silu_fwd_kernel(src, dst, size); }
     extern "C" __global__ void silu_fwd_bf16(const __nv_bfloat16* src, __nv_bfloat16* dst, unsigned int size) { silu_fwd_kernel(src, dst, size); }
 
+    // Fused SiLU-gate product: dst[i] = silu(gate[i]) * up[i], fp32 math.
+    // Folds the SwiGLU gate multiply into the activation, dropping the
+    // intermediate and its launch.
+    template <typename T>
+    __global__ void silu_mul_fwd_kernel(const T* gate, const T* up, T* dst, unsigned int size) {
+        unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+        if (i >= size) return;
+        float g = to_float(gate[i]);
+        dst[i] = from_float<T>(g / (1.0f + expf(-g)) * to_float(up[i]));
+    }
+
+    extern "C" __global__ void silu_mul_fwd_f32(const float* gate, const float* up, float* dst, unsigned int size) { silu_mul_fwd_kernel(gate, up, dst, size); }
+    extern "C" __global__ void silu_mul_fwd_f16(const half* gate, const half* up, half* dst, unsigned int size) { silu_mul_fwd_kernel(gate, up, dst, size); }
+    extern "C" __global__ void silu_mul_fwd_bf16(const __nv_bfloat16* gate, const __nv_bfloat16* up, __nv_bfloat16* dst, unsigned int size) { silu_mul_fwd_kernel(gate, up, dst, size); }
+
     // Block copy for cache appends: `blocks` contiguous `block_len`-element runs
     // from compact `src`, where destination run `n` starts at
     // `dst_base + n * dst_stride`. Copies one `[B, H, T, D]` slice into the
@@ -2389,6 +2404,36 @@ mod imp {
             }
         }
 
+        /// Fused SiLU-gate product: `dst[i] = silu(gate[i]) * up[i]`.
+        ///
+        /// Both inputs share `layout.size()` elements, read in compact order.
+        fn silu_mul_fwd(&self, layout: &Layout, up: &Self, up_layout: &Layout) -> Result<Self> {
+            let gate = self.compact(layout)?;
+            let up_c = up.compact(up_layout)?;
+            let len = layout.size();
+            let len_u32 = len as u32;
+            match (&gate.inner, &up_c.inner) {
+                (CudaInner::F16(g), CudaInner::F16(u)) => {
+                    let out = unsafe { alloc_uninit::<f16>(&gate.runtime, len) }?;
+                    launch_1d!(&gate.runtime, "silu_mul_fwd_f16", len, g, u, &out, &len_u32);
+                    Ok(Self { inner: CudaInner::F16(out), runtime: gate.runtime.clone() })
+                }
+                (CudaInner::BF16(g), CudaInner::BF16(u)) => {
+                    let out = unsafe { alloc_uninit::<bf16>(&gate.runtime, len) }?;
+                    launch_1d!(&gate.runtime, "silu_mul_fwd_bf16", len, g, u, &out, &len_u32);
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: gate.runtime.clone() })
+                }
+                (CudaInner::F32(g), CudaInner::F32(u)) => {
+                    let out = unsafe { alloc_uninit::<f32>(&gate.runtime, len) }?;
+                    launch_1d!(&gate.runtime, "silu_mul_fwd_f32", len, g, u, &out, &len_u32);
+                    Ok(Self { inner: CudaInner::F32(out), runtime: gate.runtime.clone() })
+                }
+                _ => Err(Error::DTypeMismatch(
+                    "silu_mul_fwd: dtype mismatch between gate and up".into(),
+                )),
+            }
+        }
+
         /// Fused SiLU forward: `dst[i] = src[i] / (1 + exp(-src[i]))`.
         ///
         /// `layout.size()` elements are read in compact order and written to a
@@ -2906,6 +2951,9 @@ mod imp {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn silu_fwd(&self, _: &Layout) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn silu_mul_fwd(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn copy_blocks_into(

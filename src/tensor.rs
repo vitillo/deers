@@ -588,6 +588,21 @@ impl Tensor {
         self * &self.sigmoid()
     }
 
+    /// SiLU-gate product: `silu(self) * up`, shapes must match.
+    ///
+    /// On CUDA this is one fused kernel over both inputs, dropping the SiLU
+    /// intermediate and the gate multiply launch. All other devices run the
+    /// primitive decomposition.
+    pub fn silu_mul(&self, up: &Tensor) -> Tensor {
+        if self.device() == crate::device::Device::Cuda {
+            return ops::FusedSiluMul::new(self.clone(), up.clone())
+                .unwrap()
+                .forward()
+                .unwrap();
+        }
+        &self.silu() * up
+    }
+
     /// Element-wise GELU using the tanh approximation (candle / PyTorch `gelu`):
     /// `0.5 * x * (1 + tanh(√(2/π) * x * (1 + 0.044715 * x²)))`.
     pub fn gelu(&self) -> Tensor {
