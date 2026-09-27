@@ -401,6 +401,72 @@ impl BackendStorage for CpuStorage {
         }
     }
 
+    fn eq_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self> {
+        match self {
+            CpuStorage::F16(_) => {
+                let s = f16::from_f32(scalar as f32);
+                Ok(CpuStorage::F16(
+                    self.iter(layout)
+                        .map(|v: &f16| if *v == s { f16::from_f32(1.0) } else { f16::from_f32(0.0) })
+                        .collect(),
+                ))
+            }
+            CpuStorage::BF16(_) => {
+                let s = bf16::from_f32(scalar as f32);
+                Ok(CpuStorage::BF16(
+                    self.iter(layout)
+                        .map(|v: &bf16| if *v == s { bf16::ONE } else { bf16::ZERO })
+                        .collect(),
+                ))
+            }
+            CpuStorage::F32(_) => {
+                let s = scalar as f32;
+                Ok(CpuStorage::F32(
+                    self.iter(layout).map(|v: &f32| if *v == s { 1.0 } else { 0.0 }).collect(),
+                ))
+            }
+            CpuStorage::I64(_) => {
+                let s = scalar as i64;
+                Ok(CpuStorage::I64(
+                    self.iter(layout).map(|v: &i64| if *v == s { 1 } else { 0 }).collect(),
+                ))
+            }
+        }
+    }
+
+    fn ne_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self> {
+        match self {
+            CpuStorage::F16(_) => {
+                let s = f16::from_f32(scalar as f32);
+                Ok(CpuStorage::F16(
+                    self.iter(layout)
+                        .map(|v: &f16| if *v != s { f16::from_f32(1.0) } else { f16::from_f32(0.0) })
+                        .collect(),
+                ))
+            }
+            CpuStorage::BF16(_) => {
+                let s = bf16::from_f32(scalar as f32);
+                Ok(CpuStorage::BF16(
+                    self.iter(layout)
+                        .map(|v: &bf16| if *v != s { bf16::ONE } else { bf16::ZERO })
+                        .collect(),
+                ))
+            }
+            CpuStorage::F32(_) => {
+                let s = scalar as f32;
+                Ok(CpuStorage::F32(
+                    self.iter(layout).map(|v: &f32| if *v != s { 1.0 } else { 0.0 }).collect(),
+                ))
+            }
+            CpuStorage::I64(_) => {
+                let s = scalar as i64;
+                Ok(CpuStorage::I64(
+                    self.iter(layout).map(|v: &i64| if *v != s { 1 } else { 0 }).collect(),
+                ))
+            }
+        }
+    }
+
     fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
         if !layout.is_compact() {
             return Err(Error::LayoutMismatch("reduce: layout must be compact".into()));

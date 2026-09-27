@@ -3219,3 +3219,75 @@ fn triu_backward_candle_conforms() {
         assert_close(&actual_grad, &expected_grad, &format!("triu backward on {:?}", device));
     }
 }
+
+#[test]
+fn scalar_compare_i64_conforms() {
+    // Arrange
+    let targets = vec![1i64, -100, 2, -100, 0];
+
+    // Act
+    let results: Vec<(Device, Vec<i64>, Vec<i64>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(targets.clone(), (5,), device);
+            let eq = input.eq_scalar(-100.0).to_vec::<i64>().unwrap();
+            let ne = input.ne_scalar(-100.0).to_vec::<i64>().unwrap();
+            (device, eq, ne)
+        })
+        .collect();
+
+    // Assert
+    for (device, eq, ne) in results {
+        assert_eq!(eq, vec![0, 1, 0, 1, 0], "eq_scalar on {:?}", device);
+        assert_eq!(ne, vec![1, 0, 1, 0, 1], "ne_scalar on {:?}", device);
+    }
+}
+
+#[test]
+fn scalar_compare_f32_conforms() {
+    // Arrange
+    let data = vec![0.0f32, 1.5, 1.5, -2.0];
+
+    // Act
+    let results: Vec<(Device, Vec<f32>, Vec<f32>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let input = Tensor::from_vec(data.clone(), (4,), device);
+            let eq = input.eq_scalar(1.5).to_vec::<f32>().unwrap();
+            let ne = input.ne_scalar(1.5).to_vec::<f32>().unwrap();
+            (device, eq, ne)
+        })
+        .collect();
+
+    // Assert
+    for (device, eq, ne) in results {
+        assert_close(&eq, &[0.0, 1.0, 1.0, 0.0], &format!("eq_scalar f32 on {:?}", device));
+        assert_close(&ne, &[1.0, 0.0, 0.0, 1.0], &format!("ne_scalar f32 on {:?}", device));
+    }
+}
+
+#[test]
+fn scalar_compare_strided_cpu() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2, -100, 4, -100, 6], (2, 3), Device::Cpu);
+    let transposed = input.transpose(None);
+
+    // Act
+    let ne = transposed.ne_scalar(-100.0).to_vec::<i64>().unwrap();
+
+    // Assert: the strided (3, 2) view compares in logical order.
+    assert_eq!(ne, vec![1, 1, 1, 0, 0, 1]);
+}
+
+#[test]
+fn scalar_compare_carries_no_gradient() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, -100, 2], (3,), Device::Cpu);
+
+    // Act
+    let mask = input.ne_scalar(-100.0);
+
+    // Assert
+    assert!(!mask.requires_grad());
+    assert!(mask.op().is_none());
+}
