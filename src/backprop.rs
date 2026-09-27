@@ -143,9 +143,9 @@ mod tests {
     fn sorted_nodes_linear_chain() {
         // Arrange
         let a = &Tensor::zeros((2, 3), DType::F32, Device::Cpu).attach();
-        let b = &(-a).unwrap();
-        let c = &(-b).unwrap();
-        let d = &(-c).unwrap();
+        let b = &-a;
+        let c = &-b;
+        let d = &-c;
 
         // Act
         let sorted = d.sorted_nodes();
@@ -158,8 +158,8 @@ mod tests {
     fn sorted_nodes_diamond() {
         // Arrange — a is used by both b and c
         let a = &Tensor::ones((2,), DType::F32, Device::Cpu).attach();
-        let b = &(-a).unwrap();
-        let c = &(-a).unwrap();
+        let b = &-a;
+        let c = &-a;
         let d = &(b + c);
 
         // Act

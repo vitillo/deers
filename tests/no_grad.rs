@@ -38,7 +38,7 @@ fn nested_no_grad_scopes_restore_at_the_outermost_scope() {
     // Act
     let outer_output = no_grad(|| {
         let inner_output = no_grad(|| &input + &input);
-        let after_inner = (&input * 2.0).unwrap();
+        let after_inner = &input * 2.0;
         (inner_output, after_inner)
     });
     let after_outer = &input + &input;

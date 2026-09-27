@@ -242,19 +242,13 @@ impl Linear {
         let k = 1.0 / (in_features as f64).sqrt();
         let weight = builder.param(
             "weight",
-            Tensor::rand((in_features, out_features), DType::F32, Device::Cpu)
-                .and_then(|t| ((t * 2.0)? * k)? - k)
-                .expect("uniform init with F32 dtype cannot fail"),
+            Tensor::rand((in_features, out_features), DType::F32, Device::Cpu) * 2.0 * k - k,
         );
         let bias = if bias {
-            Some(
-                builder.param(
-                    "bias",
-                    Tensor::rand((out_features,), DType::F32, Device::Cpu)
-                        .and_then(|t| ((t * 2.0)? * k)? - k)
-                        .expect("uniform init with F32 dtype cannot fail"),
-                ),
-            )
+            Some(builder.param(
+                "bias",
+                Tensor::rand((out_features,), DType::F32, Device::Cpu) * 2.0 * k - k,
+            ))
         } else {
             None
         };
@@ -302,11 +296,8 @@ pub struct Embedding {
 impl Embedding {
     /// Creates an embedding table with standard normal initialization.
     pub fn new(builder: ParamBuilder, vocab_size: usize, hidden_size: usize) -> Self {
-        let weight = builder.param(
-            "weight",
-            Tensor::randn((vocab_size, hidden_size), DType::F32, Device::Cpu)
-                .expect("randn with F32 dtype cannot fail"),
-        );
+        let weight = builder
+            .param("weight", Tensor::randn((vocab_size, hidden_size), DType::F32, Device::Cpu));
         Self::from_weight(weight)
     }
 
@@ -370,8 +361,8 @@ impl RMSNorm {
 impl Module for RMSNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let last_axis = x.layout().ndim() - 1;
-        let mean_sq = (x * x).mean(vec![last_axis], true)?;
-        let inv_norm = (mean_sq + self.eps)?.scalar_powf(-0.5)?;
+        let mean_sq = (x * x).mean(vec![last_axis], true);
+        let inv_norm = (mean_sq + self.eps).scalar_powf(-0.5);
         let normed = x * &inv_norm;
         match &self.weight {
             Some(weight) => Ok(&normed * &**weight),
@@ -435,10 +426,10 @@ impl Module for LayerNorm {
             self.weight.layout().shape()[0],
             "LayerNorm input last dim must match normalized shape"
         );
-        let mean = x.mean(vec![last_axis], true)?;
+        let mean = x.mean(vec![last_axis], true);
         let centered = x - &mean;
-        let var = (&centered * &centered).mean(vec![last_axis], true)?;
-        let normed = &centered * &(var + self.eps)?.scalar_powf(-0.5)?;
+        let var = (&centered * &centered).mean(vec![last_axis], true);
+        let normed = &centered * &(var + self.eps).scalar_powf(-0.5);
         let scaled = &normed * &*self.weight;
         match &self.bias {
             Some(bias) => Ok(&scaled + &**bias),
@@ -473,7 +464,7 @@ pub struct ReLU;
 
 impl Module for ReLU {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        x.relu()
+        Ok(x.relu())
     }
 }
 
@@ -483,7 +474,7 @@ pub struct GELU;
 
 impl Module for GELU {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        x.gelu()
+        Ok(x.gelu())
     }
 }
 
@@ -493,7 +484,7 @@ pub struct SiLU;
 
 impl Module for SiLU {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        x.silu()
+        Ok(x.silu())
     }
 }
 
@@ -529,7 +520,7 @@ impl SwiGLU {
     /// The core stays fixed rank. Only the wrapper below folds leading dims,
     /// and that fold is rank-polymorphic through the ellipsis form.
     fn forward_flat(&self, x_flat: &Tensor) -> Result<Tensor> {
-        let gate = self.gate_proj.forward(x_flat)?.silu()?;
+        let gate = self.gate_proj.forward(x_flat)?.silu();
         let up = self.up_proj.forward(x_flat)?;
         self.down_proj.forward(&(&gate * &up))
     }

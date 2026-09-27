@@ -59,7 +59,7 @@ fn main() {
             let labels = train_labels.narrow(0, start, batch_size);
 
             let logits = model.forward(&images).unwrap();
-            let batch_loss = loss::cross_entropy(&logits, &labels).unwrap();
+            let batch_loss = loss::cross_entropy(&logits, &labels);
             let loss_val: Vec<f32> = batch_loss.to_vec().unwrap();
             epoch_loss += loss_val[0];
             opt.backward_step(&batch_loss).unwrap();

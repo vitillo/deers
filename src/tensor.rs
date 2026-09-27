@@ -82,7 +82,7 @@ impl Drop for NoGradGuard {
 /// use deers::{Device, DType, Tensor, no_grad};
 ///
 /// let x = Tensor::ones((2,), DType::F32, Device::Cpu).attach();
-/// let y = no_grad(|| (&x * 2.0).unwrap());
+/// let y = no_grad(|| &x * 2.0);
 /// assert!(!y.requires_grad());
 /// assert!(y.op().is_none());
 /// ```
@@ -99,7 +99,7 @@ use rand::RngExt;
 
 use crate::device::Device;
 use crate::dtype::{DType, WithDType};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::layout::{Layout, Shape};
 use crate::ops::{self, TensorOp};
 use crate::storage::{BackendStorage, CpuStorage, Storage};
@@ -141,6 +141,17 @@ impl From<TensorInternal> for Tensor {
 }
 
 impl Tensor {
+    /// Stops float-only math on integer tensors at the public boundary.
+    ///
+    /// Kernels that cannot apply to `I64` report a dtype error internally;
+    /// this guard turns that into a clear, intentional panic naming the
+    /// operation, the dtype, and the supported alternative before any
+    /// internal `todo!()` or `unimplemented!()` could be reached.
+    fn require_float_dtype(dtype: DType, op: &str) {
+        if matches!(dtype, DType::I64) {
+            panic!("{op}: i64 is not supported, use a float dtype");
+        }
+    }
     fn from_plain_storage(storage: Storage, shape: Shape) -> Self {
         let layout: Layout = shape.into();
         Tensor::new(Arc::new(RwLock::new(storage)), layout, false, None)
@@ -259,9 +270,7 @@ impl Tensor {
     }
 
     /// Create a tensor with values drawn from a uniform distribution in [0, 1).
-    ///
-    /// Only float dtypes are supported; other dtypes return a dtype error.
-    pub fn rand(shape: impl Into<Shape>, dtype: DType, device: Device) -> Result<Tensor> {
+    pub fn rand(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
         let mut rng = rand::rng();
         let storage = match dtype {
@@ -279,19 +288,13 @@ impl Tensor {
                 let data: Vec<f32> = (0..shape.size()).map(|_| rng.random()).collect();
                 CpuStorage::from(data).to(device)
             }
-            _ => {
-                return Err(Error::DTypeMismatch(format!(
-                    "rand: unsupported dtype {dtype:?}, expected F16, BF16, or F32"
-                )));
-            }
+            _ => panic!("rand: unsupported dtype {dtype:?}, expected F16, BF16, or F32"),
         };
-        Ok(Tensor::from_plain_storage(storage, shape))
+        Tensor::from_plain_storage(storage, shape)
     }
 
     /// Create a tensor with values drawn from a standard normal distribution.
-    ///
-    /// Only float dtypes are supported; other dtypes return a dtype error.
-    pub fn randn(shape: impl Into<Shape>, dtype: DType, device: Device) -> Result<Tensor> {
+    pub fn randn(shape: impl Into<Shape>, dtype: DType, device: Device) -> Tensor {
         let shape: Shape = shape.into();
         let mut rng = rand::rng();
         // Box-Muller transform
@@ -330,13 +333,9 @@ impl Tensor {
                     .collect();
                 CpuStorage::from(data).to(device)
             }
-            _ => {
-                return Err(Error::DTypeMismatch(format!(
-                    "randn: unsupported dtype {dtype:?}, expected F16, BF16, or F32"
-                )));
-            }
+            _ => panic!("randn: unsupported dtype {dtype:?}, expected F16, BF16, or F32"),
         };
-        Ok(Tensor::from_plain_storage(storage, shape))
+        Tensor::from_plain_storage(storage, shape)
     }
 
     /// Copies the tensor data into a flat `Vec`, respecting strides.
@@ -430,38 +429,45 @@ impl Tensor {
     }
 
     /// Element-wise power: `self^e`.
-    pub fn powf<B: Borrow<Tensor>>(&self, e: B) -> Result<Tensor> {
-        ops::EWisePowf::new(self.clone(), e.borrow().clone())?.forward()
+    pub fn powf<B: Borrow<Tensor>>(&self, e: B) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "powf");
+        ops::EWisePowf::new(self.clone(), e.borrow().clone()).unwrap().forward().unwrap()
     }
 
     /// Element-wise natural logarithm.
-    pub fn log(&self) -> Result<Tensor> {
-        ops::EWiseLog::new(self.clone())?.forward()
+    pub fn log(&self) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "log");
+        ops::EWiseLog::new(self.clone()).unwrap().forward().unwrap()
     }
 
     /// Element-wise square root.
-    pub fn sqrt(&self) -> Result<Tensor> {
+    pub fn sqrt(&self) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "sqrt");
         self.scalar_powf(0.5)
     }
 
     /// Element-wise exponential.
-    pub fn exp(&self) -> Result<Tensor> {
-        ops::EWiseExp::new(self.clone())?.forward()
+    pub fn exp(&self) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "exp");
+        ops::EWiseExp::new(self.clone()).unwrap().forward().unwrap()
     }
 
     /// Element-wise sine.
-    pub fn sin(&self) -> Result<Tensor> {
-        ops::EWiseSin::new(self.clone())?.forward()
+    pub fn sin(&self) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "sin");
+        ops::EWiseSin::new(self.clone()).unwrap().forward().unwrap()
     }
 
     /// Element-wise cosine.
-    pub fn cos(&self) -> Result<Tensor> {
-        ops::EWiseCos::new(self.clone())?.forward()
+    pub fn cos(&self) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "cos");
+        ops::EWiseCos::new(self.clone()).unwrap().forward().unwrap()
     }
 
     /// Raises every element to the scalar power `e`.
-    pub fn scalar_powf(&self, e: f64) -> Result<Tensor> {
-        ops::ScalarPowf::new(self.clone(), e)?.forward()
+    pub fn scalar_powf(&self, e: f64) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "scalar_powf");
+        ops::ScalarPowf::new(self.clone(), e).unwrap().forward().unwrap()
     }
 
     /// Matrix multiplication: `[..., m, k] @ [..., k, n] -> [..., m, n]`.
@@ -470,8 +476,9 @@ impl Tensor {
     }
 
     /// Element-wise ReLU: `max(0, x)`.
-    pub fn relu(&self) -> Result<Tensor> {
-        ops::Relu::new(self.clone())?.forward()
+    pub fn relu(&self) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "relu");
+        ops::Relu::new(self.clone()).unwrap().forward().unwrap()
     }
 
     pub(crate) fn eq(&self, other: &Tensor) -> Tensor {
@@ -485,8 +492,9 @@ impl Tensor {
     }
 
     /// Numerically stable `log(sum(exp(x)))` along the given axes.
-    pub fn log_sum_exp(&self, axes: Vec<usize>) -> Result<Tensor> {
-        ops::LogSumExp::new(self.clone(), axes)?.forward()
+    pub fn log_sum_exp(&self, axes: Vec<usize>) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "log_sum_exp");
+        ops::LogSumExp::new(self.clone(), axes).unwrap().forward().unwrap()
     }
 
     /// Numerically stable log-softmax along the given axis.
@@ -494,7 +502,8 @@ impl Tensor {
     /// On CUDA with a compact last-axis layout this uses a fused single-kernel path
     /// that avoids materialising the broadcast LSE intermediate. All other cases fall
     /// back to the primitive decomposition (log_sum_exp → reshape → broadcast → sub).
-    pub fn log_softmax(&self, axis: usize) -> Result<Tensor> {
+    pub fn log_softmax(&self, axis: usize) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "log_softmax");
         // Fused CUDA path: single kernel reads x twice and writes output once,
         // skipping the separate log_sum_exp + broadcast + sub chain.
         let last_axis = self.layout().ndim() - 1;
@@ -502,15 +511,15 @@ impl Tensor {
             && self.device() == crate::device::Device::Cuda
             && self.is_compact()
         {
-            return ops::FusedLogSoftmax::new(self.clone(), axis)?.forward();
+            return ops::FusedLogSoftmax::new(self.clone(), axis).unwrap().forward().unwrap();
         }
         // Primitive fallback.
-        let lse = self.log_sum_exp(vec![axis])?;
+        let lse = self.log_sum_exp(vec![axis]);
         let mut shape: Vec<usize> = self.layout().shape().iter().copied().collect();
         shape[axis] = 1;
         let lse = lse.reshape(shape);
         let lse = lse.broadcast(self.layout().shape().clone());
-        Ok(self - &lse)
+        self - &lse
     }
 
     /// Concatenates tensors along the given dimension.
@@ -529,42 +538,47 @@ impl Tensor {
     }
 
     /// Element-wise sigmoid: `1 / (1 + exp(-x))`.
-    pub fn sigmoid(&self) -> Result<Tensor> {
-        let denom = ((-self)?.exp()? + 1.0)?;
+    pub fn sigmoid(&self) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "sigmoid");
+        let denom = (-self).exp() + 1.0;
         let one = Tensor::ones(vec![1], self.dtype(), self.device())
             .broadcast(self.layout().shape().clone());
-        Ok(&one / &denom)
+        &one / &denom
     }
 
     /// Element-wise SiLU (swish): `x * sigmoid(x)`.
-    pub fn silu(&self) -> Result<Tensor> {
-        Ok(self * &self.sigmoid()?)
+    pub fn silu(&self) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "silu");
+        self * &self.sigmoid()
     }
 
     /// Element-wise GELU using the tanh approximation (candle / PyTorch `gelu`):
     /// `0.5 * x * (1 + tanh(√(2/π) * x * (1 + 0.044715 * x²)))`.
-    pub fn gelu(&self) -> Result<Tensor> {
+    pub fn gelu(&self) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "gelu");
         // Match candle-core's association so parity tests stay within 1e-4.
-        // The fallible scalar op runs first so unsupported dtypes return Err.
         const SQRT_2_OVER_PI: f64 = 0.7978845608028654;
-        let scaled = (self * 0.044715)?;
-        let inner = self * &(((&scaled * self) + 1.0)?);
-        let tanh_out = (inner * SQRT_2_OVER_PI)?.tanh()?;
-        &(self * &(tanh_out + 1.0)?) * 0.5
+        let x2 = self * self;
+        let inner = self * &((x2 * 0.044715) + 1.0);
+        let tanh_out = (inner * SQRT_2_OVER_PI).tanh();
+        &(self * &(tanh_out + 1.0)) * 0.5
     }
 
     /// Element-wise tanh.
-    pub fn tanh(&self) -> Result<Tensor> {
-        ops::Tanh::new(self.clone())?.forward()
+    pub fn tanh(&self) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "tanh");
+        ops::Tanh::new(self.clone()).unwrap().forward().unwrap()
     }
 
     /// Numerically stable softmax along the given axis.
-    pub fn softmax(&self, axis: usize) -> Result<Tensor> {
-        self.log_softmax(axis)?.exp()
+    pub fn softmax(&self, axis: usize) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "softmax");
+        self.log_softmax(axis).exp()
     }
 
     /// Mean along the given axes. If `keep_dims`, reduced axes become size 1.
-    pub fn mean(&self, axes: Vec<usize>, keep_dims: bool) -> Result<Tensor> {
+    pub fn mean(&self, axes: Vec<usize>, keep_dims: bool) -> Tensor {
+        Self::require_float_dtype(self.dtype(), "mean");
         let n: usize = axes.iter().map(|&a| self.layout().shape()[a]).product();
         let s = self.sum(axes, keep_dims);
         &s * (1.0 / n as f64)
@@ -698,18 +712,20 @@ impl PartialEq for Tensor {
 impl Eq for Tensor {}
 
 impl Neg for Tensor {
-    type Output = Result<Tensor>;
+    type Output = Tensor;
 
     fn neg(self) -> Self::Output {
-        ops::Neg::new(self.clone())?.forward()
+        Tensor::require_float_dtype(self.dtype(), "neg");
+        ops::Neg::new(self.clone()).unwrap().forward().unwrap()
     }
 }
 
 impl Neg for &Tensor {
-    type Output = Result<Tensor>;
+    type Output = Tensor;
 
     fn neg(self) -> Self::Output {
-        ops::Neg::new(self.clone())?.forward()
+        Tensor::require_float_dtype(self.dtype(), "neg");
+        ops::Neg::new(self.clone()).unwrap().forward().unwrap()
     }
 }
 
@@ -732,18 +748,20 @@ impl<B: Borrow<Tensor>> Add<B> for &Tensor {
 }
 
 impl Add<f64> for Tensor {
-    type Output = Result<Tensor>;
+    type Output = Tensor;
 
     fn add(self, rhs: f64) -> Self::Output {
-        ops::ScalarAdd::new(self.clone(), rhs)?.forward()
+        Tensor::require_float_dtype(self.dtype(), "add");
+        ops::ScalarAdd::new(self.clone(), rhs).unwrap().forward().unwrap()
     }
 }
 
 impl Add<f64> for &Tensor {
-    type Output = Result<Tensor>;
+    type Output = Tensor;
 
     fn add(self, rhs: f64) -> Self::Output {
-        ops::ScalarAdd::new(self.clone(), rhs)?.forward()
+        Tensor::require_float_dtype(self.dtype(), "add");
+        ops::ScalarAdd::new(self.clone(), rhs).unwrap().forward().unwrap()
     }
 }
 
@@ -766,17 +784,19 @@ impl<B: Borrow<Tensor>> Sub<B> for &Tensor {
 }
 
 impl Sub<f64> for Tensor {
-    type Output = Result<Tensor>;
+    type Output = Tensor;
 
     fn sub(self, rhs: f64) -> Self::Output {
+        Tensor::require_float_dtype(self.dtype(), "sub");
         self + -rhs
     }
 }
 
 impl Sub<f64> for &Tensor {
-    type Output = Result<Tensor>;
+    type Output = Tensor;
 
     fn sub(self, rhs: f64) -> Self::Output {
+        Tensor::require_float_dtype(self.dtype(), "sub");
         self + -rhs
     }
 }
@@ -818,34 +838,38 @@ impl<B: Borrow<Tensor>> Div<B> for &Tensor {
 }
 
 impl Div<f64> for Tensor {
-    type Output = Result<Tensor>;
+    type Output = Tensor;
 
     fn div(self, rhs: f64) -> Self::Output {
+        Tensor::require_float_dtype(self.dtype(), "div");
         self * (1.0 / rhs)
     }
 }
 
 impl Div<f64> for &Tensor {
-    type Output = Result<Tensor>;
+    type Output = Tensor;
 
     fn div(self, rhs: f64) -> Self::Output {
+        Tensor::require_float_dtype(self.dtype(), "div");
         self * (1.0 / rhs)
     }
 }
 
 impl Mul<f64> for Tensor {
-    type Output = Result<Tensor>;
+    type Output = Tensor;
 
     fn mul(self, rhs: f64) -> Self::Output {
-        ops::ScalarMul::new(self.clone(), rhs)?.forward()
+        Tensor::require_float_dtype(self.dtype(), "mul");
+        ops::ScalarMul::new(self.clone(), rhs).unwrap().forward().unwrap()
     }
 }
 
 impl Mul<f64> for &Tensor {
-    type Output = Result<Tensor>;
+    type Output = Tensor;
 
     fn mul(self, rhs: f64) -> Self::Output {
-        ops::ScalarMul::new(self.clone(), rhs)?.forward()
+        Tensor::require_float_dtype(self.dtype(), "mul");
+        ops::ScalarMul::new(self.clone(), rhs).unwrap().forward().unwrap()
     }
 }
 
@@ -1023,7 +1047,7 @@ mod tests {
         // Act
         let y = {
             let _guard = NoGradGuard::new();
-            (&x * 2.0).unwrap()
+            &x * 2.0
         };
 
         // Assert
@@ -1044,7 +1068,7 @@ mod tests {
             assert!(!mid.requires_grad());
         }
         // Inner guard dropped; outer still active so tracking stays off.
-        let still_off = (&x * 2.0).unwrap();
+        let still_off = &x * 2.0;
         assert!(!still_off.requires_grad());
         assert!(still_off.op().is_none());
     }
@@ -1106,11 +1130,11 @@ mod tests {
             return;
         };
         let tensor = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), Device::Cpu).attach();
-        let scaled = (&tensor * 2.0).unwrap();
+        let scaled = &tensor * 2.0;
 
         // Act
         let moved = scaled.to_device(device).unwrap();
-        let out = (&moved * 3.0).unwrap();
+        let out = &moved * 3.0;
         let grads = out.sum(vec![0], false).backward().unwrap();
 
         // Assert

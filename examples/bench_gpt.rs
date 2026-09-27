@@ -98,7 +98,7 @@ fn bench_deers(device: deers::Device, profile_enabled: bool) {
     let step_loss = || {
         let logits = model.forward(&input).unwrap();
         let logits_flat = logits.reshape(vec![BATCH_SIZE * SEQ_LEN, VOCAB_SIZE]);
-        loss::cross_entropy(&logits_flat, &targets).unwrap()
+        loss::cross_entropy(&logits_flat, &targets)
     };
 
     // Warmup

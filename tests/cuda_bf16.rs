@@ -163,12 +163,11 @@ fn bf16_powf_matches_cpu() {
     let exp = bf16_cuda(vec![2.0, 0.5, 0.5, 5.0], (2, 2));
     let expected = to_f32(
         &bf16_cpu(vec![2.0, 4.0, 9.0, 1.0], (2, 2))
-            .powf(bf16_cpu(vec![2.0, 0.5, 0.5, 5.0], (2, 2)))
-            .unwrap(),
+            .powf(bf16_cpu(vec![2.0, 0.5, 0.5, 5.0], (2, 2))),
     );
 
     // Act
-    let actual = to_f32(&base.powf(&exp).unwrap());
+    let actual = to_f32(&base.powf(&exp));
 
     // Assert
     assert_close(&actual, &expected, "bf16 powf on cuda");
@@ -183,9 +182,9 @@ fn bf16_scalar_add_mul_div_match_cpu() {
     let a = bf16_cuda(vec![1.0, 2.0, 4.0, 8.0], (2, 2));
 
     // Act
-    let added = to_f32(&(&a + 1.0).unwrap());
-    let scaled = to_f32(&(&a * 2.0).unwrap());
-    let halved = to_f32(&(&a / 2.0).unwrap());
+    let added = to_f32(&(&a + 1.0));
+    let scaled = to_f32(&(&a * 2.0));
+    let halved = to_f32(&(&a / 2.0));
 
     // Assert
     assert_close(&added, &[2.0, 3.0, 5.0, 9.0], "bf16 scalar add on cuda");
@@ -200,11 +199,10 @@ fn bf16_scalar_powf_matches_cpu() {
         return;
     }
     let a = bf16_cuda(vec![4.0, 9.0, 16.0, 1.0], (2, 2));
-    let expected =
-        to_f32(&bf16_cpu(vec![4.0, 9.0, 16.0, 1.0], (2, 2)).scalar_powf(0.5).unwrap());
+    let expected = to_f32(&bf16_cpu(vec![4.0, 9.0, 16.0, 1.0], (2, 2)).scalar_powf(0.5));
 
     // Act
-    let actual = to_f32(&a.scalar_powf(0.5).unwrap());
+    let actual = to_f32(&a.scalar_powf(0.5));
 
     // Assert
     assert_close(&actual, &expected, "bf16 scalar powf on cuda");
@@ -219,7 +217,7 @@ fn bf16_neg_matches_cpu() {
     let a = bf16_cuda(vec![1.5, -2.0, 0.0, 100.0], (2, 2));
 
     // Act
-    let actual = to_f32(&(-&a).unwrap());
+    let actual = to_f32(&(-&a));
 
     // Assert
     assert_close(&actual, &[-1.5, 2.0, 0.0, -100.0], "bf16 neg on cuda");
@@ -233,12 +231,12 @@ fn bf16_exp_and_log_match_cpu() {
     }
     let a = bf16_cuda(vec![0.0, 1.0, 2.0, 0.5], (2, 2));
     let b = bf16_cuda(vec![1.0, 2.0, 4.0, 0.5], (2, 2));
-    let expected_exp = to_f32(&bf16_cpu(vec![0.0, 1.0, 2.0, 0.5], (2, 2)).exp().unwrap());
-    let expected_log = to_f32(&bf16_cpu(vec![1.0, 2.0, 4.0, 0.5], (2, 2)).log().unwrap());
+    let expected_exp = to_f32(&bf16_cpu(vec![0.0, 1.0, 2.0, 0.5], (2, 2)).exp());
+    let expected_log = to_f32(&bf16_cpu(vec![1.0, 2.0, 4.0, 0.5], (2, 2)).log());
 
     // Act
-    let actual_exp = to_f32(&a.exp().unwrap());
-    let actual_log = to_f32(&b.log().unwrap());
+    let actual_exp = to_f32(&a.exp());
+    let actual_log = to_f32(&b.log());
 
     // Assert
     assert_close(&actual_exp, &expected_exp, "bf16 exp on cuda");
@@ -254,14 +252,14 @@ fn bf16_sin_cos_tanh_match_cpu() {
     let values = vec![0.0, 0.5, 1.0, -1.0];
     let a = bf16_cuda(values.clone(), (2, 2));
     let cpu = bf16_cpu(values, (2, 2));
-    let expected_sin = to_f32(&cpu.sin().unwrap());
-    let expected_cos = to_f32(&cpu.cos().unwrap());
-    let expected_tanh = to_f32(&cpu.tanh().unwrap());
+    let expected_sin = to_f32(&cpu.sin());
+    let expected_cos = to_f32(&cpu.cos());
+    let expected_tanh = to_f32(&cpu.tanh());
 
     // Act
-    let actual_sin = to_f32(&a.sin().unwrap());
-    let actual_cos = to_f32(&a.cos().unwrap());
-    let actual_tanh = to_f32(&a.tanh().unwrap());
+    let actual_sin = to_f32(&a.sin());
+    let actual_cos = to_f32(&a.cos());
+    let actual_tanh = to_f32(&a.tanh());
 
     // Assert
     assert_close(&actual_sin, &expected_sin, "bf16 sin on cuda");
@@ -280,10 +278,10 @@ fn bf16_relu_forward_and_backward_match_cpu() {
     let cuda = bf16_cuda(values, (2, 2)).attach();
 
     // Act
-    let expected_fwd = to_f32(&cpu.relu().unwrap());
-    let actual_fwd = to_f32(&cuda.relu().unwrap());
-    let cpu_loss = cpu.relu().unwrap().sum(vec![0, 1], true);
-    let cuda_loss = cuda.relu().unwrap().sum(vec![0, 1], true);
+    let expected_fwd = to_f32(&cpu.relu());
+    let actual_fwd = to_f32(&cuda.relu());
+    let cpu_loss = cpu.relu().sum(vec![0, 1], true);
+    let cuda_loss = cuda.relu().sum(vec![0, 1], true);
     let expected_grad = to_f32(&cpu_loss.backward().unwrap().get(cpu.id()).unwrap());
     let actual_grad = to_f32(&cuda_loss.backward().unwrap().get(cuda.id()).unwrap());
 
@@ -398,10 +396,10 @@ fn bf16_log_sum_exp_matches_cpu() {
     }
     let values = vec![1.0, 2.0, 3.0, 0.5, -1.0, 0.0];
     let cuda = bf16_cuda(values.clone(), (2, 3));
-    let expected = to_f32(&bf16_cpu(values, (2, 3)).log_sum_exp(vec![1]).unwrap());
+    let expected = to_f32(&bf16_cpu(values, (2, 3)).log_sum_exp(vec![1]));
 
     // Act
-    let actual = to_f32(&cuda.log_sum_exp(vec![1]).unwrap());
+    let actual = to_f32(&cuda.log_sum_exp(vec![1]));
 
     // Assert
     assert_close(&actual, &expected, "bf16 log_sum_exp on cuda");
@@ -416,12 +414,12 @@ fn bf16_log_softmax_forward_and_backward_match_cpu() {
     let values = vec![1.0, 2.0, 3.0, 0.5, -1.0, 0.0];
     let cpu = bf16_cpu(values.clone(), (2, 3)).attach();
     let cuda = bf16_cuda(values, (2, 3)).attach();
-    let expected_fwd = to_f32(&cpu.log_softmax(1).unwrap());
+    let expected_fwd = to_f32(&cpu.log_softmax(1));
 
     // Act
-    let actual_fwd = to_f32(&cuda.log_softmax(1).unwrap());
-    let cpu_loss = cpu.log_softmax(1).unwrap().sum(vec![0, 1], true);
-    let cuda_loss = cuda.log_softmax(1).unwrap().sum(vec![0, 1], true);
+    let actual_fwd = to_f32(&cuda.log_softmax(1));
+    let cpu_loss = cpu.log_softmax(1).sum(vec![0, 1], true);
+    let cuda_loss = cuda.log_softmax(1).sum(vec![0, 1], true);
     let expected_grad = to_f32(&cpu_loss.backward().unwrap().get(cpu.id()).unwrap());
     let actual_grad = to_f32(&cuda_loss.backward().unwrap().get(cuda.id()).unwrap());
 
