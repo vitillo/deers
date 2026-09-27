@@ -317,8 +317,9 @@ impl AdamW {
 
 /// Clips the global gradient norm across `parameters` to `max_norm`.
 ///
-/// Returns the norm before clipping so callers can log it. F16 norms are
-/// accumulated in f32 on the host so they cannot overflow the F16 range.
+/// Returns the norm before clipping so callers can log it. The norm reduces
+/// on device and downloads a single scalar; F16 gradients accumulate in F32
+/// so large norms cannot overflow the F16 range.
 /// Panics if `max_norm` is not positive or the parameters are not floats.
 pub fn clip_grad_norm(
     parameters: &[Parameter],
@@ -331,20 +332,7 @@ pub fn clip_grad_norm(
     }
 
     let total_norm_value = match parameters[0].dtype() {
-        DType::F16 => {
-            let mut seen = HashSet::new();
-            let mut total = 0.0f32;
-            for parameter in parameters {
-                if !seen.insert(parameter.id()) {
-                    continue;
-                }
-                let Some(grad) = grads.get(parameter.id()) else {
-                    continue;
-                };
-                total += grad.to_vec::<f16>()?.iter().map(|v| v.to_f32().powi(2)).sum::<f32>();
-            }
-            total.sqrt()
-        }
+        DType::F16 => grad_norm_in(parameters, grads, DType::F32).to_vec::<f32>()?[0],
         DType::BF16 => grad_norm(parameters, grads).to_vec::<bf16>()?[0].to_f32(),
         DType::F32 => grad_norm(parameters, grads).to_vec::<f32>()?[0],
         DType::I64 => panic!(
@@ -376,8 +364,15 @@ pub fn clip_grad_norm(
 
 /// Computes the global gradient L2 norm on device in the parameter dtype.
 fn grad_norm(parameters: &[Parameter], grads: &GradientStore) -> Tensor {
+    grad_norm_in(parameters, grads, parameters[0].dtype())
+}
+
+/// Computes the global gradient L2 norm on device, accumulating squares in
+/// `dtype`. Widening to F32 keeps F16 norms exact past the F16 range; the
+/// caller downloads the single-scalar result.
+fn grad_norm_in(parameters: &[Parameter], grads: &GradientStore, dtype: DType) -> Tensor {
     let mut seen = HashSet::new();
-    let mut total = Tensor::zeros((1,), parameters[0].dtype(), parameters[0].device());
+    let mut total = Tensor::zeros((1,), dtype, parameters[0].device());
     for parameter in parameters {
         if !seen.insert(parameter.id()) {
             continue;
@@ -385,6 +380,7 @@ fn grad_norm(parameters: &[Parameter], grads: &GradientStore) -> Tensor {
         let Some(grad) = grads.get(parameter.id()) else {
             continue;
         };
+        let grad = grad.to_dtype(dtype);
         let axes = (0..grad.layout().ndim()).collect::<Vec<_>>();
         total = &total + &(&grad * &grad).sum(axes, true);
     }
@@ -1135,6 +1131,42 @@ mod tests {
         // Assert
         assert!((norm - 256.0).abs() < 1e-2);
         assert!(clipped.iter().all(|v| (v.to_f32() - 1.0 / 256.0).abs() < 1e-5));
+    }
+
+    #[test]
+    fn test_clip_grad_norm_f16_large_values_accumulate_in_f32() {
+        // Arrange: squares (9e8, 1.6e9) overflow the F16 range (max 65504),
+        // so an F16 accumulation would report an infinite norm and skip scaling.
+        let x = Parameter::new(Tensor::from_vec(
+            vec![f16::from_f32(0.0), f16::from_f32(0.0)],
+            (2,),
+            Device::Cpu,
+        ));
+        let mut grads = GradientStore::new();
+        grads.insert(
+            x.id(),
+            Tensor::from_vec(
+                vec![f16::from_f32(30_000.0), f16::from_f32(40_000.0)],
+                (2,),
+                Device::Cpu,
+            ),
+        );
+
+        // Act
+        let norm = clip_grad_norm(std::slice::from_ref(&x), &mut grads, 1.0).unwrap();
+        let clipped: Vec<f32> = grads
+            .get(x.id())
+            .unwrap()
+            .to_vec::<f16>()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_f32())
+            .collect();
+
+        // Assert
+        assert!((norm - 50_000.0).abs() < 1.0, "norm={norm}");
+        assert!((clipped[0] - 0.6).abs() < 1e-2, "clipped={clipped:?}");
+        assert!((clipped[1] - 0.8).abs() < 1e-2, "clipped={clipped:?}");
     }
 
     #[test]
