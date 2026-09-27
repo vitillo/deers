@@ -318,7 +318,23 @@ fn fill<D: WithDType + Copy>(mask: &[bool], src: &CpuStorage, layout: &Layout, v
 /// Ranks strided keys per row, returning (source position, dim index) for the
 /// first `k` ranks in order. Descending ranks the largest first; ties keep
 /// index order, matching the host selectors in `ops`.
-fn rank_positions<V: PartialOrd>(
+trait RankKey: PartialOrd {
+    fn rank_cmp(&self, other: &Self) -> Ordering;
+}
+
+impl RankKey for f32 {
+    fn rank_cmp(&self, other: &Self) -> Ordering {
+        self.total_cmp(other)
+    }
+}
+
+impl RankKey for i64 {
+    fn rank_cmp(&self, other: &Self) -> Ordering {
+        self.cmp(other)
+    }
+}
+
+fn rank_positions<V: RankKey>(
     keys: &[V],
     outer: usize,
     dim_size: usize,
@@ -333,15 +349,11 @@ fn rank_positions<V: PartialOrd>(
             let mut order: Vec<usize> = (0..dim_size).collect();
             if descending {
                 order.sort_by(|&a, &b| {
-                    keys[base + b * inner]
-                        .partial_cmp(&keys[base + a * inner])
-                        .unwrap_or(Ordering::Greater)
+                    keys[base + b * inner].rank_cmp(&keys[base + a * inner])
                 });
             } else {
                 order.sort_by(|&a, &b| {
-                    keys[base + a * inner]
-                        .partial_cmp(&keys[base + b * inner])
-                        .unwrap_or(Ordering::Greater)
+                    keys[base + a * inner].rank_cmp(&keys[base + b * inner])
                 });
             }
             for (r, &i) in order.iter().take(k).enumerate() {
@@ -1877,5 +1889,22 @@ mod tests {
         let CpuStorage::I64(indices) = indices else { panic!("sort indices must be i64") };
         assert_eq!(values, vec![1.0, 2.0, 3.0, 0.0, 4.0, 5.0]);
         assert_eq!(indices, vec![1, 2, 0, 2, 1, 0]);
+    }
+
+    #[test]
+    fn test_topk_storage_nan_largest() {
+        // Arrange
+        let storage = CpuStorage::F32(vec![f32::NAN, 1.0, 2.0]);
+        let layout = compact_layout((3, 1));
+
+        // Act
+        let (values, indices) = storage.topk(&layout, 0, 2).unwrap();
+
+        // Assert
+        let CpuStorage::F32(values) = values else { panic!("topk values must keep dtype") };
+        let CpuStorage::I64(indices) = indices else { panic!("topk indices must be i64") };
+        assert_eq!(indices, vec![0, 2]);
+        assert!(values[0].is_nan());
+        assert_eq!(values[1], 2.0);
     }
 }

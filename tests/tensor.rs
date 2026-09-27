@@ -3550,6 +3550,59 @@ fn argmax_host_selects_nan_as_largest() {
 }
 
 #[test]
+fn topk_host_selects_nan_as_largest() {
+    // Arrange
+    let device = Device::Cpu;
+    let expected_indices = vec![0i64, 2];
+
+    // Act
+    let (f32_values, f32_indices) =
+        Tensor::from_vec(vec![f32::NAN, 1.0, 2.0], (3,), device).topk(2, 0);
+    let (f16_values, f16_indices) = Tensor::from_vec(
+        vec![f16::from_f32(f32::NAN), f16::from_f32(1.0), f16::from_f32(2.0)],
+        (3,),
+        device,
+    )
+    .topk(2, 0);
+    let (bf16_values, bf16_indices) = Tensor::from_vec(
+        vec![bf16::from_f32(f32::NAN), bf16::from_f32(1.0), bf16::from_f32(2.0)],
+        (3,),
+        device,
+    )
+    .topk(2, 0);
+
+    // Assert
+    assert_eq!(f32_indices.to_vec::<i64>().unwrap(), expected_indices, "topk NaN host f32");
+    assert!(f32_values.to_vec::<f32>().unwrap()[0].is_nan(), "topk NaN value host f32");
+    assert_eq!(f16_indices.to_vec::<i64>().unwrap(), expected_indices, "topk NaN host f16");
+    assert_eq!(
+        bf16_indices.to_vec::<i64>().unwrap(),
+        expected_indices,
+        "topk NaN host bf16"
+    );
+    assert_eq!(f16_values.to_vec::<f16>().unwrap().len(), 2, "topk NaN count host f16");
+    assert_eq!(bf16_values.to_vec::<bf16>().unwrap().len(), 2, "topk NaN count host bf16");
+}
+
+#[test]
+fn sort_host_places_nan_largest() {
+    // Arrange
+    let device = Device::Cpu;
+
+    // Act
+    let (desc_values, desc_indices) =
+        Tensor::from_vec(vec![f32::NAN, 1.0, 2.0], (3,), device).sort(0, true);
+    let (asc_values, asc_indices) =
+        Tensor::from_vec(vec![f32::NAN, 1.0, 2.0], (3,), device).sort(0, false);
+
+    // Assert
+    assert_eq!(desc_indices.to_vec::<i64>().unwrap(), vec![0, 2, 1], "sort NaN desc host");
+    assert!(desc_values.to_vec::<f32>().unwrap()[0].is_nan(), "sort NaN value desc host");
+    assert_eq!(asc_indices.to_vec::<i64>().unwrap(), vec![1, 2, 0], "sort NaN asc host");
+    assert!(asc_values.to_vec::<f32>().unwrap()[2].is_nan(), "sort NaN value asc host");
+}
+
+#[test]
 fn topk_host_supports_all_dtypes() {
     // Arrange
     let device = Device::Cpu;
