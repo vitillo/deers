@@ -1,7 +1,5 @@
 //! Loss functions composed from primitive tensor operations.
 
-use half::{bf16, f16};
-
 use crate::tensor::Tensor;
 
 /// Reduction applied to the per-sample losses.
@@ -90,7 +88,8 @@ pub fn cross_entropy_with_options(
 /// Builds gather-safe targets, an optional keep mask, and the kept count.
 ///
 /// Returns `(safe_targets, keep_mask, kept)`. Without `ignore_index` the
-/// targets pass through untouched with no mask.
+/// targets pass through untouched with no mask. The mask builds on device
+/// with comparison and selection; only the kept count downloads one scalar.
 fn ignore_mask(
     targets: &Tensor,
     loss_dtype: crate::DType,
@@ -100,53 +99,21 @@ fn ignore_mask(
     let Some(ignored) = ignore_index else {
         return (targets.clone(), None, batch);
     };
-    let raw: Vec<i64> = targets.to_vec().unwrap();
-    debug_assert_eq!(raw.len(), batch);
-    let mut kept = 0;
-    let mut safe = Vec::with_capacity(batch);
-    let mut kept_flags = Vec::with_capacity(batch);
-    for t in raw {
-        if t == ignored {
-            safe.push(0);
-            kept_flags.push(false);
-        } else {
-            safe.push(t);
-            kept_flags.push(true);
-            kept += 1;
-        }
-    }
+    debug_assert_eq!(targets.layout().shape().as_slice(), &[batch]);
     let device = targets.device();
-    let safe_targets = Tensor::from_vec(safe, (batch,), device);
+    // 1 where kept, 0 where ignored.
+    let keep_i64 = targets.ne_scalar(ignored as f64);
+    // Ignored positions read class 0 so the gather stays in bounds.
+    let safe_targets =
+        keep_i64.where_cond(targets, &Tensor::zeros((batch,), crate::DType::I64, device));
     // The mask must match the loss dtype for the elementwise multiply.
-    let keep = match loss_dtype {
-        crate::DType::F32 => Tensor::from_vec(
-            kept_flags.iter().map(|k| if *k { 1.0f32 } else { 0.0 }).collect::<Vec<f32>>(),
-            (batch,),
-            device,
-        ),
-        crate::DType::F16 => Tensor::from_vec(
-            kept_flags
-                .iter()
-                .map(|k| if *k { f16::from_f32(1.0) } else { f16::from_f32(0.0) })
-                .collect::<Vec<f16>>(),
-            (batch,),
-            device,
-        ),
-        crate::DType::BF16 => Tensor::from_vec(
-            kept_flags
-                .iter()
-                .map(|k| if *k { bf16::from_f32(1.0) } else { bf16::ZERO })
-                .collect::<Vec<bf16>>(),
-            (batch,),
-            device,
-        ),
-        // Integer log-probs carry no gradient; the mask dtype is irrelevant.
-        crate::DType::I64 => Tensor::from_vec(
-            kept_flags.iter().map(|k| if *k { 1i64 } else { 0 }).collect::<Vec<i64>>(),
-            (batch,),
-            device,
-        ),
-    };
+    // Integer log-probs carry no gradient; the mask dtype is irrelevant.
+    let keep = keep_i64.to_dtype(loss_dtype);
+    // One scalar download for the mean divisor; the F32 sum of 0/1 flags is
+    // exact for every batch that fits in memory.
+    let kept =
+        keep_i64.to_dtype(crate::DType::F32).sum(vec![0], false).to_vec::<f32>().unwrap()[0]
+            as usize;
     (safe_targets, Some(keep), kept)
 }
 
@@ -289,6 +256,67 @@ mod tests {
         assert!((loss_val[0] - 1.2).abs() < 1e-4, "loss0={}", loss_val[0]);
         assert_eq!(loss_val[1], 0.0);
         assert_eq!(grad, vec![0.0, -1.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_nll_loss_ignore_index_f16_matches_f32() {
+        // Arrange
+        let data = vec![-0.9f32, -1.2, -2.4, -0.4, -1.9, -1.5];
+        let targets = Tensor::from_vec(vec![1i64, -100], (2,), Device::Cpu);
+        let log_probs_f32 =
+            Tensor::from_vec(data.clone(), (2, 3), Device::Cpu).attach();
+        let log_probs_f16 = Tensor::from_vec(
+            data.iter().map(|&v| half::f16::from_f32(v)).collect::<Vec<_>>(),
+            (2, 3),
+            Device::Cpu,
+        )
+        .attach();
+
+        // Act
+        let loss_f32 =
+            nll_loss_with_options(&log_probs_f32, &targets, Reduction::Mean, Some(-100))
+                .to_vec::<f32>()
+                .unwrap();
+        let loss_f16 =
+            nll_loss_with_options(&log_probs_f16, &targets, Reduction::Mean, Some(-100))
+                .to_vec::<half::f16>()
+                .unwrap();
+        let grads = nll_loss_with_options(&log_probs_f16, &targets, Reduction::Mean, Some(-100))
+            .backward()
+            .unwrap();
+        let grad: Vec<f32> = grads
+            .get(log_probs_f16.id())
+            .unwrap()
+            .to_vec::<half::f16>()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_f32())
+            .collect();
+
+        // Assert: the ignored position contributes no loss and no gradient.
+        assert!((loss_f16[0].to_f32() - loss_f32[0]).abs() < 1e-2, "loss={loss_f16:?}");
+        assert!((loss_f16[0].to_f32() - 1.2).abs() < 1e-2, "loss={loss_f16:?}");
+        assert_eq!(grad[3..6], vec![0.0, 0.0, 0.0]);
+        assert!((grad[1] + 1.0).abs() < 1e-2, "grad={grad:?}");
+    }
+
+    #[test]
+    fn test_nll_loss_ignore_index_all_ignored_returns_zero() {
+        // Arrange
+        let log_probs =
+            Tensor::from_vec(vec![-0.9f32, -1.2, -2.4, -0.4, -1.9, -1.5], (2, 3), Device::Cpu)
+                .attach();
+        let targets = Tensor::from_vec(vec![-100i64, -100], (2,), Device::Cpu);
+
+        // Act
+        let loss = nll_loss_with_options(&log_probs, &targets, Reduction::Mean, Some(-100));
+        let loss_val: Vec<f32> = loss.to_vec().unwrap();
+        let grads = loss.backward().unwrap();
+        let grad: Vec<f32> = grads.get(log_probs.id()).unwrap().to_vec().unwrap();
+
+        // Assert: zero loss with zero gradient instead of NaN.
+        assert_eq!(loss_val[0], 0.0);
+        assert_eq!(grad, vec![0.0; 6]);
     }
 
     #[test]
