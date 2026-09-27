@@ -296,6 +296,18 @@ mod imp {
         "copy_compact_f16",
         "copy_compact_f32",
         "copy_compact_i64",
+        "cast_f16_f32",
+        "cast_f16_bf16",
+        "cast_f16_i64",
+        "cast_bf16_f16",
+        "cast_bf16_f32",
+        "cast_bf16_i64",
+        "cast_f32_f16",
+        "cast_f32_bf16",
+        "cast_f32_i64",
+        "cast_i64_f16",
+        "cast_i64_bf16",
+        "cast_i64_f32",
         "add_f16",
         "add_f32",
         "sub_f16",
@@ -935,6 +947,32 @@ mod imp {
                 }
                 MpsInner::Cpu(_) => None,
                 MpsInner::Accelerated { .. } => None,
+            }
+        }
+
+        /// Enqueues a `cast_<src>_<dst>` kernel reading `input` through `meta` and
+        /// returns the compact output storage. BF16 shares the 2-byte F16 buffer
+        /// layout, so the F16 allocator fits exactly.
+        fn launch_cast(
+            ctx: &Arc<MpsContext>,
+            kernel: &'static str,
+            input: &Buffer,
+            meta: &StridedMeta,
+            dtype: DType,
+        ) -> MpsStorage {
+            let len = meta.size as usize;
+            let out = match dtype {
+                DType::F16 | DType::BF16 => ctx.empty_f16_buffer(len),
+                DType::F32 => ctx.empty_f32_buffer(len),
+                DType::I64 => ctx.empty_i64_buffer(len),
+            };
+            ctx.dispatch_1d(kernel, len, |encoder| {
+                encoder.set_buffer(0, Some(input), 0);
+                encoder.set_buffer(1, Some(&out), 0);
+                MpsContext::set_params(encoder, 2, meta);
+            });
+            MpsStorage {
+                inner: MpsInner::Accelerated { ctx: ctx.clone(), buffer: out, len, dtype },
             }
         }
     }
@@ -1790,6 +1828,62 @@ mod imp {
             }
         }
 
+        fn to_dtype(&self, layout: &Layout, dtype: DType) -> Result<Self> {
+            if self.dtype() == dtype {
+                let mut out = Self::empty(layout.size(), dtype);
+                self.copy_compact(layout, &mut out)?;
+                return Ok(out);
+            }
+            let meta = Self::strided_meta(layout);
+            let (src_dtype, ctx, input) = match &self.inner {
+                MpsInner::Accelerated { ctx, buffer, dtype, .. } => (dtype, ctx, buffer),
+                // Host-resident fallback storage casts through the CPU kernels,
+                // which never touch the device either way.
+                MpsInner::Cpu(storage) => {
+                    return Ok(Self::from_cpu_storage(storage.to_dtype(layout, dtype)?));
+                }
+            };
+            Ok(match (*src_dtype, dtype) {
+                (DType::F16, DType::F32) => {
+                    Self::launch_cast(ctx, "cast_f16_f32", input, &meta, DType::F32)
+                }
+                (DType::F16, DType::BF16) => {
+                    Self::launch_cast(ctx, "cast_f16_bf16", input, &meta, DType::BF16)
+                }
+                (DType::F16, DType::I64) => {
+                    Self::launch_cast(ctx, "cast_f16_i64", input, &meta, DType::I64)
+                }
+                (DType::BF16, DType::F16) => {
+                    Self::launch_cast(ctx, "cast_bf16_f16", input, &meta, DType::F16)
+                }
+                (DType::BF16, DType::F32) => {
+                    Self::launch_cast(ctx, "cast_bf16_f32", input, &meta, DType::F32)
+                }
+                (DType::BF16, DType::I64) => {
+                    Self::launch_cast(ctx, "cast_bf16_i64", input, &meta, DType::I64)
+                }
+                (DType::F32, DType::F16) => {
+                    Self::launch_cast(ctx, "cast_f32_f16", input, &meta, DType::F16)
+                }
+                (DType::F32, DType::BF16) => {
+                    Self::launch_cast(ctx, "cast_f32_bf16", input, &meta, DType::BF16)
+                }
+                (DType::F32, DType::I64) => {
+                    Self::launch_cast(ctx, "cast_f32_i64", input, &meta, DType::I64)
+                }
+                (DType::I64, DType::F16) => {
+                    Self::launch_cast(ctx, "cast_i64_f16", input, &meta, DType::F16)
+                }
+                (DType::I64, DType::BF16) => {
+                    Self::launch_cast(ctx, "cast_i64_bf16", input, &meta, DType::BF16)
+                }
+                (DType::I64, DType::F32) => {
+                    Self::launch_cast(ctx, "cast_i64_f32", input, &meta, DType::F32)
+                }
+                _ => unreachable!("same-dtype casts return early"),
+            })
+        }
+
         fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D> {
             let layout = layout.borrow();
             match &self.inner {
@@ -2093,6 +2187,9 @@ mod imp {
             Self::unavailable()
         }
         fn dtype(&self) -> DType {
+            Self::unavailable()
+        }
+        fn to_dtype(&self, _: &Layout, _: DType) -> Result<Self> {
             Self::unavailable()
         }
         fn to_vec<D: WithDType>(&self, _: impl Borrow<Layout>) -> Vec<D> {

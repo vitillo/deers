@@ -312,3 +312,85 @@ fn i64_roundtrip_on_every_available_device() {
         assert_eq!(actual, vec![1, -1, 2], "i64 cast on {device:?}");
     }
 }
+
+#[test]
+fn cuda_casts_stay_on_device() {
+    // The CUDA to_dtype path compacts device-to-device and then runs exactly one
+    // native cast kernel per conversion, with no host copies in between. This test
+    // pins the full dtype-pair matrix plus gradient flow to exact on-device
+    // results, so a missing or incorrect native kernel fails here instead of
+    // silently degrading to a host roundtrip.
+    if !Device::Cuda.is_available() {
+        return;
+    }
+
+    // Arrange: one compact tensor per source dtype on CUDA.
+    let f32_src = Tensor::from_vec(vec![0.0f32, 1.0, -2.5, 0.1], (4,), Device::Cuda);
+    let f16_vals = [0.5f32, -1.25, 3.0].map(f16::from_f32).to_vec();
+    let f16_src = Tensor::from_vec(f16_vals.clone(), (3,), Device::Cuda);
+    let bf16_vals = [1.5f32, -0.5, 100.0].map(bf16::from_f32).to_vec();
+    let bf16_src = Tensor::from_vec(bf16_vals.clone(), (3,), Device::Cuda);
+    let i64_src = Tensor::from_vec(vec![0i64, 1, -2, 1 << 30], (4,), Device::Cuda);
+
+    // Act + Assert: every pair converts on-device with exact values.
+    assert_eq!(
+        f32_src.to_dtype(DType::F16).unwrap().to_vec::<f16>().unwrap(),
+        [0.0f32, 1.0, -2.5, 0.1].map(f16::from_f32).to_vec()
+    );
+    assert_eq!(
+        f32_src.to_dtype(DType::BF16).unwrap().to_vec::<bf16>().unwrap(),
+        [0.0f32, 1.0, -2.5, 0.1].map(bf16::from_f32).to_vec()
+    );
+    assert_eq!(f32_src.to_dtype(DType::I64).unwrap().to_vec::<i64>().unwrap(), vec![0, 1, -2, 0]);
+    assert_eq!(
+        f16_src.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap(),
+        vec![0.5, -1.25, 3.0]
+    );
+    assert_eq!(
+        f16_src.to_dtype(DType::BF16).unwrap().to_vec::<bf16>().unwrap(),
+        f16_vals.iter().map(|v| bf16::from_f32(v.to_f32())).collect::<Vec<_>>()
+    );
+    assert_eq!(f16_src.to_dtype(DType::I64).unwrap().to_vec::<i64>().unwrap(), vec![0, -1, 3]);
+    assert_eq!(
+        bf16_src.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap(),
+        vec![1.5, -0.5, 100.0]
+    );
+    assert_eq!(
+        bf16_src.to_dtype(DType::F16).unwrap().to_vec::<f16>().unwrap(),
+        bf16_vals.iter().map(|v| f16::from_f32(v.to_f32())).collect::<Vec<_>>()
+    );
+    assert_eq!(bf16_src.to_dtype(DType::I64).unwrap().to_vec::<i64>().unwrap(), vec![1, 0, 100]);
+    assert_eq!(
+        i64_src.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap(),
+        vec![0.0, 1.0, -2.0, (1 << 30) as f32]
+    );
+    assert_eq!(
+        i64_src.to_dtype(DType::F16).unwrap().to_vec::<f16>().unwrap(),
+        [0i64, 1, -2, 1 << 30].iter().map(|&v| f16::from_f32(v as f32)).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        i64_src.to_dtype(DType::BF16).unwrap().to_vec::<bf16>().unwrap(),
+        [0i64, 1, -2, 1 << 30].iter().map(|&v| bf16::from_f32(v as f32)).collect::<Vec<_>>()
+    );
+
+    // A strided CUDA view converts in view order through the on-device compact.
+    let square = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), Device::Cuda);
+    let transposed = square.permute(vec![1, 0]);
+    let cast_view: Vec<f32> = transposed
+        .to_dtype(DType::F16)
+        .unwrap()
+        .to_vec::<f16>()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_f32())
+        .collect();
+    assert_eq!(cast_view, vec![1.0, 3.0, 2.0, 4.0]);
+
+    // Gradients flow back through the on-device cast to the input dtype.
+    let input = Tensor::from_vec(vec![1.0f32, 2.0], (2,), Device::Cuda).attach();
+    let cast = input.to_dtype(DType::F16).unwrap();
+    let grads = cast.sum(vec![0], false).backward().unwrap();
+    let grad = grads.get(input.id()).unwrap();
+    assert_eq!(grad.dtype(), DType::F32);
+    assert_eq!(grad.to_vec::<f32>().unwrap(), vec![1.0, 1.0]);
+}

@@ -352,6 +352,152 @@ kernel void copy_compact_i64(
     output[id] = input[linear_to_offset(id, meta)];
 }
 
+// --- Dtype casts ---
+//
+// One native kernel per (source, target) pair. Narrowing rounds once to
+// nearest-even: `half` conversions use hardware rounding, while BFloat16 (which
+// Metal has no scalar type for) converts through exact bit shifts with an
+// explicit round-to-nearest-even bias. Widening is exact. Float-to-integer casts
+// truncate toward zero with saturating bounds so out-of-range and NaN inputs
+// match the host `as` semantics instead of trapping on undefined conversions.
+
+float bf16_to_f32(ushort b) {
+    return as_type<float>(uint(b) << 16);
+}
+
+ushort f32_to_bf16(float x) {
+    uint u = as_type<uint>(x);
+    uint bias = 0x7fffu + ((u >> 16) & 1u);
+    return ushort((u + bias) >> 16);
+}
+
+long f32_to_i64_sat(float x) {
+    if (isnan(x)) return 0;
+    if (x >= 9223372036854775808.0f) return long(0x7FFFFFFFFFFFFFFF);
+    if (x <= -9223372036854775808.0f) return long(0x8000000000000000);
+    return long(x);
+}
+
+kernel void cast_f16_f32(
+    device const half* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = float(input[linear_to_offset(id, meta)]);
+}
+
+kernel void cast_f16_bf16(
+    device const half* input [[buffer(0)]],
+    device ushort* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = f32_to_bf16(float(input[linear_to_offset(id, meta)]));
+}
+
+kernel void cast_f16_i64(
+    device const half* input [[buffer(0)]],
+    device long* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = f32_to_i64_sat(float(input[linear_to_offset(id, meta)]));
+}
+
+kernel void cast_bf16_f16(
+    device const ushort* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = half(bf16_to_f32(input[linear_to_offset(id, meta)]));
+}
+
+kernel void cast_bf16_f32(
+    device const ushort* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = bf16_to_f32(input[linear_to_offset(id, meta)]);
+}
+
+kernel void cast_bf16_i64(
+    device const ushort* input [[buffer(0)]],
+    device long* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = f32_to_i64_sat(bf16_to_f32(input[linear_to_offset(id, meta)]));
+}
+
+kernel void cast_f32_f16(
+    device const float* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = half(input[linear_to_offset(id, meta)]);
+}
+
+kernel void cast_f32_bf16(
+    device const float* input [[buffer(0)]],
+    device ushort* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = f32_to_bf16(input[linear_to_offset(id, meta)]);
+}
+
+kernel void cast_f32_i64(
+    device const float* input [[buffer(0)]],
+    device long* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = f32_to_i64_sat(input[linear_to_offset(id, meta)]);
+}
+
+kernel void cast_i64_f16(
+    device const long* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = half(float(input[linear_to_offset(id, meta)]));
+}
+
+kernel void cast_i64_bf16(
+    device const long* input [[buffer(0)]],
+    device ushort* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = f32_to_bf16(float(input[linear_to_offset(id, meta)]));
+}
+
+kernel void cast_i64_f32(
+    device const long* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant StridedMeta& meta [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.size) return;
+    output[id] = float(input[linear_to_offset(id, meta)]);
+}
+
 // --- Binary ops ---
 
 kernel void add_f16(
