@@ -1,5 +1,7 @@
-//! Stateless helper functions for building neural networks (causal masks,
+//! Helper functions for building neural networks (causal masks,
 //! composable primitives).
+
+use std::sync::Mutex;
 
 use half::{bf16, f16};
 
@@ -57,10 +59,47 @@ pub fn dropout(x: &Tensor, p: f64, training: bool) -> Tensor {
     }
 }
 
+/// Maximum entries held by the [`causal_mask`] cache.
+///
+/// Forward and prefill reuse one entry per shape while every decode step
+/// shares the single-query entry, so a handful of slots covers generation.
+/// The bound keeps a shape-churned workload from pinning device memory.
+pub const CAUSAL_MASK_CACHE_CAP: usize = 16;
+
+/// Identifies one cached causal mask: the shape inputs plus dtype and device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct CausalMaskKey {
+    batch_size: usize,
+    tgt_len: usize,
+    seqlen_offset: usize,
+    dtype: DType,
+    device: Device,
+}
+
+/// Causal masks by key, oldest first. Small enough for a linear scan, and
+/// `Tensor` clones share storage, so hits cost no rebuild and no upload.
+static CAUSAL_MASK_CACHE: Mutex<Vec<(CausalMaskKey, Tensor)>> = Mutex::new(Vec::new());
+
+/// Returns the number of masks currently held by the [`causal_mask`] cache.
+///
+/// Diagnostics for tests: the count never exceeds [`CAUSAL_MASK_CACHE_CAP`]
+/// no matter how many distinct shapes flow through the cache.
+pub fn causal_mask_cache_len() -> usize {
+    CAUSAL_MASK_CACHE.lock().unwrap().len()
+}
+
 /// Builds an additive causal attention mask with shape `[batch, 1, tgt_len, tgt_len + seqlen_offset]`.
 ///
 /// Allowed positions contain `0`, masked positions contain `-inf`, so the result can be added
 /// directly to attention logits before softmax.
+///
+/// Masks are cached by shape inputs, dtype, and device under a bounded
+/// first-in-first-out cache, so repeated forwards, prefills, and decode
+/// steps with the same key reuse one device tensor instead of rebuilding on
+/// the host and uploading again. A single query token (`tgt_len == 1`)
+/// masks nothing, so decode steps share one tiny `[batch, 1, 1, 1]` zeros
+/// tensor that broadcasts over heads and keys, whatever the offset.
+/// Reused masks equal freshly built ones element for element.
 pub fn causal_mask(
     batch_size: usize,
     tgt_len: usize,
@@ -68,6 +107,42 @@ pub fn causal_mask(
     dtype: DType,
     device: Device,
 ) -> Tensor {
+    assert!(dtype != DType::I64, "causal_mask requires a floating-point dtype");
+    let key = CausalMaskKey {
+        batch_size,
+        tgt_len,
+        // Single-query masks hold only zeros (see `build_causal_mask`), so
+        // every decode offset shares one entry instead of one wide row each.
+        seqlen_offset: if tgt_len == 1 { 0 } else { seqlen_offset },
+        dtype,
+        device,
+    };
+    let mut cache = CAUSAL_MASK_CACHE.lock().unwrap();
+    if let Some((_, mask)) = cache.iter().find(|(k, _)| *k == key) {
+        return mask.clone();
+    }
+    let mask = build_causal_mask(batch_size, tgt_len, seqlen_offset, dtype, device);
+    if cache.len() >= CAUSAL_MASK_CACHE_CAP {
+        cache.remove(0);
+    }
+    cache.push((key, mask.clone()));
+    mask
+}
+
+/// Builds the mask behind [`causal_mask`] without consulting the cache.
+fn build_causal_mask(
+    batch_size: usize,
+    tgt_len: usize,
+    seqlen_offset: usize,
+    dtype: DType,
+    device: Device,
+) -> Tensor {
+    if tgt_len == 1 {
+        // With one query row (`i == 0`), `j - seqlen_offset > i` never holds,
+        // so no position is masked. One zero per batch broadcasts over the
+        // heads and keys of `[B, H, 1, S]` logits exactly like a wide row.
+        return Tensor::zeros(vec![batch_size, 1, 1, 1], dtype, device);
+    }
     let total_len = tgt_len + seqlen_offset;
     match dtype {
         DType::F16 => {
