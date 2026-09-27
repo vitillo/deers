@@ -3291,3 +3291,29 @@ fn scalar_compare_carries_no_gradient() {
     assert!(!mask.requires_grad());
     assert!(mask.op().is_none());
 }
+
+#[test]
+fn where_i64_branches_conform() {
+    // Arrange: integer selection, as used for gather-safe targets.
+    let cond = vec![1i64, 0, 0, 1];
+    let on_true = vec![5i64, 6, 7, 8];
+    let on_false = vec![0i64, 0, 0, 0];
+    let expected = vec![5i64, 0, 0, 8];
+
+    // Act
+    let results: Vec<(Device, Vec<i64>)> = devices()
+        .into_iter()
+        .map(|device| {
+            let cond = Tensor::from_vec(cond.clone(), (4,), device);
+            let on_true = Tensor::from_vec(on_true.clone(), (4,), device);
+            let on_false = Tensor::from_vec(on_false.clone(), (4,), device);
+            let output = cond.where_cond(&on_true, &on_false).to_vec::<i64>().unwrap();
+            (device, output)
+        })
+        .collect();
+
+    // Assert
+    for (device, actual) in results {
+        assert_eq!(actual, expected, "where i64 on {:?}", device);
+    }
+}

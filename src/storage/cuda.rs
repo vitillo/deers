@@ -295,6 +295,17 @@ mod imp {
     DEFINE_CMP_SCALAR_I64(eq_scalar_i64, ==)
     DEFINE_CMP_SCALAR_I64(ne_scalar_i64, !=)
 
+    #define DEFINE_WHERE(name, T, is_nonzero) \
+    extern "C" __global__ void name(const T* cond, const T* on_true, const T* on_false, T* dst, unsigned int size) { \
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x; \
+        if (idx < size) { dst[idx] = ((is_nonzero) ? on_true[idx] : on_false[idx]); } \
+    }
+
+    DEFINE_WHERE(where_f32, float, cond[idx] != 0.0f)
+    DEFINE_WHERE(where_f16, half, __half2float(cond[idx]) != 0.0f)
+    DEFINE_WHERE(where_bf16, __nv_bfloat16, __bfloat162float(cond[idx]) != 0.0f)
+    DEFINE_WHERE(where_i64, long long, cond[idx] != 0LL)
+
     // Warp-shuffle sum of 32 floats within a single warp — no __syncthreads needed.
     __device__ __forceinline__ float warp_reduce_sum(float v) {
         #pragma unroll
@@ -1144,6 +1155,58 @@ mod imp {
             Ok(Self { inner: CudaInner::I64(out), runtime: self.runtime.clone() })
         }
 
+        fn launch_where_f16(
+            &self,
+            kernel: &str,
+            cond: &CudaSlice<f16>,
+            on_true: &CudaSlice<f16>,
+            on_false: &CudaSlice<f16>,
+        ) -> Result<Self> {
+            let out = unsafe { alloc_uninit::<f16>(&self.runtime, cond.len()) }?;
+            let len = cond.len() as u32;
+            launch_1d!(&self.runtime, kernel, cond.len(), cond, on_true, on_false, &out, &len);
+            Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
+        }
+
+        fn launch_where_bf16(
+            &self,
+            kernel: &str,
+            cond: &CudaSlice<bf16>,
+            on_true: &CudaSlice<bf16>,
+            on_false: &CudaSlice<bf16>,
+        ) -> Result<Self> {
+            let out = unsafe { alloc_uninit::<bf16>(&self.runtime, cond.len()) }?;
+            let len = cond.len() as u32;
+            launch_1d!(&self.runtime, kernel, cond.len(), cond, on_true, on_false, &out, &len);
+            Ok(Self { inner: CudaInner::BF16(out), runtime: self.runtime.clone() })
+        }
+
+        fn launch_where_f32(
+            &self,
+            kernel: &str,
+            cond: &CudaSlice<f32>,
+            on_true: &CudaSlice<f32>,
+            on_false: &CudaSlice<f32>,
+        ) -> Result<Self> {
+            let out = unsafe { alloc_uninit::<f32>(&self.runtime, cond.len()) }?;
+            let len = cond.len() as u32;
+            launch_1d!(&self.runtime, kernel, cond.len(), cond, on_true, on_false, &out, &len);
+            Ok(Self { inner: CudaInner::F32(out), runtime: self.runtime.clone() })
+        }
+
+        fn launch_where_i64(
+            &self,
+            kernel: &str,
+            cond: &CudaSlice<i64>,
+            on_true: &CudaSlice<i64>,
+            on_false: &CudaSlice<i64>,
+        ) -> Result<Self> {
+            let out = unsafe { alloc_uninit::<i64>(&self.runtime, cond.len()) }?;
+            let len = cond.len() as u32;
+            launch_1d!(&self.runtime, kernel, cond.len(), cond, on_true, on_false, &out, &len);
+            Ok(Self { inner: CudaInner::I64(out), runtime: self.runtime.clone() })
+        }
+
         fn reduce_impl(&self, kernel: &str, outer_size: usize, reduce_size: usize) -> Result<Self> {
             match &self.inner {
                 CudaInner::F16(src) => {
@@ -1356,6 +1419,34 @@ mod imp {
                 (CudaInner::I64(src)) => {
                     compact.launch_cmp_i64("ne_scalar_i64", src, scalar as i64)
                 }
+            }
+        }
+
+        fn select(
+            &self,
+            cond_layout: &Layout,
+            on_true: &Self,
+            true_layout: &Layout,
+            on_false: &Self,
+            false_layout: &Layout,
+        ) -> Result<Self> {
+            let cond = self.compact(cond_layout)?;
+            let on_true = on_true.compact(true_layout)?;
+            let on_false = on_false.compact(false_layout)?;
+            match (&cond.inner, &on_true.inner, &on_false.inner) {
+                (CudaInner::F16(c), CudaInner::F16(t), CudaInner::F16(f)) => {
+                    cond.launch_where_f16("where_f16", c, t, f)
+                }
+                (CudaInner::BF16(c), CudaInner::BF16(t), CudaInner::BF16(f)) => {
+                    cond.launch_where_bf16("where_bf16", c, t, f)
+                }
+                (CudaInner::F32(c), CudaInner::F32(t), CudaInner::F32(f)) => {
+                    cond.launch_where_f32("where_f32", c, t, f)
+                }
+                (CudaInner::I64(c), CudaInner::I64(t), CudaInner::I64(f)) => {
+                    cond.launch_where_i64("where_i64", c, t, f)
+                }
+                _ => Err(Error::NotImplemented("cuda select is not implemented for this dtype")),
             }
         }
 
@@ -2333,6 +2424,16 @@ mod imp {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn ne_scalar(&self, _: &Layout, _: f64) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn select(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+        ) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn reduce<O: ReduceOp>(&self, _: &Layout, _: &mut Self) -> Result<()> {

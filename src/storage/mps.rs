@@ -51,6 +51,14 @@ struct ScalarI64Meta {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct SelectMeta {
+    cond: StridedMeta,
+    on_true: StridedMeta,
+    on_false: StridedMeta,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct BinaryMeta {
     lhs: StridedMeta,
     rhs: StridedMeta,
@@ -1326,6 +1334,81 @@ mod imp {
             self.cmp_scalar(layout, scalar, false)
         }
 
+        fn select(
+            &self,
+            cond_layout: &Layout,
+            on_true: &Self,
+            true_layout: &Layout,
+            on_false: &Self,
+            false_layout: &Layout,
+        ) -> Result<Self> {
+            let dtype = self.dtype();
+            if on_true.dtype() != dtype || on_false.dtype() != dtype {
+                return Err(crate::error::Error::DTypeMismatch(format!(
+                    "select: {:?} vs {:?} vs {:?}",
+                    dtype,
+                    on_true.dtype(),
+                    on_false.dtype()
+                )));
+            }
+            let kernel = match dtype {
+                DType::F16 => "where_f16",
+                DType::F32 => "where_f32",
+                DType::I64 => "where_i64",
+                DType::BF16 => {
+                    let inner = self.as_cpu_storage().select(
+                        cond_layout,
+                        &on_true.as_cpu_storage(),
+                        true_layout,
+                        &on_false.as_cpu_storage(),
+                        false_layout,
+                    )?;
+                    return Ok(Self::from_cpu_storage(inner));
+                }
+            };
+            if let (Some((ctx, cond, _)), Some((_, on_true, _)), Some((_, on_false, _))) = (
+                self.accelerated(dtype),
+                on_true.accelerated(dtype),
+                on_false.accelerated(dtype),
+            ) {
+                let out = match dtype {
+                    DType::F16 => ctx.empty_f16_buffer(cond_layout.size()),
+                    DType::F32 => ctx.empty_f32_buffer(cond_layout.size()),
+                    DType::I64 => ctx.empty_i64_buffer(cond_layout.size()),
+                    DType::BF16 => unreachable!(),
+                };
+                let meta = SelectMeta {
+                    cond: Self::strided_meta(cond_layout),
+                    on_true: Self::strided_meta(true_layout),
+                    on_false: Self::strided_meta(false_layout),
+                };
+                ctx.dispatch_1d(kernel, cond_layout.size(), |encoder| {
+                    encoder.set_buffer(0, Some(cond), 0);
+                    encoder.set_buffer(1, Some(on_true), 0);
+                    encoder.set_buffer(2, Some(on_false), 0);
+                    encoder.set_buffer(3, Some(&out), 0);
+                    MpsContext::set_params(encoder, 4, &meta);
+                });
+                return Ok(Self {
+                    inner: MpsInner::Accelerated {
+                        ctx: ctx.clone(),
+                        buffer: out,
+                        len: cond_layout.size(),
+                        dtype,
+                    },
+                });
+            }
+
+            let inner = self.as_cpu_storage().select(
+                cond_layout,
+                &on_true.as_cpu_storage(),
+                true_layout,
+                &on_false.as_cpu_storage(),
+                false_layout,
+            )?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
         fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
             // Use parallel threadgroup reduce for large reduce dimensions,
             // serial for small ones where threadgroup overhead dominates.
@@ -2253,6 +2336,16 @@ mod imp {
             Self::unavailable()
         }
         fn ne_scalar(&self, _: &Layout, _: f64) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn select(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+        ) -> Result<Self> {
             Self::unavailable()
         }
         fn reduce<O: ReduceOp>(&self, _: &Layout, _: &mut Self) -> Result<()> {

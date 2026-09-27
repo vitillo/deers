@@ -67,6 +67,12 @@ struct IndexAddMeta {
     uint right_len;
 };
 
+struct SelectMeta {
+    StridedMeta cond;
+    StridedMeta on_true;
+    StridedMeta on_false;
+};
+
 // --- Strided indexing ---
 
 uint linear_to_offset(uint linear, constant StridedMeta& meta) {
@@ -699,6 +705,50 @@ kernel void ne_scalar_i64(
 ) {
     if (id >= meta.input.size) return;
     output[id] = input[linear_to_offset(id, meta.input)] != meta.scalar ? 1 : 0;
+}
+
+// --- Selection (compact output, strided inputs, one shared dtype) ---
+
+kernel void where_f32(
+    device const float* cond [[buffer(0)]],
+    device const float* on_true [[buffer(1)]],
+    device const float* on_false [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant SelectMeta& meta [[buffer(4)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.cond.size) return;
+    output[id] = cond[linear_to_offset(id, meta.cond)] != 0.0f
+        ? on_true[linear_to_offset(id, meta.on_true)]
+        : on_false[linear_to_offset(id, meta.on_false)];
+}
+
+kernel void where_f16(
+    device const half* cond [[buffer(0)]],
+    device const half* on_true [[buffer(1)]],
+    device const half* on_false [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant SelectMeta& meta [[buffer(4)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.cond.size) return;
+    output[id] = cond[linear_to_offset(id, meta.cond)] != half(0.0h)
+        ? on_true[linear_to_offset(id, meta.on_true)]
+        : on_false[linear_to_offset(id, meta.on_false)];
+}
+
+kernel void where_i64(
+    device const long* cond [[buffer(0)]],
+    device const long* on_true [[buffer(1)]],
+    device const long* on_false [[buffer(2)]],
+    device long* output [[buffer(3)]],
+    constant SelectMeta& meta [[buffer(4)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= meta.cond.size) return;
+    output[id] = cond[linear_to_offset(id, meta.cond)] != 0
+        ? on_true[linear_to_offset(id, meta.on_true)]
+        : on_false[linear_to_offset(id, meta.on_false)];
 }
 
 // --- Reductions (serial, one thread per output) ---

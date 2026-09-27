@@ -241,6 +241,16 @@ pub trait BackendStorage: Sized {
     /// Element-wise `!= scalar`: 1 where different, else 0, in the input dtype.
     /// Returns compact storage and carries no gradient.
     fn ne_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self>;
+    /// Picks from `on_true` where `cond` is nonzero, else from `on_false`.
+    /// All three share one dtype and shape; returns compact storage.
+    fn select(
+        &self,
+        cond_layout: &Layout,
+        on_true: &Self,
+        true_layout: &Layout,
+        on_false: &Self,
+        false_layout: &Layout,
+    ) -> Result<Self>;
     /// Reduces `layout` into the already-allocated compact destination storage `dst`.
     fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()>;
     /// Matrix multiplication for layouts whose shapes are compatible under matmul rules.
@@ -380,6 +390,28 @@ impl BackendStorage for Storage {
             Storage::Cpu(storage) => Ok(Self::Cpu(storage.ne_scalar(layout, scalar)?)),
             Storage::Cuda(storage) => Ok(Self::Cuda(storage.ne_scalar(layout, scalar)?)),
             Storage::Mps(storage) => Ok(Self::Mps(storage.ne_scalar(layout, scalar)?)),
+        }
+    }
+
+    fn select(
+        &self,
+        cond_layout: &Layout,
+        on_true: &Self,
+        true_layout: &Layout,
+        on_false: &Self,
+        false_layout: &Layout,
+    ) -> Result<Self> {
+        match (self, on_true, on_false) {
+            (Storage::Cpu(cond), Storage::Cpu(t), Storage::Cpu(f)) => {
+                Ok(Self::Cpu(cond.select(cond_layout, t, true_layout, f, false_layout)?))
+            }
+            (Storage::Cuda(cond), Storage::Cuda(t), Storage::Cuda(f)) => {
+                Ok(Self::Cuda(cond.select(cond_layout, t, true_layout, f, false_layout)?))
+            }
+            (Storage::Mps(cond), Storage::Mps(t), Storage::Mps(f)) => {
+                Ok(Self::Mps(cond.select(cond_layout, t, true_layout, f, false_layout)?))
+            }
+            _ => Err(Error::DeviceMismatch { op: "select" }),
         }
     }
 
