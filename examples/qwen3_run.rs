@@ -11,7 +11,7 @@
 use std::fs::File;
 use std::path::PathBuf;
 
-use deers::models::gpt::{KvCache, Qwen3, Qwen3Config};
+use deers::models::qwen3::{KvCache, Qwen3, Qwen3Config};
 use deers::nn::ParamStore;
 use deers::sample::SamplingConfig;
 use deers::tokenizer::{ChatMessage, Qwen3Tokenizer, Tokenizer};

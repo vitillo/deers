@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use half::bf16;
 
-use deers::models::gpt::{Qwen3, Qwen3Config, RopeScaling};
+use deers::models::qwen3::{Qwen3, Qwen3Config, RopeScaling};
 use deers::nn::ParamStore;
 use deers::{DType, Device, Tensor};
 

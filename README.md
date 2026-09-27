@@ -9,7 +9,7 @@ Deers implements reverse-mode automatic differentiation over a define-by-run com
 Deers can train a small GPT language model from scratch. Here's the core of the training loop from [`examples/tinystories_train.rs`](examples/tinystories_train.rs):
 
 ```rust
-use deers::models::gpt::{GPT, GPTConfig, GptMlpKind, GptNormKind, RopeScaling};
+use deers::models::gpt2::{GPT, GPTConfig, GptMlpKind, GptNormKind, RopeScaling};
 use deers::nn::{ParamStore, Module};
 use deers::optim::{AdamWConfig, clip_grad_norm};
 use deers::dataset::TokenBinDataset;

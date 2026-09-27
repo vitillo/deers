@@ -53,7 +53,7 @@ fn main() {
 /// Times both generation paths for one prompt length. Returns the speedup
 /// of the cached total over the full-recompute total.
 fn bench_prompt(prompt_len: usize) -> f64 {
-    use deers::models::gpt::{CausalSelfAttention, KvCache, precompute_rotary_embeddings};
+    use deers::models::gpt2::{CausalSelfAttention, KvCache, precompute_rotary_embeddings};
     use deers::{DType, Device, Tensor};
 
     let device = Device::Cpu;

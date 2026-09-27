@@ -7,7 +7,7 @@
 //! V tokens scores V. Lower is better because it means the model wastes less probability on
 //! tokens that never occur.
 
-use crate::models::gpt::GPT;
+use crate::models::gpt2::GPT;
 use crate::tokenizer::Tokenizer;
 use crate::{DType, Device, Tensor, no_grad};
 
@@ -199,7 +199,7 @@ mod tests {
         accuracy, check_close, perplexity_from_logits, sample_token_ids, score_model,
         top_k_accuracy,
     };
-    use crate::models::gpt::{GPTConfig, GptMlpKind, GptNormKind, RopeScaling};
+    use crate::models::gpt2::{GPTConfig, GptMlpKind, GptNormKind, RopeScaling};
     use crate::nn::ParamStore;
     use crate::tokenizer::{Gpt2Tokenizer, Tokenizer};
     use crate::{Device, Tensor};
@@ -266,7 +266,7 @@ mod tests {
     #[should_panic(expected = "at least two tokens")]
     fn single_token_model_input_panics() {
         // Arrange
-        let model = crate::models::gpt::GPT::new(tiny_config(8), ParamStore::new().root());
+        let model = crate::models::gpt2::GPT::new(tiny_config(8), ParamStore::new().root());
 
         // Act
         score_model(&model, &[1]);
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn model_scores_one_fewer_token_than_input() {
         // Arrange
-        let model = crate::models::gpt::GPT::new(tiny_config(8), ParamStore::new().root());
+        let model = crate::models::gpt2::GPT::new(tiny_config(8), ParamStore::new().root());
 
         // Act
         let report = score_model(&model, &[1, 2, 3, 4]);
@@ -464,7 +464,7 @@ mod tests {
         else {
             return;
         };
-        let mut model = crate::models::gpt::GPT::new(tiny_config(8), ParamStore::new().root());
+        let mut model = crate::models::gpt2::GPT::new(tiny_config(8), ParamStore::new().root());
         model.to_device(device).unwrap();
         assert_eq!(model.device(), device);
 

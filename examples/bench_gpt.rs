@@ -61,7 +61,7 @@ fn main() {
 // ---------------------------------------------------------------------------
 
 fn bench_deers(device: deers::Device, profile_enabled: bool) {
-    use deers::models::gpt::{GPT, GPTConfig, GptMlpKind, GptNormKind};
+    use deers::models::gpt2::{GPT, GPTConfig, GptMlpKind, GptNormKind};
 
     if let Err(err) = device.check_available() {
         eprintln!("error: device {device:?} is not available: {err}");
@@ -78,7 +78,7 @@ fn bench_deers(device: deers::Device, profile_enabled: bool) {
         mlp_hidden_dim: MLP_HIDDEN,
         rms_norm_eps: 1e-5,
         rope_base: 10_000.0,
-        rope_scaling: deers::models::gpt::RopeScaling::None,
+        rope_scaling: deers::models::gpt2::RopeScaling::None,
         norm: GptNormKind::RmsNorm,
         mlp: GptMlpKind::ReluSquared,
         tie_embeddings: false,

@@ -1,7 +1,7 @@
 use candle_core::{D, Device as CDevice, Tensor as CTensor};
 use candle_nn::ops as candle_ops;
 use deers::eval::{ParityCheck, check_close, sample_token_ids, score_model};
-use deers::models::gpt::{self, GPTConfig, GptMlpKind, GptNormKind, RopeScaling};
+use deers::models::gpt2::{self, GPTConfig, GptMlpKind, GptNormKind, RopeScaling};
 use deers::nn::{Module, ParamStore, Parameter, RMSNorm};
 use deers::tokenizer::{Gpt2Tokenizer, Tokenizer};
 use deers::{DType, Device, Tensor};
@@ -143,10 +143,10 @@ fn rmsnorm_block_matches_candle() {
 fn attention_block_matches_candle() {
     // Arrange
     let store = ParamStore::new();
-    let attn = gpt::CausalSelfAttention::new(store.root(), 8, 2);
+    let attn = gpt2::CausalSelfAttention::new(store.root(), 8, 2);
     let values: Vec<f32> = (0..24).map(|i| i as f32 * 0.1 - 1.0).collect();
     let x = Tensor::from_vec(values.clone(), (1, 3, 8), Device::Cpu);
-    let (cos, sin) = gpt::precompute_rotary_embeddings(3, 4, 10_000.0, DType::F32, Device::Cpu);
+    let (cos, sin) = gpt2::precompute_rotary_embeddings(3, 4, 10_000.0, DType::F32, Device::Cpu);
     let weights = deers_weights_to_candle(&attn.parameters());
     let (cos_ref, sin_ref) = candle_rotary(3, 4, 10_000.0);
 
@@ -167,7 +167,7 @@ fn attention_block_matches_candle() {
 fn mlp_block_matches_candle() {
     // Arrange
     let store = ParamStore::new();
-    let mlp = gpt::MLP::new(store.root(), 8, 16);
+    let mlp = gpt2::MLP::new(store.root(), 8, 16);
     let values: Vec<f32> = (0..24).map(|i| i as f32 * 0.1 - 1.0).collect();
     let x = Tensor::from_vec(values.clone(), (1, 3, 8), Device::Cpu);
     let weights = deers_weights_to_candle(&mlp.parameters());
@@ -202,7 +202,7 @@ fn bundled_sample_scores_end_to_end_on_cpu() {
         mlp: GptMlpKind::ReluSquared,
         tie_embeddings: false,
     };
-    let model = gpt::GPT::new(config, ParamStore::new().root());
+    let model = gpt2::GPT::new(config, ParamStore::new().root());
 
     // Act
     let report = score_model(&model, &ids);

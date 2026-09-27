@@ -1,7 +1,7 @@
 use candle_core::{D, Device as CDevice, Tensor as CTensor, Var};
 use candle_nn::{loss as candle_loss, ops as candle_ops};
 use deers::loss;
-use deers::models::gpt;
+use deers::models::gpt2;
 use deers::nn::ParamStore;
 use deers::{Device, Tensor};
 
@@ -9,7 +9,7 @@ const CPU_TOL: f32 = 1e-4;
 const MPS_TOL: f32 = 2e-3;
 
 struct CandleGptRef {
-    config: gpt::GPTConfig,
+    config: gpt2::GPTConfig,
     vars: Vec<Var>,
 }
 
@@ -35,8 +35,8 @@ fn tol_for(device: Device) -> f32 {
     }
 }
 
-fn test_config() -> gpt::GPTConfig {
-    gpt::GPTConfig {
+fn test_config() -> gpt2::GPTConfig {
+    gpt2::GPTConfig {
         vocab_size: 8,
         sequence_len: 4,
         n_layer: 1,
@@ -45,9 +45,9 @@ fn test_config() -> gpt::GPTConfig {
         mlp_hidden_dim: 8,
         rms_norm_eps: 1e-5,
         rope_base: 10_000.0,
-        rope_scaling: gpt::RopeScaling::None,
-        norm: gpt::GptNormKind::RmsNorm,
-        mlp: gpt::GptMlpKind::ReluSquared,
+        rope_scaling: gpt2::RopeScaling::None,
+        norm: gpt2::GptNormKind::RmsNorm,
+        mlp: gpt2::GptMlpKind::ReluSquared,
         tie_embeddings: false,
     }
 }
@@ -197,7 +197,7 @@ fn candle_gpt_forward(
     ids: &[u32],
     batch_size: usize,
     seq_len: usize,
-    config: &gpt::GPTConfig,
+    config: &gpt2::GPTConfig,
     weights: &[CTensor],
 ) -> CTensor {
     let wte = &weights[0];
@@ -245,7 +245,7 @@ fn candle_gpt_forward(
 }
 
 impl CandleGptRef {
-    fn from_model(config: gpt::GPTConfig, model: &gpt::GPT) -> Self {
+    fn from_model(config: gpt2::GPTConfig, model: &gpt2::GPT) -> Self {
         let vars = model
             .parameters()
             .iter()
@@ -293,7 +293,7 @@ impl CandleGptRef {
 #[test]
 fn test_gpt_forward_conforms_with_candle_on_cpu_and_accelerators() {
     // Arrange
-    let mut model = gpt::GPT::new(test_config(), ParamStore::new().root());
+    let mut model = gpt2::GPT::new(test_config(), ParamStore::new().root());
     let candle = CandleGptRef::from_model(test_config(), &model);
     let batch_size = 2;
     let seq_len = 3;
@@ -317,7 +317,7 @@ fn test_gpt_forward_conforms_with_candle_on_cpu_and_accelerators() {
 fn test_gpt_backward_conforms_with_candle_on_cpu_and_accelerators() {
     // Arrange
     let config = test_config();
-    let mut model = gpt::GPT::new(test_config(), ParamStore::new().root());
+    let mut model = gpt2::GPT::new(test_config(), ParamStore::new().root());
     let candle = CandleGptRef::from_model(test_config(), &model);
     let batch_size = 2;
     let seq_len = 3;
@@ -363,8 +363,8 @@ fn test_gpt_backward_conforms_with_candle_on_cpu_and_accelerators() {
     }
 }
 
-fn tiny_extension_config(sequence_len: usize) -> gpt::GPTConfig {
-    gpt::GPTConfig {
+fn tiny_extension_config(sequence_len: usize) -> gpt2::GPTConfig {
+    gpt2::GPTConfig {
         vocab_size: 16,
         sequence_len,
         n_layer: 1,
@@ -373,14 +373,14 @@ fn tiny_extension_config(sequence_len: usize) -> gpt::GPTConfig {
         mlp_hidden_dim: 16,
         rms_norm_eps: 1e-5,
         rope_base: 10_000.0,
-        rope_scaling: gpt::RopeScaling::None,
-        norm: gpt::GptNormKind::RmsNorm,
-        mlp: gpt::GptMlpKind::ReluSquared,
+        rope_scaling: gpt2::RopeScaling::None,
+        norm: gpt2::GptNormKind::RmsNorm,
+        mlp: gpt2::GptMlpKind::ReluSquared,
         tie_embeddings: false,
     }
 }
 
-fn share_gpt_weights(from: &gpt::GPT, to: &gpt::GPT) {
+fn share_gpt_weights(from: &gpt2::GPT, to: &gpt2::GPT) {
     let from_parameters = from.parameters();
     let to_parameters = to.parameters();
     assert_eq!(from_parameters.len(), to_parameters.len(), "models must match");
@@ -396,8 +396,8 @@ fn extension_ids(seq_len: usize) -> Vec<i64> {
 #[test]
 fn test_gpt_within_context_matches_larger_native_cache() {
     // Arrange: same weights under a 4-position cache and a 32-position cache.
-    let short = gpt::GPT::new(tiny_extension_config(4), ParamStore::new().root());
-    let long = gpt::GPT::new(tiny_extension_config(32), ParamStore::new().root());
+    let short = gpt2::GPT::new(tiny_extension_config(4), ParamStore::new().root());
+    let long = gpt2::GPT::new(tiny_extension_config(32), ParamStore::new().root());
     share_gpt_weights(&short, &long);
     let idx = Tensor::from_vec(extension_ids(4), (1, 4), Device::Cpu);
 
@@ -412,8 +412,8 @@ fn test_gpt_within_context_matches_larger_native_cache() {
 #[test]
 fn test_gpt_just_over_boundary_matches_native_cache() {
     // Arrange: a 4-position cache asked for 5 positions.
-    let short = gpt::GPT::new(tiny_extension_config(4), ParamStore::new().root());
-    let long = gpt::GPT::new(tiny_extension_config(32), ParamStore::new().root());
+    let short = gpt2::GPT::new(tiny_extension_config(4), ParamStore::new().root());
+    let long = gpt2::GPT::new(tiny_extension_config(32), ParamStore::new().root());
     share_gpt_weights(&short, &long);
     let idx = Tensor::from_vec(extension_ids(5), (1, 5), Device::Cpu);
 
@@ -429,8 +429,8 @@ fn test_gpt_just_over_boundary_matches_native_cache() {
 #[test]
 fn test_gpt_long_prompt_matches_native_cache() {
     // Arrange: a 4-position cache asked for 32 positions (8x over).
-    let short = gpt::GPT::new(tiny_extension_config(4), ParamStore::new().root());
-    let long = gpt::GPT::new(tiny_extension_config(32), ParamStore::new().root());
+    let short = gpt2::GPT::new(tiny_extension_config(4), ParamStore::new().root());
+    let long = gpt2::GPT::new(tiny_extension_config(32), ParamStore::new().root());
     share_gpt_weights(&short, &long);
     let idx = Tensor::from_vec(extension_ids(32), (1, 32), Device::Cpu);
 
