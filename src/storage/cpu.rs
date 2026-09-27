@@ -456,6 +456,58 @@ impl BackendStorage for CpuStorage {
         }
     }
 
+    fn to_dtype(&self, layout: &Layout, dtype: DType) -> Result<Self> {
+        if self.dtype() == dtype {
+            let mut out = match dtype {
+                DType::F16 => CpuStorage::F16(vec![f16::from_f32(0.0); layout.size()]),
+                DType::BF16 => CpuStorage::BF16(vec![bf16::ZERO; layout.size()]),
+                DType::F32 => CpuStorage::F32(vec![0.0; layout.size()]),
+                DType::I64 => CpuStorage::I64(vec![0; layout.size()]),
+            };
+            self.copy_compact(layout, &mut out)?;
+            return Ok(out);
+        }
+        Ok(match (self, dtype) {
+            (CpuStorage::F16(_), DType::F32) => {
+                CpuStorage::F32(cast_elements(self, layout, cast_f16_f32))
+            }
+            (CpuStorage::F16(_), DType::BF16) => {
+                CpuStorage::BF16(cast_elements(self, layout, cast_f16_bf16))
+            }
+            (CpuStorage::F16(_), DType::I64) => {
+                CpuStorage::I64(cast_elements(self, layout, cast_f16_i64))
+            }
+            (CpuStorage::BF16(_), DType::F16) => {
+                CpuStorage::F16(cast_elements(self, layout, cast_bf16_f16))
+            }
+            (CpuStorage::BF16(_), DType::F32) => {
+                CpuStorage::F32(cast_elements(self, layout, cast_bf16_f32))
+            }
+            (CpuStorage::BF16(_), DType::I64) => {
+                CpuStorage::I64(cast_elements(self, layout, cast_bf16_i64))
+            }
+            (CpuStorage::F32(_), DType::F16) => {
+                CpuStorage::F16(cast_elements(self, layout, cast_f32_f16))
+            }
+            (CpuStorage::F32(_), DType::BF16) => {
+                CpuStorage::BF16(cast_elements(self, layout, cast_f32_bf16))
+            }
+            (CpuStorage::F32(_), DType::I64) => {
+                CpuStorage::I64(cast_elements(self, layout, cast_f32_i64))
+            }
+            (CpuStorage::I64(_), DType::F16) => {
+                CpuStorage::F16(cast_elements(self, layout, cast_i64_f16))
+            }
+            (CpuStorage::I64(_), DType::BF16) => {
+                CpuStorage::BF16(cast_elements(self, layout, cast_i64_bf16))
+            }
+            (CpuStorage::I64(_), DType::F32) => {
+                CpuStorage::F32(cast_elements(self, layout, cast_i64_f32))
+            }
+            _ => unreachable!("same-dtype casts return early"),
+        })
+    }
+
     fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D> {
         self.iter(layout.borrow()).copied().collect()
     }
@@ -1062,6 +1114,59 @@ impl BackendStorage for CpuStorage {
             )),
         }
     }
+}
+
+/// Reads `layout` from `storage` and converts each element with `f`.
+///
+/// Compact buffers map straight over the slice; strided views decode through the
+/// layout iterator so permuted or narrowed inputs convert in view order.
+fn cast_elements<A: WithDType, B>(storage: &CpuStorage, layout: &Layout, f: fn(A) -> B) -> Vec<B> {
+    if layout.is_compact() && layout.size() == storage.len() {
+        return A::as_slice(storage).iter().map(|&v| f(v)).collect();
+    }
+    storage.iter::<A>(layout).map(|&v| f(v)).collect()
+}
+
+/// Element conversions for [`CpuStorage::to_dtype`].
+///
+/// Narrowing rounds once to nearest-even through the `half` crate; widening is
+/// exact; float-to-integer casts truncate toward zero with saturating `as`
+/// semantics.
+fn cast_f16_f32(v: f16) -> f32 {
+    v.to_f32()
+}
+fn cast_f16_bf16(v: f16) -> bf16 {
+    bf16::from_f32(v.to_f32())
+}
+fn cast_f16_i64(v: f16) -> i64 {
+    v.to_f32() as i64
+}
+fn cast_bf16_f16(v: bf16) -> f16 {
+    f16::from_f32(v.to_f32())
+}
+fn cast_bf16_f32(v: bf16) -> f32 {
+    v.to_f32()
+}
+fn cast_bf16_i64(v: bf16) -> i64 {
+    v.to_f32() as i64
+}
+fn cast_f32_f16(v: f32) -> f16 {
+    f16::from_f32(v)
+}
+fn cast_f32_bf16(v: f32) -> bf16 {
+    bf16::from_f32(v)
+}
+fn cast_f32_i64(v: f32) -> i64 {
+    v as i64
+}
+fn cast_i64_f16(v: i64) -> f16 {
+    f16::from_f32(v as f32)
+}
+fn cast_i64_bf16(v: i64) -> bf16 {
+    bf16::from_f32(v as f32)
+}
+fn cast_i64_f32(v: i64) -> f32 {
+    v as f32
 }
 
 fn gather_into<T: Copy>(

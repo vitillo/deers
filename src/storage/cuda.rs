@@ -226,6 +226,37 @@ mod imp {
     DEFINE_BINARY_BF16(powf, powf(x, y))
     DEFINE_BINARY_BF16(eq, x == y ? 1.0f : 0.0f)
 
+    // Dtype casts: one native kernel per (source, target) pair. Narrowing rounds
+    // once to nearest-even through the CUDA half/bfloat16 intrinsics; widening is
+    // exact; float-to-integer casts truncate toward zero with saturating bounds so
+    // out-of-range and NaN inputs match the host `as` semantics instead of
+    // trapping on undefined device conversions.
+    __device__ __forceinline__ long long f32_to_ll_sat(float x) {
+        if (isnan(x)) return 0;
+        if (x >= 9223372036854775808.0f) return 9223372036854775807LL;
+        if (x <= -9223372036854775808.0f) return -9223372036854775807LL - 1;
+        return (long long)x;
+    }
+
+    #define DEFINE_CAST(name, src_t, dst_t, expr) \
+    extern "C" __global__ void name(const src_t* src, dst_t* dst, unsigned int size) { \
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x; \
+        if (idx < size) { auto x = src[idx]; dst[idx] = (expr); } \
+    }
+
+    DEFINE_CAST(cast_f16_f32, half, float, __half2float(x))
+    DEFINE_CAST(cast_f16_bf16, half, __nv_bfloat16, __float2bfloat16(__half2float(x)))
+    DEFINE_CAST(cast_f16_i64, half, long long, f32_to_ll_sat(__half2float(x)))
+    DEFINE_CAST(cast_bf16_f16, __nv_bfloat16, half, __float2half(__bfloat162float(x)))
+    DEFINE_CAST(cast_bf16_f32, __nv_bfloat16, float, __bfloat162float(x))
+    DEFINE_CAST(cast_bf16_i64, __nv_bfloat16, long long, f32_to_ll_sat(__bfloat162float(x)))
+    DEFINE_CAST(cast_f32_f16, float, half, __float2half(x))
+    DEFINE_CAST(cast_f32_bf16, float, __nv_bfloat16, __float2bfloat16(x))
+    DEFINE_CAST(cast_f32_i64, float, long long, f32_to_ll_sat(x))
+    DEFINE_CAST(cast_i64_f32, long long, float, (float)x)
+    DEFINE_CAST(cast_i64_f16, long long, half, __float2half((float)x))
+    DEFINE_CAST(cast_i64_bf16, long long, __nv_bfloat16, __float2bfloat16((float)x))
+
     // Warp-shuffle sum of 32 floats within a single warp — no __syncthreads needed.
     __device__ __forceinline__ float warp_reduce_sum(float v) {
         #pragma unroll
@@ -1043,6 +1074,20 @@ mod imp {
             let len = lhs.len() as u32;
             launch_1d!(&self.runtime, kernel, lhs.len(), lhs, rhs, &out, &len);
             Ok(Self { inner: CudaInner::F32(out), runtime: self.runtime.clone() })
+        }
+
+        /// Launches a `cast_<src>_<dst>` kernel over a compact source slice,
+        /// wrapping the fresh device buffer in the matching [`CudaInner`] variant.
+        fn launch_cast<S: DeviceRepr, D: DeviceRepr>(
+            &self,
+            kernel: &str,
+            src: &CudaSlice<S>,
+            wrap: impl FnOnce(CudaSlice<D>) -> CudaInner,
+        ) -> Result<Self> {
+            let out = unsafe { alloc_uninit::<D>(&self.runtime, src.len()) }?;
+            let len = src.len() as u32;
+            launch_1d!(&self.runtime, kernel, src.len(), src, &out, &len);
+            Ok(Self { inner: wrap(out), runtime: self.runtime.clone() })
         }
 
         fn reduce_impl(&self, kernel: &str, outer_size: usize, reduce_size: usize) -> Result<Self> {
@@ -2013,6 +2058,54 @@ mod imp {
             }
         }
 
+        fn to_dtype(&self, layout: &Layout, dtype: DType) -> Result<Self> {
+            // Compacting first keeps the cast kernels to a single compact read/write
+            // each, and the copy itself stays on-device via the copy_compact kernel.
+            let compact = self.compact(layout)?;
+            if compact.dtype() == dtype {
+                return Ok(compact);
+            }
+            match (&compact.inner, dtype) {
+                (CudaInner::F16(src), DType::F32) => {
+                    compact.launch_cast("cast_f16_f32", src, CudaInner::F32)
+                }
+                (CudaInner::F16(src), DType::BF16) => {
+                    compact.launch_cast("cast_f16_bf16", src, CudaInner::BF16)
+                }
+                (CudaInner::F16(src), DType::I64) => {
+                    compact.launch_cast("cast_f16_i64", src, CudaInner::I64)
+                }
+                (CudaInner::BF16(src), DType::F16) => {
+                    compact.launch_cast("cast_bf16_f16", src, CudaInner::F16)
+                }
+                (CudaInner::BF16(src), DType::F32) => {
+                    compact.launch_cast("cast_bf16_f32", src, CudaInner::F32)
+                }
+                (CudaInner::BF16(src), DType::I64) => {
+                    compact.launch_cast("cast_bf16_i64", src, CudaInner::I64)
+                }
+                (CudaInner::F32(src), DType::F16) => {
+                    compact.launch_cast("cast_f32_f16", src, CudaInner::F16)
+                }
+                (CudaInner::F32(src), DType::BF16) => {
+                    compact.launch_cast("cast_f32_bf16", src, CudaInner::BF16)
+                }
+                (CudaInner::F32(src), DType::I64) => {
+                    compact.launch_cast("cast_f32_i64", src, CudaInner::I64)
+                }
+                (CudaInner::I64(src), DType::F16) => {
+                    compact.launch_cast("cast_i64_f16", src, CudaInner::F16)
+                }
+                (CudaInner::I64(src), DType::BF16) => {
+                    compact.launch_cast("cast_i64_bf16", src, CudaInner::BF16)
+                }
+                (CudaInner::I64(src), DType::F32) => {
+                    compact.launch_cast("cast_i64_f32", src, CudaInner::F32)
+                }
+                _ => unreachable!("same-dtype casts return early"),
+            }
+        }
+
         fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D> {
             let layout = layout.borrow();
             let compact = self.compact(layout).expect("cuda compact failed");
@@ -2196,6 +2289,9 @@ mod imp {
         }
         fn dtype(&self) -> DType {
             panic!("cuda backend is unavailable")
+        }
+        fn to_dtype(&self, _: &Layout, _: DType) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn to_vec<D: WithDType>(&self, _: impl Borrow<Layout>) -> Vec<D> {
             panic!("cuda backend is unavailable")

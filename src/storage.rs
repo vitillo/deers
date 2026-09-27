@@ -301,6 +301,13 @@ pub trait BackendStorage: Sized {
         outer_size: usize,
         inner_size: usize,
     ) -> Result<Self>;
+    /// Converts `layout` to `dtype` without leaving the device.
+    ///
+    /// The cast reads strided source elements and writes a compact output buffer:
+    /// floats round to nearest-even when narrowing and truncate toward zero when
+    /// targeting `I64`; integers widen exactly into floats. Backends implement this
+    /// with native on-device kernels, never a host roundtrip.
+    fn to_dtype(&self, layout: &Layout, dtype: DType) -> Result<Self>;
     fn dtype(&self) -> DType;
     fn to_vec<D: WithDType>(&self, layout: impl Borrow<Layout>) -> Vec<D>;
     fn copy_compact(&self, src_layout: &Layout, dst: &mut Self) -> Result<()>;
@@ -423,6 +430,14 @@ impl BackendStorage for Storage {
             Storage::Cpu(storage) => storage.dtype(),
             Storage::Cuda(storage) => storage.dtype(),
             Storage::Mps(storage) => storage.dtype(),
+        }
+    }
+
+    fn to_dtype(&self, layout: &Layout, dtype: DType) -> Result<Self> {
+        match self {
+            Storage::Cpu(storage) => Ok(Self::Cpu(storage.to_dtype(layout, dtype)?)),
+            Storage::Cuda(storage) => Ok(Self::Cuda(storage.to_dtype(layout, dtype)?)),
+            Storage::Mps(storage) => Ok(Self::Mps(storage.to_dtype(layout, dtype)?)),
         }
     }
 
