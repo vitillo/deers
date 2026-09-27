@@ -1328,6 +1328,76 @@ impl TensorOp for ToDevice {
     }
 }
 
+/// Converts tensor values to `dtype` on the same device without touching autograd.
+///
+/// Values round-trip through host memory so every backend shares one conversion
+/// path, the same pattern [`ToDevice`] uses for device moves. Floats round to
+/// nearest-even when narrowing and truncate toward zero when targeting `I64`;
+/// integers widen exactly into floats.
+ pub(crate) fn cast_to_dtype(arg: &Tensor, dtype: crate::DType) -> Result<Tensor> {
+    let shape: Vec<usize> = arg.layout().shape().iter().copied().collect();
+    let device = arg.device();
+    let as_f32: Vec<f32> = match arg.dtype() {
+        crate::DType::F16 => arg.to_vec::<f16>()?.iter().map(|v| v.to_f32()).collect(),
+        crate::DType::BF16 => arg.to_vec::<bf16>()?.iter().map(|v| v.to_f32()).collect(),
+        crate::DType::F32 => arg.to_vec::<f32>()?,
+        crate::DType::I64 => arg.to_vec::<i64>()?.iter().map(|v| *v as f32).collect(),
+    };
+    Ok(match dtype {
+        crate::DType::F16 => Tensor::from_vec(
+            as_f32.iter().map(|&v| f16::from_f32(v)).collect::<Vec<_>>(),
+            shape,
+            device,
+        ),
+        crate::DType::BF16 => Tensor::from_vec(
+            as_f32.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+            shape,
+            device,
+        ),
+        crate::DType::F32 => Tensor::from_vec(as_f32, shape, device),
+        crate::DType::I64 => Tensor::from_vec(
+            as_f32.iter().map(|&v| v as i64).collect::<Vec<_>>(),
+            shape,
+            device,
+        ),
+    })
+}
+
+/// Converts a tensor to another dtype while keeping the autograd edge.
+///
+/// Forward casts each element (see [`cast_to_dtype`]). Backward casts the output
+/// gradient back to the input dtype, so float-to-float casts stay differentiable.
+/// Casts targeting `I64` never reach this op: [`Tensor::to_dtype`] returns those
+/// detached instead.
+#[derive(Debug)]
+pub struct ToDtype {
+    arg: Tensor,
+    dtype: crate::DType,
+}
+
+impl ToDtype {
+    pub fn new(arg: Tensor, dtype: crate::DType) -> Result<Self> {
+        Ok(Self { arg, dtype })
+    }
+}
+
+impl TensorOp for ToDtype {
+    fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("to_dtype", &self.arg);
+        let out = cast_to_dtype(&self.arg, self.dtype)?;
+        Ok(Tensor::new(out.storage_clone(), out.layout().clone(), false, Some(Box::new(self))))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        grads.accumulate(&self.arg, cast_to_dtype(out_grad, self.arg.dtype())?);
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
 /// Gathers values along `dim` using integer indices.
 ///
 /// The index tensor must have the same rank as the input and the same shape on
