@@ -1,5 +1,5 @@
 use candle_core::{Device as CDevice, Tensor as CTensor, Var};
-use deers::{Device, Tensor};
+use deers::{DType, Device, Tensor};
 
 const TOL: f32 = 1e-4;
 
@@ -40,7 +40,7 @@ fn relu_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), shape, device);
-            let output = input.relu().unwrap();
+            let output = input.relu();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -67,7 +67,7 @@ fn relu_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
-            let loss = input.relu().unwrap().sum(vec![0, 1], true);
+            let loss = input.relu().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -307,7 +307,7 @@ fn log_softmax_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
-            let output = input.log_softmax(1).unwrap();
+            let output = input.log_softmax(1);
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -334,7 +334,7 @@ fn log_softmax_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
-            let loss = input.log_softmax(1).unwrap().sum(vec![0, 1], false);
+            let loss = input.log_softmax(1).sum(vec![0, 1], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -363,7 +363,7 @@ fn log_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = input.log().unwrap();
+            let output = input.log();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -390,7 +390,7 @@ fn log_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = input.log().unwrap().sum(vec![0, 1], true);
+            let loss = input.log().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -415,7 +415,7 @@ fn exp_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = input.exp().unwrap();
+            let output = input.exp();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -442,7 +442,7 @@ fn exp_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = input.exp().unwrap().sum(vec![0, 1], true);
+            let loss = input.exp().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -467,7 +467,7 @@ fn scalar_powf_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (3,), device);
-            let output = input.scalar_powf(3.0).unwrap();
+            let output = input.scalar_powf(3.0);
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -494,7 +494,7 @@ fn scalar_powf_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (3,), device).attach();
-            let loss = input.scalar_powf(3.0).unwrap().sum(vec![0], false);
+            let loss = input.scalar_powf(3.0).sum(vec![0], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -741,7 +741,7 @@ fn neg_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = (-&input).unwrap();
+            let output = -&input;
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -768,7 +768,7 @@ fn neg_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = (-&input).unwrap().sum(vec![0, 1], true);
+            let loss = (-&input).sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1041,7 +1041,7 @@ fn scalar_add_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = (&input + 2.0).unwrap();
+            let output = &input + 2.0;
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1068,7 +1068,7 @@ fn scalar_add_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = (&input + 2.0).unwrap().sum(vec![0, 1], true);
+            let loss = (&input + 2.0).sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1093,7 +1093,7 @@ fn scalar_sub_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = (&input - 2.0).unwrap();
+            let output = &input - 2.0;
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1120,7 +1120,7 @@ fn scalar_sub_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = (&input - 2.0).unwrap().sum(vec![0, 1], true);
+            let loss = (&input - 2.0).sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1145,7 +1145,7 @@ fn scalar_mul_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = (&input * 2.0).unwrap();
+            let output = &input * 2.0;
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1172,7 +1172,7 @@ fn scalar_mul_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = (&input * 2.0).unwrap().sum(vec![0, 1], true);
+            let loss = (&input * 2.0).sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1197,7 +1197,7 @@ fn scalar_div_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = (&input / 2.0).unwrap();
+            let output = &input / 2.0;
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1224,7 +1224,7 @@ fn scalar_div_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = (&input / 2.0).unwrap().sum(vec![0, 1], true);
+            let loss = (&input / 2.0).sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1409,7 +1409,7 @@ fn rand_forward_has_valid_range() {
     let results: Vec<(Device, Vec<f32>)> = devices()
         .into_iter()
         .map(|device| {
-            let output = Tensor::rand((len,), deers::DType::F32, device).unwrap();
+            let output = Tensor::rand((len,), deers::DType::F32, device);
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1431,7 +1431,7 @@ fn randn_forward_has_finite_values() {
     let results: Vec<(Device, Vec<f32>)> = devices()
         .into_iter()
         .map(|device| {
-            let output = Tensor::randn((len,), deers::DType::F32, device).unwrap();
+            let output = Tensor::randn((len,), deers::DType::F32, device);
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1441,90 +1441,6 @@ fn randn_forward_has_finite_values() {
     for (device, actual) in results {
         assert_eq!(actual.len(), len, "randn length on {:?}", device);
         assert!(actual.iter().all(|value| value.is_finite()));
-    }
-}
-
-#[test]
-fn rand_rejects_integer_dtype() {
-    // Arrange
-    let shape = (4,);
-
-    // Act
-    let result = Tensor::rand(shape, deers::DType::I64, Device::Cpu);
-
-    // Assert
-    let err = result.expect_err("rand on i64 must fail");
-    let message = err.to_string();
-    assert!(message.contains("rand"), "message must name the op: {message}");
-    assert!(message.contains("I64"), "message must name the dtype: {message}");
-}
-
-#[test]
-fn randn_rejects_integer_dtype() {
-    // Arrange
-    let shape = (4,);
-
-    // Act
-    let result = Tensor::randn(shape, deers::DType::I64, Device::Cpu);
-
-    // Assert
-    let err = result.expect_err("randn on i64 must fail");
-    let message = err.to_string();
-    assert!(message.contains("randn"), "message must name the op: {message}");
-    assert!(message.contains("I64"), "message must name the dtype: {message}");
-}
-
-fn assert_i64_dtype_error<E: std::fmt::Display>(result: Result<Tensor, E>, label: &str) {
-    let Err(err) = result else { panic!("{label}: expected a dtype error on i64 input") };
-    let message = err.to_string();
-    assert!(message.contains("i64"), "{label}: message must name the dtype: {message}");
-    assert!(message.contains("not supported"), "{label}: message must reject the dtype: {message}");
-}
-
-#[test]
-fn unary_methods_return_dtype_error_on_i64() {
-    // Arrange
-    let input = Tensor::from_vec(vec![1i64, 2, 3], (3,), Device::Cpu);
-
-    // Act
-    let results = [
-        ("exp", input.exp()),
-        ("log", input.log()),
-        ("sin", input.sin()),
-        ("cos", input.cos()),
-        ("tanh", input.tanh()),
-        ("relu", input.relu()),
-        ("sqrt", input.sqrt()),
-        ("scalar_powf", input.scalar_powf(2.0)),
-        ("log_sum_exp", input.log_sum_exp(vec![0])),
-        ("log_softmax", input.log_softmax(0)),
-        ("softmax", input.softmax(0)),
-        ("gelu", input.gelu()),
-    ];
-
-    // Assert
-    for (label, result) in results {
-        assert_i64_dtype_error(result, label);
-    }
-}
-
-#[test]
-fn scalar_operators_return_dtype_error_on_i64() {
-    // Arrange
-    let input = Tensor::from_vec(vec![1i64, 2, 3], (3,), Device::Cpu);
-
-    // Act
-    let results = [
-        ("neg", -&input),
-        ("add", &input + 1.0),
-        ("sub", &input - 1.0),
-        ("mul", &input * 2.0),
-        ("div", &input / 2.0),
-    ];
-
-    // Assert
-    for (label, result) in results {
-        assert_i64_dtype_error(result, label);
     }
 }
 
@@ -1759,7 +1675,7 @@ fn powf_forward_conforms() {
         .map(|device| {
             let base = Tensor::from_vec(base.clone(), (3,), device);
             let exp = Tensor::from_vec(exp.clone(), (3,), device);
-            let output = base.powf(&exp).unwrap();
+            let output = base.powf(&exp);
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1790,7 +1706,7 @@ fn powf_backward_conforms() {
         .map(|device| {
             let base = Tensor::from_vec(base.clone(), (3,), device).attach();
             let exp = Tensor::from_vec(exp.clone(), (3,), device).attach();
-            let loss = base.powf(&exp).unwrap().sum(vec![0], false);
+            let loss = base.powf(&exp).sum(vec![0], false);
             let grads = loss.backward().unwrap();
             let base_grad = grads.get(base.id()).unwrap().to_vec::<f32>().unwrap();
             let exp_grad = grads.get(exp.id()).unwrap().to_vec::<f32>().unwrap();
@@ -1821,7 +1737,7 @@ fn sqrt_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = input.sqrt().unwrap();
+            let output = input.sqrt();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1848,7 +1764,7 @@ fn sqrt_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = input.sqrt().unwrap().sum(vec![0, 1], true);
+            let loss = input.sqrt().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1873,7 +1789,7 @@ fn sin_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = input.sin().unwrap();
+            let output = input.sin();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1900,7 +1816,7 @@ fn sin_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = input.sin().unwrap().sum(vec![0, 1], true);
+            let loss = input.sin().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1925,7 +1841,7 @@ fn cos_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = input.cos().unwrap();
+            let output = input.cos();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -1952,7 +1868,7 @@ fn cos_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = input.cos().unwrap().sum(vec![0, 1], true);
+            let loss = input.cos().sum(vec![0, 1], true);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -1978,7 +1894,7 @@ fn log_sum_exp_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
-            let output = input.log_sum_exp(vec![1]).unwrap();
+            let output = input.log_sum_exp(vec![1]);
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -2005,7 +1921,7 @@ fn log_sum_exp_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
-            let loss = input.log_sum_exp(vec![1]).unwrap().sum(vec![0], false);
+            let loss = input.log_sum_exp(vec![1]).sum(vec![0], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -2105,7 +2021,7 @@ fn sigmoid_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = input.sigmoid().unwrap();
+            let output = input.sigmoid();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -2132,7 +2048,7 @@ fn sigmoid_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = input.sigmoid().unwrap().sum(vec![0, 1], false);
+            let loss = input.sigmoid().sum(vec![0, 1], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -2157,7 +2073,7 @@ fn tanh_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device);
-            let output = input.tanh().unwrap();
+            let output = input.tanh();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -2184,7 +2100,7 @@ fn tanh_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 2), device).attach();
-            let loss = input.tanh().unwrap().sum(vec![0, 1], false);
+            let loss = input.tanh().sum(vec![0, 1], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -2209,7 +2125,7 @@ fn gelu_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
-            let output = input.gelu().unwrap();
+            let output = input.gelu();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -2236,7 +2152,7 @@ fn gelu_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
-            let loss = input.gelu().unwrap().sum(vec![0, 1], false);
+            let loss = input.gelu().sum(vec![0, 1], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -2261,7 +2177,7 @@ fn silu_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
-            let output = input.silu().unwrap();
+            let output = input.silu();
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -2288,7 +2204,7 @@ fn silu_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
-            let loss = input.silu().unwrap().sum(vec![0, 1], false);
+            let loss = input.silu().sum(vec![0, 1], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -2318,7 +2234,7 @@ fn softmax_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
-            let output = input.softmax(1).unwrap();
+            let output = input.softmax(1);
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -2345,7 +2261,7 @@ fn softmax_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
-            let loss = input.softmax(1).unwrap().sum(vec![0, 1], false);
+            let loss = input.softmax(1).sum(vec![0, 1], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -2370,7 +2286,7 @@ fn mean_forward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device);
-            let output = (input.mean(vec![1], false)).unwrap();
+            let output = input.mean(vec![1], false);
             let values = output.to_vec::<f32>().unwrap();
             (device, values)
         })
@@ -2397,7 +2313,7 @@ fn mean_backward_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(data.clone(), (2, 3), device).attach();
-            let loss = input.mean(vec![1], false).unwrap().sum(vec![0], false);
+            let loss = input.mean(vec![1], false).sum(vec![0], false);
             let grads = loss.backward().unwrap();
             let grad = grads.get(input.id()).unwrap().to_vec::<f32>().unwrap();
             (device, grad)
@@ -3302,4 +3218,281 @@ fn triu_backward_candle_conforms() {
     for (device, actual_grad) in results {
         assert_close(&actual_grad, &expected_grad, &format!("triu backward on {:?}", device));
     }
+}
+
+#[test]
+#[should_panic(expected = "powf: i64 is not supported")]
+fn powf_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+    let exponent = Tensor::from_vec(vec![2i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input.powf(&exponent);
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "scalar_powf: i64 is not supported")]
+fn scalar_powf_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input.scalar_powf(2.0);
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "sqrt: i64 is not supported")]
+fn sqrt_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input.sqrt();
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "log: i64 is not supported")]
+fn log_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input.log();
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "exp: i64 is not supported")]
+fn exp_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input.exp();
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "sin: i64 is not supported")]
+fn sin_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input.sin();
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "cos: i64 is not supported")]
+fn cos_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input.cos();
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "tanh: i64 is not supported")]
+fn tanh_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input.tanh();
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "relu: i64 is not supported")]
+fn relu_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input.relu();
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "sigmoid: i64 is not supported")]
+fn sigmoid_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input.sigmoid();
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "silu: i64 is not supported")]
+fn silu_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input.silu();
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "gelu: i64 is not supported")]
+fn gelu_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input.gelu();
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "softmax: i64 is not supported")]
+fn softmax_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (1, 2), Device::Cpu);
+
+    // Act
+    let _ = input.softmax(1);
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "log_softmax: i64 is not supported")]
+fn log_softmax_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (1, 2), Device::Cpu);
+
+    // Act
+    let _ = input.log_softmax(1);
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "log_sum_exp: i64 is not supported")]
+fn log_sum_exp_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (1, 2), Device::Cpu);
+
+    // Act
+    let _ = input.log_sum_exp(vec![1]);
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "mean: i64 is not supported")]
+fn mean_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input.mean(vec![0], false);
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "neg: i64 is not supported")]
+fn neg_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = -input;
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "add: i64 is not supported")]
+fn scalar_add_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input + 1.0;
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "sub: i64 is not supported")]
+fn scalar_sub_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input - 1.0;
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "mul: i64 is not supported")]
+fn scalar_mul_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input * 2.0;
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "div: i64 is not supported")]
+fn scalar_div_panics_with_clear_message_on_i64() {
+    // Arrange
+    let input = Tensor::from_vec(vec![1i64, 2], (2,), Device::Cpu);
+
+    // Act
+    let _ = input / 2.0;
+
+    // Assert: should_panic(expected) verifies the boundary message names the op and dtype.
+}
+
+#[test]
+#[should_panic(expected = "rand: unsupported dtype I64")]
+fn rand_panics_with_clear_message_on_i64() {
+    // Arrange
+    let shape = (2,);
+
+    // Act
+    let _ = Tensor::rand(shape, DType::I64, Device::Cpu);
+
+    // Assert: should_panic(expected) verifies the boundary message names the dtype.
+}
+
+#[test]
+#[should_panic(expected = "randn: unsupported dtype I64")]
+fn randn_panics_with_clear_message_on_i64() {
+    // Arrange
+    let shape = (2,);
+
+    // Act
+    let _ = Tensor::randn(shape, DType::I64, Device::Cpu);
+
+    // Assert: should_panic(expected) verifies the boundary message names the dtype.
 }

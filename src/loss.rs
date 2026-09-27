@@ -2,7 +2,6 @@
 
 use half::{bf16, f16};
 
-use crate::error::Result;
 use crate::tensor::Tensor;
 
 /// Reduction applied to the per-sample losses.
@@ -23,7 +22,7 @@ pub enum Reduction {
 /// with shape `(batch,)`. Returns a scalar loss tensor.
 ///
 /// Equivalent to PyTorch's `F.nll_loss` or candle's `loss::nll`.
-pub fn nll_loss(log_probs: &Tensor, targets: &Tensor) -> Result<Tensor> {
+pub fn nll_loss(log_probs: &Tensor, targets: &Tensor) -> Tensor {
     nll_loss_with_options(log_probs, targets, Reduction::Mean, None)
 }
 
@@ -40,7 +39,7 @@ pub fn nll_loss_with_options(
     targets: &Tensor,
     reduction: Reduction,
     ignore_index: Option<i64>,
-) -> Result<Tensor> {
+) -> Tensor {
     let batch = log_probs.layout().shape()[0];
     if reduction == Reduction::Mean && ignore_index.is_none() {
         // Legacy path: keep default behavior (including output shape) unchanged.
@@ -50,13 +49,13 @@ pub fn nll_loss_with_options(
     }
     let (safe_targets, keep, kept) = ignore_mask(targets, log_probs.dtype(), batch, ignore_index);
     let picked = log_probs.gather(1, &safe_targets.reshape((batch, 1)));
-    let mut per_sample = (-&picked.reshape((batch,)))?;
+    let mut per_sample = -&picked.reshape((batch,));
     if let Some(keep) = keep {
         per_sample = &per_sample * &keep;
     }
     match reduction {
-        Reduction::None => Ok(per_sample),
-        Reduction::Sum => Ok(per_sample.sum(vec![0], true)),
+        Reduction::None => per_sample,
+        Reduction::Sum => per_sample.sum(vec![0], true),
         Reduction::Mean => {
             if kept == 0 {
                 per_sample.sum(vec![0], true) * 0.0
@@ -71,7 +70,7 @@ pub fn nll_loss_with_options(
 ///
 /// Takes raw logits of shape `(batch, classes)` and integer targets
 /// with shape `(batch,)`. Returns a scalar loss tensor.
-pub fn cross_entropy(logits: &Tensor, targets: &Tensor) -> Result<Tensor> {
+pub fn cross_entropy(logits: &Tensor, targets: &Tensor) -> Tensor {
     cross_entropy_with_options(logits, targets, Reduction::Mean, None)
 }
 
@@ -83,8 +82,8 @@ pub fn cross_entropy_with_options(
     targets: &Tensor,
     reduction: Reduction,
     ignore_index: Option<i64>,
-) -> Result<Tensor> {
-    let log_probs = logits.log_softmax(1)?;
+) -> Tensor {
+    let log_probs = logits.log_softmax(1);
     nll_loss_with_options(&log_probs, targets, reduction, ignore_index)
 }
 
@@ -169,7 +168,7 @@ mod tests {
         let targets = Tensor::from_vec(vec![0i64, 2], (2,), Device::Cpu);
 
         // Act
-        let loss = nll_loss(&log_probs, &targets).unwrap();
+        let loss = nll_loss(&log_probs, &targets);
         let loss_val: Vec<f32> = loss.to_vec().unwrap();
 
         // Assert
@@ -185,7 +184,7 @@ mod tests {
         let targets = Tensor::from_vec(vec![1i64, 0], (2,), Device::Cpu);
 
         // Act
-        let loss = nll_loss(&log_probs, &targets).unwrap();
+        let loss = nll_loss(&log_probs, &targets);
         let grads = loss.backward().unwrap();
         let grad: Vec<f32> = grads.get(log_probs.id()).unwrap().to_vec().unwrap();
 
@@ -201,7 +200,7 @@ mod tests {
         let targets = Tensor::from_vec(vec![2i64, 0], (2,), Device::Cpu);
 
         // Act
-        let loss = cross_entropy(&logits, &targets).unwrap();
+        let loss = cross_entropy(&logits, &targets);
         let grads = loss.backward().unwrap();
         let grad: Vec<f32> = grads.get(logits.id()).unwrap().to_vec().unwrap();
         let row1_sum: f32 = grad[0..3].iter().sum();
@@ -222,7 +221,7 @@ mod tests {
         let targets = Tensor::from_vec(vec![1i64, 0], (2,), Device::Cpu);
 
         // Act
-        let loss = nll_loss_with_options(&log_probs, &targets, Reduction::Sum, None).unwrap();
+        let loss = nll_loss_with_options(&log_probs, &targets, Reduction::Sum, None);
         let loss_val: Vec<f32> = loss.to_vec().unwrap();
         let grads = loss.backward().unwrap();
         let grad: Vec<f32> = grads.get(log_probs.id()).unwrap().to_vec().unwrap();
@@ -241,7 +240,7 @@ mod tests {
         let targets = Tensor::from_vec(vec![1i64, 0], (2,), Device::Cpu);
 
         // Act
-        let loss = nll_loss_with_options(&log_probs, &targets, Reduction::None, None).unwrap();
+        let loss = nll_loss_with_options(&log_probs, &targets, Reduction::None, None);
         let loss_val: Vec<f32> = loss.to_vec().unwrap();
         let grads = loss.backward().unwrap();
         let grad: Vec<f32> = grads.get(log_probs.id()).unwrap().to_vec().unwrap();
@@ -262,7 +261,7 @@ mod tests {
         let targets = Tensor::from_vec(vec![1i64, -100], (2,), Device::Cpu);
 
         // Act
-        let loss = nll_loss_with_options(&log_probs, &targets, Reduction::Mean, Some(-100)).unwrap();
+        let loss = nll_loss_with_options(&log_probs, &targets, Reduction::Mean, Some(-100));
         let loss_val: Vec<f32> = loss.to_vec().unwrap();
         let grads = loss.backward().unwrap();
         let grad: Vec<f32> = grads.get(log_probs.id()).unwrap().to_vec().unwrap();
@@ -281,7 +280,7 @@ mod tests {
         let targets = Tensor::from_vec(vec![1i64, -100], (2,), Device::Cpu);
 
         // Act
-        let loss = nll_loss_with_options(&log_probs, &targets, Reduction::None, Some(-100)).unwrap();
+        let loss = nll_loss_with_options(&log_probs, &targets, Reduction::None, Some(-100));
         let loss_val: Vec<f32> = loss.to_vec().unwrap();
         let grads = loss.backward().unwrap();
         let grad: Vec<f32> = grads.get(log_probs.id()).unwrap().to_vec().unwrap();
@@ -301,17 +300,14 @@ mod tests {
 
         // Act
         let ignored = cross_entropy_with_options(&logits, &targets, Reduction::Sum, Some(-100))
-            .unwrap()
             .to_vec::<f32>()
             .unwrap();
         let first_logits = logits.narrow(0, 0, 1);
         let first_target = targets.narrow(0, 0, 1);
         let kept = cross_entropy_with_options(&first_logits, &first_target, Reduction::Sum, None)
-            .unwrap()
             .to_vec::<f32>()
             .unwrap();
         let grads = cross_entropy_with_options(&logits, &targets, Reduction::Sum, Some(-100))
-            .unwrap()
             .backward()
             .unwrap();
         let grad: Vec<f32> = grads.get(logits.id()).unwrap().to_vec().unwrap();
