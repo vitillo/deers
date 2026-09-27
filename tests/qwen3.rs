@@ -307,3 +307,67 @@ fn argmax_row(logits: &Tensor, pos: usize) -> u32 {
     }
     best as u32
 }
+
+fn constant_model_with_context(fill: f32, sequence_len: usize) -> Qwen3 {
+    let mut config = small_config();
+    config.sequence_len = sequence_len;
+    let store = ParamStore::new();
+    let model = Qwen3::new(config, store.root());
+    for (_, parameter) in store.named_parameters() {
+        let shape: Vec<usize> = parameter.layout().shape().iter().copied().collect();
+        let values = Tensor::from_vec(vec![fill; shape.iter().product()], shape, Device::Cpu);
+        parameter.set(&values).unwrap();
+    }
+    model
+}
+
+#[test]
+fn qwen3_rotary_cache_extends_past_configured_context() {
+    // Arrange: constant weights under an 8-position cache and a 32-position cache.
+    let short = constant_model_with_context(0.02, 8);
+    let long = constant_model_with_context(0.02, 32);
+    let prompt = ids(1, 12, 64);
+
+    // Act
+    let extended = short.forward(&prompt).unwrap();
+    let native = long.forward(&prompt).unwrap();
+
+    // Assert: the recomputed prefix matches a natively sized cache exactly.
+    assert_eq!(extended.to_vec::<f32>().unwrap(), native.to_vec::<f32>().unwrap());
+
+    // Act: prefill 10 tokens, then decode two more past the 8-position cache.
+    let mut caches: Vec<KvCache> = (0..short.n_layers()).map(|_| KvCache::new()).collect();
+    let prefix_ids: Vec<i64> = (0..10).map(|i| (i % 63 + 1) as i64).collect();
+    let prefix = Tensor::from_vec(prefix_ids, (1, 10), Device::Cpu);
+    let prefilled = no_grad(|| short.prefill(&prefix, &mut caches).unwrap());
+    let mut stepped = Vec::new();
+    for (id, pos) in [(11i64, 10), (12, 11)] {
+        let token = Tensor::from_vec(vec![id], (1, 1), Device::Cpu);
+        stepped.push(no_grad(|| short.decode(&token, pos, &mut caches).unwrap()));
+    }
+    let full_ids: Vec<i64> =
+        (0..10).map(|i| (i % 63 + 1) as i64).chain([11, 12]).collect();
+    let full = short.forward(&Tensor::from_vec(full_ids, (1, 12), Device::Cpu)).unwrap();
+
+    // Assert: prefill matches the full run and each past-cache decode its row.
+    assert_eq!(
+        prefilled.to_vec::<f32>().unwrap(),
+        full.narrow(1, 0, 10).to_vec::<f32>().unwrap()
+    );
+    for (step, pos) in stepped.iter().zip([10, 11]) {
+        let values = step.to_vec::<f32>().unwrap();
+        assert!(values.iter().all(|v| v.is_finite()));
+        // Decode sums attention over a growing cache while forward sums each full
+        // row, so past a few positions the two differ by summation-order ulps.
+        // The same gap shows fully within the cache, so 1e-6 separates it from
+        // any real rotary error.
+        let expected = full.narrow(1, pos, 1).to_vec::<f32>().unwrap();
+        assert_eq!(values.len(), expected.len());
+        for (index, (actual, want)) in values.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - want).abs() < 1e-6,
+                "decode pos {pos}[{index}]: got {actual}, expected {want}"
+            );
+        }
+    }
+}
