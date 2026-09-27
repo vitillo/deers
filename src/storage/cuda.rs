@@ -484,6 +484,43 @@ mod imp {
     extern "C" __global__ void log_softmax_bwd_f16(const half* grad, const half* lsm_out, half* grad_input, unsigned int outer_size, unsigned int inner_size) { log_softmax_bwd_kernel(grad, lsm_out, grad_input, outer_size, inner_size); }
     extern "C" __global__ void log_softmax_bwd_bf16(const __nv_bfloat16* grad, const __nv_bfloat16* lsm_out, __nv_bfloat16* grad_input, unsigned int outer_size, unsigned int inner_size) { log_softmax_bwd_kernel(grad, lsm_out, grad_input, outer_size, inner_size); }
 
+    // Fused RMSNorm forward: dst[row,col] = src[row,col] * rsqrt(mean(src[row]^2) + eps) * w[col].
+    // One block per row, fp32 accumulation. When has_weight is 0 the scale is 1 and the
+    // weight pointer is ignored (callers pass a valid dummy pointer so launch args stay uniform).
+    template <typename T>
+    __global__ void rms_norm_fwd_kernel(const T* src, const T* weight, T* dst, unsigned int outer_size, unsigned int inner_size, float eps, unsigned int has_weight) {
+        unsigned int row = blockIdx.x;
+        if (row >= outer_size) return;
+        __shared__ float smem[REDUCE_THREADS];
+
+        // Pass 1: sum of squares.
+        float acc = 0.0f;
+        for (unsigned int col = threadIdx.x; col < inner_size; col += blockDim.x) {
+            float v = to_float(src[row * inner_size + col]);
+            acc += v * v;
+        }
+        smem[threadIdx.x] = acc;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+            if (threadIdx.x < stride) smem[threadIdx.x] += smem[threadIdx.x + stride];
+            __syncthreads();
+        }
+        if (threadIdx.x < 32) smem[threadIdx.x] = warp_reduce_sum(smem[threadIdx.x]);
+        __syncthreads();
+        float inv = rsqrtf(smem[0] / (float)inner_size + eps);
+
+        // Pass 2: normalize and scale.
+        for (unsigned int col = threadIdx.x; col < inner_size; col += blockDim.x) {
+            float v = to_float(src[row * inner_size + col]) * inv;
+            if (has_weight) v *= to_float(weight[col]);
+            dst[row * inner_size + col] = from_float<T>(v);
+        }
+    }
+
+    extern "C" __global__ void rms_norm_fwd_f32(const float* src, const float* weight, float* dst, unsigned int outer_size, unsigned int inner_size, float eps, unsigned int has_weight) { rms_norm_fwd_kernel(src, weight, dst, outer_size, inner_size, eps, has_weight); }
+    extern "C" __global__ void rms_norm_fwd_f16(const half* src, const half* weight, half* dst, unsigned int outer_size, unsigned int inner_size, float eps, unsigned int has_weight) { rms_norm_fwd_kernel(src, weight, dst, outer_size, inner_size, eps, has_weight); }
+    extern "C" __global__ void rms_norm_fwd_bf16(const __nv_bfloat16* src, const __nv_bfloat16* weight, __nv_bfloat16* dst, unsigned int outer_size, unsigned int inner_size, float eps, unsigned int has_weight) { rms_norm_fwd_kernel(src, weight, dst, outer_size, inner_size, eps, has_weight); }
+
     template <typename T>
     __global__ void gather_kernel(const T* src, const index_t* indices, T* dst, unsigned int left_len, unsigned int src_dim, unsigned int dst_dim, unsigned int right_len) {
         unsigned int right = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2216,6 +2253,146 @@ mod imp {
             }
         }
 
+        /// Fused RMSNorm forward: `dst = src * rsqrt(mean(src^2) + eps) * w` per row.
+        ///
+        /// `outer_size * inner_size` must equal `layout.size()`. The input is
+        /// compacted first; `weight` (if any) must hold `inner_size` elements of
+        /// the same dtype and is compacted too, so the kernel reads `w[col]`.
+        fn rms_norm_fwd(
+            &self,
+            layout: &Layout,
+            weight: Option<(&Self, &Layout)>,
+            outer_size: usize,
+            inner_size: usize,
+            eps: f32,
+        ) -> Result<Self> {
+            let src = self.compact(layout)?;
+            let weight_c = weight
+                .map(|(w, w_layout)| w.compact(w_layout))
+                .transpose()?;
+            match (&src.inner, weight_c.as_ref().map(|w| &w.inner)) {
+                (CudaInner::F16(s), None) => {
+                    let out =
+                        unsafe { alloc_uninit::<f16>(&src.runtime, outer_size * inner_size) }?;
+                    let (outer, inner, eps, has_weight) =
+                        (outer_size as u32, inner_size as u32, eps, 0u32);
+                    // No scale: the weight slot reuses the input pointer as a valid
+                    // dummy because the kernel never reads it when has_weight is 0.
+                    launch_reduce!(
+                        &src.runtime,
+                        "rms_norm_fwd_f16",
+                        outer_size,
+                        s,
+                        s,
+                        &out,
+                        &outer,
+                        &inner,
+                        &eps,
+                        &has_weight
+                    );
+                    Ok(Self { inner: CudaInner::F16(out), runtime: src.runtime.clone() })
+                }
+                (CudaInner::F16(s), Some(CudaInner::F16(w))) => {
+                    let out =
+                        unsafe { alloc_uninit::<f16>(&src.runtime, outer_size * inner_size) }?;
+                    let (outer, inner, eps, has_weight) =
+                        (outer_size as u32, inner_size as u32, eps, 1u32);
+                    launch_reduce!(
+                        &src.runtime,
+                        "rms_norm_fwd_f16",
+                        outer_size,
+                        s,
+                        w,
+                        &out,
+                        &outer,
+                        &inner,
+                        &eps,
+                        &has_weight
+                    );
+                    Ok(Self { inner: CudaInner::F16(out), runtime: src.runtime.clone() })
+                }
+                (CudaInner::BF16(s), None) => {
+                    let out =
+                        unsafe { alloc_uninit::<bf16>(&src.runtime, outer_size * inner_size) }?;
+                    let (outer, inner, eps, has_weight) =
+                        (outer_size as u32, inner_size as u32, eps, 0u32);
+                    launch_reduce!(
+                        &src.runtime,
+                        "rms_norm_fwd_bf16",
+                        outer_size,
+                        s,
+                        s,
+                        &out,
+                        &outer,
+                        &inner,
+                        &eps,
+                        &has_weight
+                    );
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: src.runtime.clone() })
+                }
+                (CudaInner::BF16(s), Some(CudaInner::BF16(w))) => {
+                    let out =
+                        unsafe { alloc_uninit::<bf16>(&src.runtime, outer_size * inner_size) }?;
+                    let (outer, inner, eps, has_weight) =
+                        (outer_size as u32, inner_size as u32, eps, 1u32);
+                    launch_reduce!(
+                        &src.runtime,
+                        "rms_norm_fwd_bf16",
+                        outer_size,
+                        s,
+                        w,
+                        &out,
+                        &outer,
+                        &inner,
+                        &eps,
+                        &has_weight
+                    );
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: src.runtime.clone() })
+                }
+                (CudaInner::F32(s), None) => {
+                    let out =
+                        unsafe { alloc_uninit::<f32>(&src.runtime, outer_size * inner_size) }?;
+                    let (outer, inner, eps, has_weight) =
+                        (outer_size as u32, inner_size as u32, eps, 0u32);
+                    launch_reduce!(
+                        &src.runtime,
+                        "rms_norm_fwd_f32",
+                        outer_size,
+                        s,
+                        s,
+                        &out,
+                        &outer,
+                        &inner,
+                        &eps,
+                        &has_weight
+                    );
+                    Ok(Self { inner: CudaInner::F32(out), runtime: src.runtime.clone() })
+                }
+                (CudaInner::F32(s), Some(CudaInner::F32(w))) => {
+                    let out =
+                        unsafe { alloc_uninit::<f32>(&src.runtime, outer_size * inner_size) }?;
+                    let (outer, inner, eps, has_weight) =
+                        (outer_size as u32, inner_size as u32, eps, 1u32);
+                    launch_reduce!(
+                        &src.runtime,
+                        "rms_norm_fwd_f32",
+                        outer_size,
+                        s,
+                        w,
+                        &out,
+                        &outer,
+                        &inner,
+                        &eps,
+                        &has_weight
+                    );
+                    Ok(Self { inner: CudaInner::F32(out), runtime: src.runtime.clone() })
+                }
+                _ => Err(Error::DTypeMismatch(
+                    "rms_norm_fwd: dtype mismatch between input and weight".into(),
+                )),
+            }
+        }
+
         fn dtype(&self) -> DType {
             match &self.inner {
                 CudaInner::F16(_) => DType::F16,
@@ -2460,6 +2637,16 @@ mod imp {
             _: &Layout,
             _: usize,
             _: usize,
+        ) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn rms_norm_fwd(
+            &self,
+            _: &Layout,
+            _: Option<(&Self, &Layout)>,
+            _: usize,
+            _: usize,
+            _: f32,
         ) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }

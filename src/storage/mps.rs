@@ -1997,6 +1997,28 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
+        fn rms_norm_fwd(
+            &self,
+            layout: &Layout,
+            weight: Option<(&Self, &Layout)>,
+            outer_size: usize,
+            inner_size: usize,
+            eps: f32,
+        ) -> Result<Self> {
+            let weight_cpu: Option<(CpuStorage, &Layout)> =
+                weight.map(|(w, w_layout)| (w.as_cpu_storage(), w_layout));
+            // No Metal RMSNorm kernel yet: round-trip through the CPU fallback
+            // exactly like the fused log-softmax path below.
+            let inner = self.as_cpu_storage().rms_norm_fwd(
+                layout,
+                weight_cpu.as_ref().map(|(w, l)| (w, *l)),
+                outer_size,
+                inner_size,
+                eps,
+            )?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
         fn dtype(&self) -> DType {
             match &self.inner {
                 MpsInner::Accelerated { dtype, .. } => *dtype,
@@ -2369,6 +2391,16 @@ mod imp {
             Self::unavailable()
         }
         fn log_softmax_bwd(&self, _: &Layout, _: &Self, _: &Layout, _: usize, _: usize) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn rms_norm_fwd(
+            &self,
+            _: &Layout,
+            _: Option<(&Self, &Layout)>,
+            _: usize,
+            _: usize,
+            _: f32,
+        ) -> Result<Self> {
             Self::unavailable()
         }
         fn dtype(&self) -> DType {

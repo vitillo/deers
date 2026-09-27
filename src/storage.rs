@@ -317,6 +317,19 @@ pub trait BackendStorage: Sized {
         outer_size: usize,
         inner_size: usize,
     ) -> Result<Self>;
+    /// Fused RMSNorm forward: `dst = src * rsqrt(mean(src^2) + eps) * w` per row.
+    ///
+    /// `outer_size * inner_size` must equal `layout.size()`. The fused kernel
+    /// reads a compacted input; `weight` (if any) holds `inner_size` elements
+    /// of the same dtype.
+    fn rms_norm_fwd(
+        &self,
+        layout: &Layout,
+        weight: Option<(&Self, &Layout)>,
+        outer_size: usize,
+        inner_size: usize,
+        eps: f32,
+    ) -> Result<Self>;
     /// Converts `layout` to `dtype` without leaving the device.
     ///
     /// The cast reads strided source elements and writes a compact output buffer:
@@ -476,6 +489,55 @@ impl BackendStorage for Storage {
                 grad.log_softmax_bwd(grad_layout, lsm, lsm_layout, outer_size, inner_size)?,
             )),
             _ => Err(Error::DeviceMismatch { op: "log_softmax_bwd" }),
+        }
+    }
+
+    fn rms_norm_fwd(
+        &self,
+        layout: &Layout,
+        weight: Option<(&Self, &Layout)>,
+        outer_size: usize,
+        inner_size: usize,
+        eps: f32,
+    ) -> Result<Self> {
+        match (self, weight) {
+            (Storage::Cpu(storage), None) => Ok(Self::Cpu(
+                storage.rms_norm_fwd(layout, None, outer_size, inner_size, eps)?,
+            )),
+            (Storage::Cpu(storage), Some((Storage::Cpu(w), w_layout))) => {
+                Ok(Self::Cpu(storage.rms_norm_fwd(
+                    layout,
+                    Some((w, w_layout)),
+                    outer_size,
+                    inner_size,
+                    eps,
+                )?))
+            }
+            (Storage::Cuda(storage), None) => Ok(Self::Cuda(
+                storage.rms_norm_fwd(layout, None, outer_size, inner_size, eps)?,
+            )),
+            (Storage::Cuda(storage), Some((Storage::Cuda(w), w_layout))) => {
+                Ok(Self::Cuda(storage.rms_norm_fwd(
+                    layout,
+                    Some((w, w_layout)),
+                    outer_size,
+                    inner_size,
+                    eps,
+                )?))
+            }
+            (Storage::Mps(storage), None) => Ok(Self::Mps(
+                storage.rms_norm_fwd(layout, None, outer_size, inner_size, eps)?,
+            )),
+            (Storage::Mps(storage), Some((Storage::Mps(w), w_layout))) => {
+                Ok(Self::Mps(storage.rms_norm_fwd(
+                    layout,
+                    Some((w, w_layout)),
+                    outer_size,
+                    inner_size,
+                    eps,
+                )?))
+            }
+            _ => Err(Error::DeviceMismatch { op: "rms_norm_fwd" }),
         }
     }
 

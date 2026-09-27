@@ -1181,7 +1181,114 @@ impl TensorOp for LogSumExp {
     }
 }
 
-/// Fused log-softmax: `x[i] - log(sum_j exp(x[j]))` per row, single kernel on CUDA.
+/// Fused RMSNorm over the last axis: `x * rsqrt(mean(x^2) + eps) * w`, one CUDA kernel.
+///
+/// The forward compacts the input and reads the affine scale straight from the
+/// `[inner]` weight, replacing the mul-mean-powf-mul-mul chain plus its two
+/// broadcast compacts. The backward reuses the unfused primitive decomposition
+/// (training only; decode runs under `no_grad`), so no fused backward kernel exists.
+#[derive(Debug)]
+pub struct FusedRmsNorm {
+    arg: Tensor,
+    weight: Option<Tensor>,
+    eps: f64,
+    /// Saved compacted `(input, weight)` for the backward pass.
+    saved: Option<(Tensor, Option<Tensor>)>,
+}
+
+impl FusedRmsNorm {
+    pub fn new(arg: Tensor, weight: Option<Tensor>, eps: f64) -> Result<Self> {
+        Ok(Self { arg, weight, eps, saved: None })
+    }
+}
+
+impl TensorOp for FusedRmsNorm {
+    fn forward(mut self) -> Result<Tensor> {
+        let _profile = profile_like("rms_norm", &self.arg);
+        let ndim = self.arg.layout().ndim();
+        assert!(ndim >= 1, "rms_norm needs at least one axis");
+        let inner_size = self.arg.layout().shape()[ndim - 1];
+        let outer_size = self.arg.layout().size() / inner_size;
+        if let Some(weight) = &self.weight {
+            assert_eq!(weight.layout().ndim(), 1, "rms_norm weight must be a vector");
+            assert_eq!(
+                weight.layout().size(),
+                inner_size,
+                "rms_norm weight must match the last axis"
+            );
+            assert_eq!(
+                weight.dtype(),
+                self.arg.dtype(),
+                "rms_norm weight and input dtypes must match"
+            );
+        }
+        let input = self.arg.compact();
+        let weight_c = self.weight.as_ref().map(|w| w.compact());
+        let out_storage = {
+            let weight_storage;
+            let weight_pair = match &weight_c {
+                Some(w) => {
+                    weight_storage = w.storage();
+                    Some((&*weight_storage, w.layout()))
+                }
+                None => None,
+            };
+            input.storage().rms_norm_fwd(
+                input.layout(),
+                weight_pair,
+                outer_size,
+                inner_size,
+                self.eps as f32,
+            )?
+        };
+        let output = Tensor::new(
+            Arc::new(RwLock::new(out_storage)),
+            self.arg.layout().clone(),
+            false,
+            None,
+        );
+        self.saved = Some((input, weight_c));
+        Ok(Tensor::new(
+            output.storage_clone(),
+            output.layout().clone(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let (input, weight) =
+            self.saved.as_ref().expect("forward must run before backward");
+        let ndim = self.arg.layout().ndim();
+        let last = ndim - 1;
+        let inner_size = self.arg.layout().shape()[last];
+        let grad_c = out_grad.compact();
+        // y = w * x / r with r = sqrt(mean(x^2) + eps); xh = x / r.
+        let inv_r = ((input * input).mean(vec![last], true) + self.eps).scalar_powf(-0.5);
+        let xh = input * &inv_r;
+        if let Some(w) = weight {
+            let gw = &grad_c * w;
+            let dot = (&gw * &xh).sum(vec![last], true);
+            let grad_x = (&gw - &((&xh * &dot) / inner_size as f64)) * &inv_r;
+            let axes: Vec<usize> = (0..last).collect();
+            let grad_w = (&grad_c * &xh).sum(axes, false);
+            grads.accumulate(&self.arg, grad_x);
+            grads.accumulate(w, grad_w);
+        } else {
+            let dot = (&grad_c * &xh).sum(vec![last], true);
+            let grad_x = (&grad_c - &((&xh * &dot) / inner_size as f64)) * &inv_r;
+            grads.accumulate(&self.arg, grad_x);
+        }
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        match &self.weight {
+            Some(w) => vec![&self.arg, w],
+            None => vec![&self.arg],
+        }
+    }
+}
 ///
 /// The forward saves the output for use in the backward pass to avoid recomputing softmax.
 #[derive(Debug)]

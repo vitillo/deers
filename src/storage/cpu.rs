@@ -231,6 +231,31 @@ impl From<Vec<i64>> for CpuStorage {
     }
 }
 
+/// One fused RMSNorm pass over compact rows: `x * rsqrt(mean(x^2) + eps) * w`.
+fn rms_norm_rows<T: Copy, O>(
+    data: &[T],
+    weight: Option<&[f32]>,
+    outer_size: usize,
+    inner_size: usize,
+    eps: f32,
+    to_f32: impl Fn(T) -> f32 + Copy,
+    from_f32: impl Fn(f32) -> O + Copy,
+) -> Vec<O> {
+    (0..outer_size)
+        .flat_map(|row| {
+            let start = row * inner_size;
+            let slice = &data[start..start + inner_size];
+            let sum_sq: f32 =
+                slice.iter().map(|&v| to_f32(v).powi(2)).sum();
+            let inv = (sum_sq / inner_size as f32 + eps).sqrt().recip();
+            slice.iter().enumerate().map(move |(col, &v)| {
+                let scale = weight.map(|w| w[col]).unwrap_or(1.0);
+                from_f32(to_f32(v) * inv * scale)
+            })
+        })
+        .collect()
+}
+
 impl BackendStorage for CpuStorage {
     fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self> {
         if l.is_compact() {
@@ -1208,6 +1233,82 @@ impl BackendStorage for CpuStorage {
             }
             _ => Err(crate::error::Error::DTypeMismatch(
                 "log_softmax_bwd: dtype mismatch".into(),
+            )),
+        }
+    }
+
+    fn rms_norm_fwd(
+        &self,
+        layout: &Layout,
+        weight: Option<(&Self, &Layout)>,
+        outer_size: usize,
+        inner_size: usize,
+        eps: f32,
+    ) -> crate::error::Result<Self> {
+        assert!(layout.is_compact());
+        assert_eq!(layout.size(), outer_size * inner_size);
+        let weight_row: Option<Vec<f32>> = weight
+            .map(|(w, w_layout)| {
+                assert!(w_layout.is_compact());
+                assert_eq!(w_layout.size(), inner_size);
+                let start = w_layout.offset;
+                match w {
+                    CpuStorage::F32(data) => Ok(data[start..start + inner_size].to_vec()),
+                    CpuStorage::F16(data) => Ok(data[start..start + inner_size]
+                        .iter()
+                        .map(|v| v.to_f32())
+                        .collect()),
+                    CpuStorage::BF16(data) => Ok(data[start..start + inner_size]
+                        .iter()
+                        .map(|v| v.to_f32())
+                        .collect()),
+                    CpuStorage::I64(_) => Err(crate::error::Error::DTypeMismatch(
+                        "rms_norm_fwd: weight must be a float dtype".into(),
+                    )),
+                }
+            })
+            .transpose()?;
+        let weight_row = weight_row.as_deref();
+        match self {
+            CpuStorage::F32(data) => {
+                let data = &data[layout.offset..];
+                Ok(CpuStorage::F32(rms_norm_rows(
+                    data,
+                    weight_row,
+                    outer_size,
+                    inner_size,
+                    eps,
+                    |v| v,
+                    |v| v,
+                )))
+            }
+            CpuStorage::F16(data) => {
+                use half::f16;
+                let data = &data[layout.offset..];
+                Ok(CpuStorage::F16(rms_norm_rows(
+                    data,
+                    weight_row,
+                    outer_size,
+                    inner_size,
+                    eps,
+                    |v: f16| v.to_f32(),
+                    |v| f16::from_f32(v),
+                )))
+            }
+            CpuStorage::BF16(data) => {
+                let data = &data[layout.offset..];
+                Ok(CpuStorage::BF16(rms_norm_rows(
+                    data,
+                    weight_row,
+                    outer_size,
+                    inner_size,
+                    eps,
+                    |v: bf16| v.to_f32(),
+                    |v| bf16::from_f32(v),
+                )))
+            }
+            CpuStorage::I64(_) => Err(crate::error::Error::DTypeMismatch(
+                "rms_norm_fwd: i64 is not supported, use a float dtype".into(),
             )),
         }
     }
