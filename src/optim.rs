@@ -1,6 +1,6 @@
 //! Optimizers for updating trainable parameters.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use half::{bf16, f16};
 
@@ -41,7 +41,11 @@ impl SGD {
 
     /// Applies one SGD step using a precomputed gradient store.
     pub fn step_with_grads(&mut self, grads: &GradientStore) -> Result<()> {
+        let mut seen = HashSet::new();
         for parameter in &self.parameters {
+            if !seen.insert(parameter.id()) {
+                continue;
+            }
             if let Some(grad) = grads.get(parameter.id()) {
                 let grad = grad.detach();
                 let w = parameter.detach();
@@ -271,9 +275,13 @@ impl AdamW {
         let bias_correction1 = 1.0 - beta1.powi(self.step as i32);
         let bias_correction2 = 1.0 - beta2.powi(self.step as i32);
 
+        let mut seen = HashSet::new();
         for group in &self.groups {
             let weight_decay = group.weight_decay;
             for param in &group.parameters {
+                if !seen.insert(param.id()) {
+                    continue;
+                }
                 let grad = match grads.get(param.id()) {
                     Some(g) => g.detach(),
                     None => continue,
@@ -324,8 +332,12 @@ pub fn clip_grad_norm(
 
     let total_norm_value = match parameters[0].dtype() {
         DType::F16 => {
+            let mut seen = HashSet::new();
             let mut total = 0.0f32;
             for parameter in parameters {
+                if !seen.insert(parameter.id()) {
+                    continue;
+                }
                 let Some(grad) = grads.get(parameter.id()) else {
                     continue;
                 };
@@ -345,7 +357,11 @@ pub fn clip_grad_norm(
     }
 
     let scale = max_norm / (f64::from(total_norm_value) + 1e-6);
+    let mut seen = HashSet::new();
     for parameter in parameters {
+        if !seen.insert(parameter.id()) {
+            continue;
+        }
         let Some(grad) = grads.get(parameter.id()) else {
             continue;
         };
@@ -357,8 +373,12 @@ pub fn clip_grad_norm(
 
 /// Computes the global gradient L2 norm on device in the parameter dtype.
 fn grad_norm(parameters: &[Parameter], grads: &GradientStore) -> Tensor {
+    let mut seen = HashSet::new();
     let mut total = Tensor::zeros((1,), parameters[0].dtype(), parameters[0].device());
     for parameter in parameters {
+        if !seen.insert(parameter.id()) {
+            continue;
+        }
         let Some(grad) = grads.get(parameter.id()) else {
             continue;
         };

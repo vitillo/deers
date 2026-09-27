@@ -6,7 +6,7 @@ pub mod functional;
 pub mod parameter;
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -42,9 +42,13 @@ impl ParamStore {
             .collect()
     }
 
-    /// Returns every registered parameter without its names.
+    /// Returns every distinct registered parameter without its names.
     pub fn parameters(&self) -> Vec<Parameter> {
-        self.named_parameters().into_iter().map(|(_, parameter)| parameter).collect()
+        let mut seen = HashSet::new();
+        self.named_parameters()
+            .into_iter()
+            .filter_map(|(_, parameter)| seen.insert(parameter.id()).then_some(parameter))
+            .collect()
     }
 
     /// Saves the current parameter values as a safetensors checkpoint.
