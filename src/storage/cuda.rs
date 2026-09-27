@@ -356,6 +356,12 @@ mod imp {
     __device__ __forceinline__ float rank_value(half v) { return __half2float(v); }
     __device__ __forceinline__ float rank_value(__nv_bfloat16 v) { return __bfloat162float(v); }
     __device__ __forceinline__ long long rank_value(index_t v) { return v; }
+    __device__ __forceinline__ bool rank_gt(float a, float b) { if (isnan(a)) return !isnan(b); if (isnan(b)) return false; return a > b; }
+    __device__ __forceinline__ bool rank_lt(float a, float b) { if (isnan(b)) return !isnan(a); if (isnan(a)) return false; return a < b; }
+    __device__ __forceinline__ bool rank_eq(float a, float b) { if (isnan(a) || isnan(b)) return isnan(a) && isnan(b); return a == b; }
+    __device__ __forceinline__ bool rank_gt(long long a, long long b) { return a > b; }
+    __device__ __forceinline__ bool rank_lt(long long a, long long b) { return a < b; }
+    __device__ __forceinline__ bool rank_eq(long long a, long long b) { return a == b; }
 
     template <typename T>
     __global__ void select_argmax_kernel(const T* src, index_t* dst, unsigned int outer, unsigned int dim_size, unsigned int inner) {
@@ -392,11 +398,11 @@ mod imp {
             for (unsigned int i = 0; i < dim_size; ++i) {
                 V v = rank_value(src[base + i * inner]);
                 if (r > 0) {
-                    if (descending ? (v > prev_val || (v == prev_val && i <= prev_idx))
-                                   : (v < prev_val || (v == prev_val && i <= prev_idx))) continue;
+                    if (descending ? (rank_gt(v, prev_val) || (rank_eq(v, prev_val) && i <= prev_idx))
+                                   : (rank_lt(v, prev_val) || (rank_eq(v, prev_val) && i <= prev_idx))) continue;
                 }
-                if (!found || (descending ? v > rank_value(src[base + best * inner])
-                                           : v < rank_value(src[base + best * inner]))) {
+                if (!found || (descending ? rank_gt(v, rank_value(src[base + best * inner]))
+                                           : rank_lt(v, rank_value(src[base + best * inner])))) {
                     best = i;
                     found = true;
                 }
