@@ -354,6 +354,21 @@ pub trait BackendStorage: Sized {
     /// `layout.size()` elements are read in compact order and written to a
     /// fresh compact buffer.
     fn silu_fwd(&self, layout: &Layout) -> Result<Self>;
+    /// Copies `blocks` contiguous `block_len`-element runs from compact `src`
+    /// into `self`, where destination run `n` starts at
+    /// `dst_base + n * dst_stride`.
+    ///
+    /// `src_layout.size()` must equal `blocks * block_len`. A strided source
+    /// is compacted first, so callers pass any layout.
+    fn copy_blocks_into(
+        &mut self,
+        src: &Self,
+        src_layout: &Layout,
+        blocks: usize,
+        block_len: usize,
+        dst_base: usize,
+        dst_stride: usize,
+    ) -> Result<()>;
     /// Converts `layout` to `dtype` without leaving the device.
     ///
     /// The cast reads strided source elements and writes a compact output buffer:
@@ -601,6 +616,29 @@ impl BackendStorage for Storage {
             Storage::Cpu(storage) => Ok(Self::Cpu(storage.silu_fwd(layout)?)),
             Storage::Cuda(storage) => Ok(Self::Cuda(storage.silu_fwd(layout)?)),
             Storage::Mps(storage) => Ok(Self::Mps(storage.silu_fwd(layout)?)),
+        }
+    }
+
+    fn copy_blocks_into(
+        &mut self,
+        src: &Self,
+        src_layout: &Layout,
+        blocks: usize,
+        block_len: usize,
+        dst_base: usize,
+        dst_stride: usize,
+    ) -> Result<()> {
+        match (self, src) {
+            (Storage::Cpu(dst), Storage::Cpu(s)) => {
+                dst.copy_blocks_into(s, src_layout, blocks, block_len, dst_base, dst_stride)
+            }
+            (Storage::Cuda(dst), Storage::Cuda(s)) => {
+                dst.copy_blocks_into(s, src_layout, blocks, block_len, dst_base, dst_stride)
+            }
+            (Storage::Mps(dst), Storage::Mps(s)) => {
+                dst.copy_blocks_into(s, src_layout, blocks, block_len, dst_base, dst_stride)
+            }
+            _ => Err(Error::DeviceMismatch { op: "copy_blocks_into" }),
         }
     }
 

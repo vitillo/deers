@@ -566,6 +566,25 @@ mod imp {
     extern "C" __global__ void silu_fwd_f16(const half* src, half* dst, unsigned int size) { silu_fwd_kernel(src, dst, size); }
     extern "C" __global__ void silu_fwd_bf16(const __nv_bfloat16* src, __nv_bfloat16* dst, unsigned int size) { silu_fwd_kernel(src, dst, size); }
 
+    // Block copy for cache appends: `blocks` contiguous `block_len`-element runs
+    // from compact `src`, where destination run `n` starts at
+    // `dst_base + n * dst_stride`. Copies one `[B, H, T, D]` slice into the
+    // rows `[off, off + T)` of a `[B, H, Cap, D]` buffer without touching the
+    // cached prefix.
+    template <typename T>
+    __global__ void copy_blocks_kernel(const T* src, T* dst, unsigned int total, unsigned int block_len, unsigned int dst_base, unsigned int dst_stride) {
+        unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+        if (i >= total) return;
+        unsigned int b = i / block_len;
+        unsigned int j = i % block_len;
+        dst[dst_base + b * dst_stride + j] = src[i];
+    }
+
+    extern "C" __global__ void copy_blocks_f32(const float* src, float* dst, unsigned int total, unsigned int block_len, unsigned int dst_base, unsigned int dst_stride) { copy_blocks_kernel(src, dst, total, block_len, dst_base, dst_stride); }
+    extern "C" __global__ void copy_blocks_f16(const half* src, half* dst, unsigned int total, unsigned int block_len, unsigned int dst_base, unsigned int dst_stride) { copy_blocks_kernel(src, dst, total, block_len, dst_base, dst_stride); }
+    extern "C" __global__ void copy_blocks_bf16(const __nv_bfloat16* src, __nv_bfloat16* dst, unsigned int total, unsigned int block_len, unsigned int dst_base, unsigned int dst_stride) { copy_blocks_kernel(src, dst, total, block_len, dst_base, dst_stride); }
+    extern "C" __global__ void copy_blocks_i64(const long long* src, long long* dst, unsigned int total, unsigned int block_len, unsigned int dst_base, unsigned int dst_stride) { copy_blocks_kernel(src, dst, total, block_len, dst_base, dst_stride); }
+
     template <typename T>
     __global__ void gather_kernel(const T* src, const index_t* indices, T* dst, unsigned int left_len, unsigned int src_dim, unsigned int dst_dim, unsigned int right_len) {
         unsigned int right = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2298,6 +2317,65 @@ mod imp {
             }
         }
 
+        /// Copies `blocks` contiguous `block_len`-element runs from compact `src`
+        /// into `self`, where destination run `n` starts at
+        /// `dst_base + n * dst_stride`.
+        ///
+        /// `src_layout.size()` must equal `blocks * block_len`. A strided source
+        /// is compacted first, so callers pass any layout.
+        fn copy_blocks_into(
+            &mut self,
+            src: &Self,
+            src_layout: &Layout,
+            blocks: usize,
+            block_len: usize,
+            dst_base: usize,
+            dst_stride: usize,
+        ) -> Result<()> {
+            let compact = src.compact(src_layout)?;
+            assert_eq!(src_layout.size(), blocks * block_len);
+            let total = src_layout.size();
+            let args = [
+                total as u32,
+                block_len as u32,
+                dst_base as u32,
+                dst_stride as u32,
+            ];
+            match (&compact.inner, &mut self.inner) {
+                (CudaInner::F16(s), CudaInner::F16(d)) => {
+                    launch_1d!(
+                        &compact.runtime, "copy_blocks_f16", total,
+                        s, d, &args[0], &args[1], &args[2], &args[3]
+                    );
+                    Ok(())
+                }
+                (CudaInner::BF16(s), CudaInner::BF16(d)) => {
+                    launch_1d!(
+                        &compact.runtime, "copy_blocks_bf16", total,
+                        s, d, &args[0], &args[1], &args[2], &args[3]
+                    );
+                    Ok(())
+                }
+                (CudaInner::F32(s), CudaInner::F32(d)) => {
+                    launch_1d!(
+                        &compact.runtime, "copy_blocks_f32", total,
+                        s, d, &args[0], &args[1], &args[2], &args[3]
+                    );
+                    Ok(())
+                }
+                (CudaInner::I64(s), CudaInner::I64(d)) => {
+                    launch_1d!(
+                        &compact.runtime, "copy_blocks_i64", total,
+                        s, d, &args[0], &args[1], &args[2], &args[3]
+                    );
+                    Ok(())
+                }
+                _ => Err(Error::DTypeMismatch(
+                    "copy_blocks_into: dtype mismatch between source and destination".into(),
+                )),
+            }
+        }
+
         /// Fused SiLU forward: `dst[i] = src[i] / (1 + exp(-src[i]))`.
         ///
         /// `layout.size()` elements are read in compact order and written to a
@@ -2804,6 +2882,17 @@ mod imp {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn silu_fwd(&self, _: &Layout) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn copy_blocks_into(
+            &mut self,
+            _: &Self,
+            _: &Layout,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+        ) -> Result<()> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn dtype(&self) -> DType {

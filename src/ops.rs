@@ -1276,6 +1276,92 @@ impl TensorOp for FusedRope {
     }
 }
 
+/// Preallocated KV-cache append: writes one slice into the buffer at `offset`
+/// and returns the extended prefix view.
+///
+/// The hot path is one block copy with no realloc: the whole-cache compact,
+/// the double allocation, and the two device memcpys of the reallocating cat
+/// disappear. Growth stays outside this op: the caller concatenates once into
+/// a bigger buffer, so the hot path never pays it. The backward chains the
+/// prefix gradient into the previous view — the same chain the reallocating
+/// cat forms — so cache gradients stay exact; the holder is only a storage
+/// vehicle and never a gradient parent.
+#[derive(Debug)]
+pub struct CacheAppend {
+    buf: Tensor,
+    prev: Option<Tensor>,
+    new: Tensor,
+    offset: usize,
+}
+
+impl CacheAppend {
+    pub fn new(buf: Tensor, prev: Option<Tensor>, new: Tensor, offset: usize) -> Result<Self> {
+        Ok(Self { buf, prev, new, offset })
+    }
+}
+
+impl TensorOp for CacheAppend {
+    fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("cache_append", &self.new);
+        let buf_shape = self.buf.layout().shape();
+        let new_shape = self.new.layout().shape();
+        assert_eq!(buf_shape.ndim(), 4, "cache buffer must be shaped [B, H, Cap, D]");
+        assert_eq!(new_shape.ndim(), 4, "cache entries must be shaped [B, H, T, D]");
+        assert_eq!(new_shape[0], buf_shape[0], "cache batch mismatch");
+        assert_eq!(new_shape[1], buf_shape[1], "cache head mismatch");
+        assert_eq!(new_shape[3], buf_shape[3], "cache head width mismatch");
+        assert_eq!(self.new.dtype(), self.buf.dtype(), "cache dtype mismatch");
+        assert_eq!(self.new.device(), self.buf.device(), "cache device mismatch");
+        assert!(self.buf.is_compact(), "cache buffer must stay compact");
+        let grown = self.offset + new_shape[2];
+        assert!(
+            grown <= buf_shape[2],
+            "cache append overflows its buffer; grow first"
+        );
+        let new_c = self.new.compact();
+        {
+            let mut buf_storage = self.buf.storage_mut();
+            // One `[B, H, T_new, D]` slice lands in buffer rows
+            // `[offset, offset + T_new)`: each of the B*H head runs copies
+            // T_new*D contiguous elements to its own buffer row.
+            let blocks = buf_shape[0] * buf_shape[1];
+            let block_len = new_shape[2] * buf_shape[3];
+            let dst_base = self.offset * buf_shape[3];
+            let dst_stride = buf_shape[2] * buf_shape[3];
+            buf_storage.copy_blocks_into(
+                &new_c.storage(),
+                new_c.layout(),
+                blocks,
+                block_len,
+                dst_base,
+                dst_stride,
+            )?;
+        }
+        let view_shape =
+            vec![buf_shape[0], buf_shape[1], grown, buf_shape[3]];
+        let strides = buf_shape.clone().compact_strides();
+        let view_layout = Layout::new(view_shape, strides, 0);
+        Ok(Tensor::new(self.buf.storage_clone(), view_layout, false, Some(Box::new(self))))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let t_new = self.new.layout().shape()[2];
+        let grad_c = out_grad.compact();
+        grads.accumulate(&self.new, grad_c.narrow(2, self.offset, t_new));
+        if let Some(prev) = &self.prev {
+            grads.accumulate(prev, grad_c.narrow(2, 0, self.offset));
+        }
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        match &self.prev {
+            Some(prev) => vec![prev, &self.new],
+            None => vec![&self.new],
+        }
+    }
+}
+
 /// Fused SiLU: `x / (1 + exp(-x))`, one CUDA kernel.
 ///
 /// Replaces the neg/exp/scalar-add/div/mul chain plus the broadcast compact
@@ -2835,3 +2921,4 @@ impl TensorOp for Triu {
         vec![&self.arg]
     }
 }
+

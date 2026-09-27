@@ -2056,6 +2056,30 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
+        fn copy_blocks_into(
+            &mut self,
+            src: &Self,
+            src_layout: &Layout,
+            blocks: usize,
+            block_len: usize,
+            dst_base: usize,
+            dst_stride: usize,
+        ) -> Result<()> {
+            // No Metal block-copy yet: round-trip through the CPU fallback.
+            // Same per-step complexity as today's reallocating cat on MPS.
+            let mut cpu_dst = self.as_cpu_storage();
+            cpu_dst.copy_blocks_into(
+                &src.as_cpu_storage(),
+                src_layout,
+                blocks,
+                block_len,
+                dst_base,
+                dst_stride,
+            )?;
+            *self = Self::from_cpu_storage(cpu_dst);
+            Ok(())
+        }
+
         fn dtype(&self) -> DType {
             match &self.inner {
                 MpsInner::Accelerated { dtype, .. } => *dtype,
@@ -2457,6 +2481,17 @@ mod imp {
             Self::unavailable()
         }
         fn silu_fwd(&self, _: &Layout) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn copy_blocks_into(
+            &mut self,
+            _: &Self,
+            _: &Layout,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+        ) -> Result<()> {
             Self::unavailable()
         }
         fn dtype(&self) -> DType {
