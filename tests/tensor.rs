@@ -3331,3 +3331,16 @@ fn copy_from_updates_buffer_in_place_on_each_device() {
         assert_eq!(buffer.device(), device);
     }
 }
+
+#[test]
+#[should_panic(expected = "copy_from needs a compact destination")]
+fn copy_from_rejects_non_compact_destination() {
+    // Arrange: a transposed view with strided, non-compact layout.
+    let base = Tensor::from_vec(vec![1i64, 2, 3, 4], (2, 2), Device::Cpu);
+    let dst = base.transpose(None);
+    let src = Tensor::from_vec(vec![5i64, 6, 7, 8], (2, 2), Device::Cpu);
+
+    // Act: the strided destination must fail loudly instead of writing
+    // the source elements at the wrong buffer offsets.
+    dst.copy_from(&src).unwrap();
+}

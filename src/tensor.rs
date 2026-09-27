@@ -393,6 +393,10 @@ impl Tensor {
         );
         assert_eq!(self.dtype(), src.dtype(), "copy_from needs matching dtypes");
         assert_eq!(self.device(), src.device(), "copy_from needs matching devices");
+        assert!(
+            self.layout().is_compact(),
+            "copy_from needs a compact destination"
+        );
         // Clone the source storage before taking the write lock, so `src` may
         // share storage with this tensor without deadlocking.
         let src_storage = src.storage().clone();
