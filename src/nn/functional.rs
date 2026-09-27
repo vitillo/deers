@@ -85,7 +85,7 @@ static CAUSAL_MASK_CACHE: Mutex<Vec<(CausalMaskKey, Tensor)>> = Mutex::new(Vec::
 /// Diagnostics for tests: the count never exceeds [`CAUSAL_MASK_CACHE_CAP`]
 /// no matter how many distinct shapes flow through the cache.
 pub fn causal_mask_cache_len() -> usize {
-    CAUSAL_MASK_CACHE.lock().unwrap().len()
+    CAUSAL_MASK_CACHE.lock().unwrap_or_else(|e| e.into_inner()).len()
 }
 
 /// Builds an additive causal attention mask with shape `[batch, 1, tgt_len, tgt_len + seqlen_offset]`.
@@ -117,7 +117,7 @@ pub fn causal_mask(
         dtype,
         device,
     };
-    let mut cache = CAUSAL_MASK_CACHE.lock().unwrap();
+    let mut cache = CAUSAL_MASK_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((_, mask)) = cache.iter().find(|(k, _)| *k == key) {
         return mask.clone();
     }
