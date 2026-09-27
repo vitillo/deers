@@ -3219,4 +3219,3 @@ fn triu_backward_candle_conforms() {
         assert_close(&actual_grad, &expected_grad, &format!("triu backward on {:?}", device));
     }
 }
-

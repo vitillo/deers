@@ -231,8 +231,7 @@ impl BackendStorage for CpuStorage {
                     Ok(CpuStorage::F32(data.iter().map(|v| v.powf(e)).collect()))
                 }
                 CpuStorage::I64(_) => Err(Error::DTypeMismatch(
-                    "ewise_powf: i64 is not supported, pow is only defined for float dtypes"
-                        .into(),
+                    "ewise_powf: i64 is not supported, pow is only defined for float dtypes".into(),
                 )),
             };
         }
