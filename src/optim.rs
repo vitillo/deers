@@ -23,6 +23,11 @@ impl SGD {
         Self { parameters, lr }
     }
 
+    /// Returns the current learning rate.
+    pub fn lr(&self) -> f64 {
+        self.lr
+    }
+
     /// Sets the learning rate used on subsequent steps.
     pub fn set_lr(&mut self, lr: f64) {
         self.lr = lr;
@@ -423,6 +428,370 @@ impl LrSchedule for WarmupWarmdown {
     }
 }
 
+/// Cosine decay schedule: linear warmup, then cosine annealing to a floor.
+///
+/// Formula with `decay = total_steps - warmup_steps` and `t = step - warmup_steps`:
+///
+/// ```text
+/// mult(step) = (step + 1) / warmup_steps                                    if step < warmup_steps
+/// mult(step) = min + (1 - min) * (1 + cos(π * t / decay)) / 2               if warmup_steps <= step < total_steps
+/// mult(step) = min                                                          if step >= total_steps
+/// ```
+///
+/// Boundary behavior: the multiplier is exactly 1.0 at the end of warmup,
+/// exactly `min_lr_frac` at `step == total_steps`, and stays at `min_lr_frac`
+/// beyond `total_steps`. Panics if `total_steps == 0`, `warmup_steps >
+/// `total_steps`, or `min_lr_frac` is outside [0, 1].
+///
+/// Usage matches the [`LrSchedule`] seam:
+/// ```ignore
+/// let lr = base_lr * schedule.lr_multiplier(step);
+/// opt.set_lr(lr);
+/// ```
+#[derive(Debug)]
+pub struct CosineDecay {
+    warmup_steps: usize,
+    total_steps: usize,
+    min_lr_frac: f64,
+}
+
+impl CosineDecay {
+    /// Creates a cosine decay schedule over `total_steps` with a linear
+    /// warmup of `warmup_steps` (0 disables warmup) and a floor of
+    /// `min_lr_frac` times the base learning rate.
+    pub fn new(warmup_steps: usize, total_steps: usize, min_lr_frac: f64) -> Self {
+        assert!(total_steps > 0, "total_steps must be positive");
+        assert!(
+            warmup_steps <= total_steps,
+            "warmup_steps ({warmup_steps}) must not exceed total_steps ({total_steps})"
+        );
+        assert!(
+            (0.0..=1.0).contains(&min_lr_frac),
+            "min_lr_frac must be in [0, 1], got {min_lr_frac}"
+        );
+        Self { warmup_steps, total_steps, min_lr_frac }
+    }
+}
+
+impl LrSchedule for CosineDecay {
+    fn lr_multiplier(&self, step: usize) -> f64 {
+        if self.warmup_steps > 0 && step < self.warmup_steps {
+            // Linear warmup: 1/warmup → 1, matching WarmupWarmdown.
+            return (step + 1) as f64 / self.warmup_steps as f64;
+        }
+        if step >= self.total_steps {
+            return self.min_lr_frac;
+        }
+        // warmup_steps <= step < total_steps implies decay_steps > 0.
+        let decay_steps = self.total_steps - self.warmup_steps;
+        let progress = (step - self.warmup_steps) as f64 / decay_steps as f64;
+        self.min_lr_frac
+            + (1.0 - self.min_lr_frac) * (1.0 + (std::f64::consts::PI * progress).cos()) / 2.0
+    }
+}
+
+/// Step decay schedule: hold the rate constant, then multiply by
+/// `decay_rate` every `decay_steps` steps, floored at `min_lr_frac`.
+///
+/// Formula with `drops = step / decay_steps` (integer division):
+///
+/// ```text
+/// mult(step) = max(min_lr_frac, decay_rate^drops)
+/// ```
+///
+/// Boundary behavior: the multiplier is exactly 1.0 for `step < decay_steps`,
+/// drops to `decay_rate` at `step == decay_steps`, and never falls below
+/// `min_lr_frac`. Panics if `decay_steps == 0`, `decay_rate` is outside
+/// (0, 1), or `min_lr_frac` is outside [0, 1].
+#[derive(Debug)]
+pub struct StepDecay {
+    decay_steps: usize,
+    decay_rate: f64,
+    min_lr_frac: f64,
+}
+
+impl StepDecay {
+    /// Creates a step decay schedule that multiplies the rate by
+    /// `decay_rate` every `decay_steps` steps, floored at `min_lr_frac`
+    /// times the base learning rate.
+    pub fn new(decay_steps: usize, decay_rate: f64, min_lr_frac: f64) -> Self {
+        assert!(decay_steps > 0, "decay_steps must be positive");
+        assert!(
+            decay_rate > 0.0 && decay_rate < 1.0,
+            "decay_rate must be in (0, 1), got {decay_rate}"
+        );
+        assert!(
+            (0.0..=1.0).contains(&min_lr_frac),
+            "min_lr_frac must be in [0, 1], got {min_lr_frac}"
+        );
+        Self { decay_steps, decay_rate, min_lr_frac }
+    }
+}
+
+impl LrSchedule for StepDecay {
+    fn lr_multiplier(&self, step: usize) -> f64 {
+        let drops = step / self.decay_steps;
+        self.decay_rate.powi(drops as i32).max(self.min_lr_frac)
+    }
+}
+
+/// Which direction of a monitored metric counts as improvement for
+/// [`ReduceOnPlateau`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlateauMode {
+    /// Lower is better (e.g. validation loss).
+    Min,
+    /// Higher is better (e.g. validation accuracy).
+    Max,
+}
+
+/// Plateau reduction schedule: shrink the rate by `factor` when a monitored
+/// metric stops improving.
+///
+/// Unlike step-indexed schedules this one is metric-driven. Feed each new
+/// observation to [`step_metric`](Self::step_metric); it updates the internal
+/// state and returns the current multiplier, which is also what the
+/// [`LrSchedule`] impl reports (its `step` argument is ignored). Apply it to
+/// an optimizer the usual way:
+/// ```ignore
+/// let lr = base_lr * schedule.step_metric(val_loss);
+/// opt.set_lr(lr);
+/// ```
+///
+/// Improvement rule with absolute `threshold` (default 1e-4):
+///
+/// ```text
+/// Min mode: improved ⟺ metric < best - threshold
+/// Max mode: improved ⟺ metric > best + threshold
+/// ```
+///
+/// State transitions per observation: the first observation sets `best` with
+/// no reduction. An improvement sets `best` and resets the bad-epoch count.
+/// Otherwise the bad-epoch count grows; while a cooldown from a recent
+/// reduction is still running it just ticks down, and otherwise once bad
+/// epochs exceed `patience` the multiplier drops to
+/// `max(min_lr_frac, current * factor)` and a new cooldown of `cooldown`
+/// observations starts. The multiplier never rises again; call
+/// [`reset`](Self::reset) to restart the search (e.g. after a regime change).
+/// Panics if `factor` is outside (0, 1) or `min_lr_frac` is outside [0, 1].
+#[derive(Debug)]
+pub struct ReduceOnPlateau {
+    factor: f64,
+    patience: usize,
+    min_lr_frac: f64,
+    mode: PlateauMode,
+    threshold: f64,
+    cooldown: usize,
+    best: Option<f64>,
+    bad_epochs: usize,
+    cooldown_remaining: usize,
+    current: f64,
+}
+
+impl ReduceOnPlateau {
+    /// Creates a plateau schedule that multiplies the rate by `factor` after
+    /// `patience` consecutive observations without improvement, floored at
+    /// `min_lr_frac`. Defaults to [`PlateauMode::Min`], threshold 1e-4, and
+    /// no cooldown; use the builder methods to change them.
+    pub fn new(factor: f64, patience: usize, min_lr_frac: f64) -> Self {
+        assert!(factor > 0.0 && factor < 1.0, "factor must be in (0, 1), got {factor}");
+        assert!(
+            (0.0..=1.0).contains(&min_lr_frac),
+            "min_lr_frac must be in [0, 1], got {min_lr_frac}"
+        );
+        Self {
+            factor,
+            patience,
+            min_lr_frac,
+            mode: PlateauMode::Min,
+            threshold: 1e-4,
+            cooldown: 0,
+            best: None,
+            bad_epochs: 0,
+            cooldown_remaining: 0,
+            current: 1.0,
+        }
+    }
+
+    /// Sets whether lower ([`PlateauMode::Min`]) or higher
+    /// ([`PlateauMode::Max`]) metrics count as improvement.
+    pub fn mode(mut self, mode: PlateauMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Sets the absolute improvement threshold (default 1e-4). Must be
+    /// non-negative; changes smaller than this do not reset the bad-epoch
+    /// count.
+    pub fn threshold(mut self, threshold: f64) -> Self {
+        assert!(threshold >= 0.0, "threshold must be non-negative, got {threshold}");
+        self.threshold = threshold;
+        self
+    }
+
+    /// Sets how many observations after a reduction pass before another
+    /// reduction can happen.
+    pub fn cooldown(mut self, cooldown: usize) -> Self {
+        self.cooldown = cooldown;
+        self
+    }
+
+    /// Feeds one metric observation, advances the schedule state, and returns
+    /// the current multiplier. Non-finite metrics are ignored: they leave the
+    /// state untouched and return the current multiplier.
+    pub fn step_metric(&mut self, metric: f64) -> f64 {
+        if !metric.is_finite() {
+            return self.current;
+        }
+        let Some(best) = self.best else {
+            self.best = Some(metric);
+            return self.current;
+        };
+        let improved = match self.mode {
+            PlateauMode::Min => metric < best - self.threshold,
+            PlateauMode::Max => metric > best + self.threshold,
+        };
+        if improved {
+            self.best = Some(metric);
+            self.bad_epochs = 0;
+        } else {
+            self.bad_epochs += 1;
+            if self.cooldown_remaining > 0 {
+                self.cooldown_remaining -= 1;
+            } else if self.bad_epochs > self.patience {
+                self.current = (self.current * self.factor).max(self.min_lr_frac);
+                self.bad_epochs = 0;
+                self.cooldown_remaining = self.cooldown;
+            }
+        }
+        self.current
+    }
+
+    /// Restarts the plateau search: clears the best metric, counters, and
+    /// restores the multiplier to 1.0.
+    pub fn reset(&mut self) {
+        self.best = None;
+        self.bad_epochs = 0;
+        self.cooldown_remaining = 0;
+        self.current = 1.0;
+    }
+}
+
+impl LrSchedule for ReduceOnPlateau {
+    fn lr_multiplier(&self, _step: usize) -> f64 {
+        self.current
+    }
+}
+
+/// Annealing shape for [`OneCycle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OneCycleAnneal {
+    /// Straight-line interpolation between phase endpoints.
+    Linear,
+    /// Cosine interpolation between phase endpoints.
+    Cosine,
+}
+
+/// One-cycle schedule: ramp from a low rate up to the base rate, then anneal
+/// down to a floor, over `total_steps`.
+///
+/// With `div = div_factor`, `final_div = final_div_factor`,
+/// `up = round(pct_start * total_steps)` clamped to `[1, total_steps]`,
+/// `start = 1 / div`, and `end = 1 / (div * final_div)`:
+///
+/// ```text
+/// mult(step) = anneal(start → 1, step / up)              if step < up
+/// mult(step) = anneal(1 → end, (step - up) / (total - up))  if up <= step < total
+/// mult(step) = end                                       if step >= total
+/// ```
+///
+/// where `anneal(a → b, p)` is `a + (b - a) * p` for
+/// [`OneCycleAnneal::Linear`] and `b + (a - b) * (1 + cos(π * p)) / 2` for
+/// [`OneCycleAnneal::Cosine`].
+///
+/// Boundary behavior: the multiplier is exactly `1 / div_factor` at step 0,
+/// exactly 1.0 at the peak (`step == up`), exactly `end` at
+/// `step == total_steps`, and stays at `end` beyond `total_steps`. Panics if
+/// `total_steps == 0`, `pct_start` is outside (0, 1), `div_factor < 1.0`, or
+/// `final_div_factor < 1.0`.
+#[derive(Debug)]
+pub struct OneCycle {
+    total_steps: usize,
+    up_steps: usize,
+    start: f64,
+    end: f64,
+    anneal: OneCycleAnneal,
+}
+
+impl OneCycle {
+    /// Creates a one-cycle schedule peaking at the base rate after
+    /// `pct_start` of `total_steps`, starting at `1 / div_factor` of base and
+    /// ending at `1 / (div_factor * final_div_factor)` of base, with linear
+    /// annealing. Use [`anneal`](Self::anneal) for cosine annealing.
+    pub fn new(
+        total_steps: usize,
+        pct_start: f64,
+        div_factor: f64,
+        final_div_factor: f64,
+    ) -> Self {
+        assert!(total_steps > 0, "total_steps must be positive");
+        assert!(
+            pct_start > 0.0 && pct_start < 1.0,
+            "pct_start must be in (0, 1), got {pct_start}"
+        );
+        assert!(div_factor >= 1.0, "div_factor must be >= 1.0, got {div_factor}");
+        assert!(
+            final_div_factor >= 1.0,
+            "final_div_factor must be >= 1.0, got {final_div_factor}"
+        );
+        let up_steps =
+            ((pct_start * total_steps as f64).round() as usize).clamp(1, total_steps);
+        Self {
+            total_steps,
+            up_steps,
+            start: 1.0 / div_factor,
+            end: 1.0 / (div_factor * final_div_factor),
+            anneal: OneCycleAnneal::Linear,
+        }
+    }
+
+    /// Sets the annealing shape used in both phases.
+    pub fn anneal(mut self, anneal: OneCycleAnneal) -> Self {
+        self.anneal = anneal;
+        self
+    }
+}
+
+impl LrSchedule for OneCycle {
+    fn lr_multiplier(&self, step: usize) -> f64 {
+        if step < self.up_steps {
+            let progress = step as f64 / self.up_steps as f64;
+            return match self.anneal {
+                OneCycleAnneal::Linear => self.start + (1.0 - self.start) * progress,
+                OneCycleAnneal::Cosine => {
+                    1.0 + (self.start - 1.0) * (1.0
+                        + (std::f64::consts::PI * progress).cos())
+                        / 2.0
+                }
+            };
+        }
+        if step >= self.total_steps {
+            return self.end;
+        }
+        // up_steps <= step < total_steps implies down_steps > 0.
+        let down_steps = self.total_steps - self.up_steps;
+        let progress = (step - self.up_steps) as f64 / down_steps as f64;
+        match self.anneal {
+            OneCycleAnneal::Linear => 1.0 - (1.0 - self.end) * progress,
+            OneCycleAnneal::Cosine => {
+                self.end
+                    + (1.0 - self.end) * (1.0 + (std::f64::consts::PI * progress).cos())
+                        / 2.0
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -774,5 +1143,257 @@ mod tests {
         assert!((norm - 5.0).abs() < 1e-2);
         assert!((clipped[0] - 0.6).abs() < 1e-2);
         assert!((clipped[1] - 0.8).abs() < 1e-2);
+    }
+
+    #[test]
+    fn test_cosine_decay_warmup_ramp() {
+        // Arrange
+        let sched = CosineDecay::new(10, 100, 0.0);
+
+        // Act / Assert — linear ramp matching WarmupWarmdown
+        assert!((sched.lr_multiplier(0) - 0.1).abs() < 1e-12);
+        assert!((sched.lr_multiplier(4) - 0.5).abs() < 1e-12);
+        assert!((sched.lr_multiplier(9) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_cosine_decay_midpoint_and_end() {
+        // Arrange — no warmup, 100 steps, floor 0.1
+        let sched = CosineDecay::new(0, 100, 0.1);
+
+        // Act / Assert — start at 1, midpoint at (1 + min) / 2, end at min
+        assert!((sched.lr_multiplier(0) - 1.0).abs() < 1e-12);
+        assert!((sched.lr_multiplier(50) - 0.55).abs() < 1e-12);
+        assert!((sched.lr_multiplier(100) - 0.1).abs() < 1e-12);
+        assert!((sched.lr_multiplier(150) - 0.1).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_cosine_decay_monotonic_after_warmup() {
+        // Arrange
+        let sched = CosineDecay::new(10, 100, 0.05);
+
+        // Act
+        let multipliers: Vec<f64> = (0..=120).map(|s| sched.lr_multiplier(s)).collect();
+
+        // Assert — ramp up, then non-increasing decay clamped at the floor
+        assert!(multipliers[..10].windows(2).all(|w| w[1] > w[0]));
+        assert!(multipliers[10..].windows(2).all(|w| w[1] <= w[0]));
+        assert!(multipliers[100..].iter().all(|&m| m == 0.05));
+    }
+
+    #[test]
+    #[should_panic(expected = "total_steps must be positive")]
+    fn test_cosine_decay_rejects_zero_total_steps() {
+        // Arrange / Act / Assert — panics
+        CosineDecay::new(0, 0, 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "must not exceed total_steps")]
+    fn test_cosine_decay_rejects_warmup_beyond_total() {
+        // Arrange / Act / Assert — panics
+        CosineDecay::new(11, 10, 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "min_lr_frac must be in [0, 1]")]
+    fn test_cosine_decay_rejects_floor_above_one() {
+        // Arrange / Act / Assert — panics
+        CosineDecay::new(0, 10, 1.5);
+    }
+
+    #[test]
+    fn test_step_decay_drops_at_boundaries() {
+        // Arrange — halve every 10 steps, floor 0.01
+        let sched = StepDecay::new(10, 0.5, 0.01);
+
+        // Act / Assert
+        assert!((sched.lr_multiplier(0) - 1.0).abs() < 1e-12);
+        assert!((sched.lr_multiplier(9) - 1.0).abs() < 1e-12);
+        assert!((sched.lr_multiplier(10) - 0.5).abs() < 1e-12);
+        assert!((sched.lr_multiplier(25) - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_step_decay_floors_at_minimum() {
+        // Arrange
+        let sched = StepDecay::new(10, 0.5, 0.01);
+
+        // Act / Assert — 0.5^7 < 0.01, so the floor wins far out
+        assert!((sched.lr_multiplier(70) - 0.01).abs() < 1e-12);
+        assert!((sched.lr_multiplier(1000) - 0.01).abs() < 1e-12);
+    }
+
+    #[test]
+    #[should_panic(expected = "decay_steps must be positive")]
+    fn test_step_decay_rejects_zero_decay_steps() {
+        // Arrange / Act / Assert — panics
+        StepDecay::new(0, 0.5, 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "decay_rate must be in (0, 1)")]
+    fn test_step_decay_rejects_growth_rate() {
+        // Arrange / Act / Assert — panics
+        StepDecay::new(10, 1.5, 0.0);
+    }
+
+    #[test]
+    fn test_plateau_holds_while_improving() {
+        // Arrange
+        let mut sched = ReduceOnPlateau::new(0.5, 2, 0.0);
+
+        // Act
+        let multipliers: Vec<f64> = [1.0, 0.9, 0.8, 0.7].iter().map(|&m| sched.step_metric(m)).collect();
+
+        // Assert — steady improvement never reduces the rate
+        assert!(multipliers.iter().all(|&m| m == 1.0));
+        assert_eq!(sched.lr_multiplier(999), 1.0);
+    }
+
+    #[test]
+    fn test_plateau_reduces_after_patience_exhausted() {
+        // Arrange — patience 2 means the third bad epoch triggers reduction
+        let mut sched = ReduceOnPlateau::new(0.5, 2, 0.0);
+        sched.step_metric(1.0);
+
+        // Act
+        let first_bad = sched.step_metric(1.0);
+        let second_bad = sched.step_metric(1.0);
+        let third_bad = sched.step_metric(1.0);
+
+        // Assert
+        assert_eq!(first_bad, 1.0);
+        assert_eq!(second_bad, 1.0);
+        assert_eq!(third_bad, 0.5);
+    }
+
+    #[test]
+    fn test_plateau_improvement_resets_bad_count() {
+        // Arrange
+        let mut sched = ReduceOnPlateau::new(0.5, 2, 0.0);
+        sched.step_metric(1.0);
+        sched.step_metric(1.0);
+        sched.step_metric(1.0);
+
+        // Act — a new best restarts the patience window
+        sched.step_metric(0.5);
+        let first_bad = sched.step_metric(0.5);
+        let second_bad = sched.step_metric(0.5);
+
+        // Assert
+        assert_eq!(first_bad, 1.0);
+        assert_eq!(second_bad, 1.0);
+    }
+
+    #[test]
+    fn test_plateau_floors_and_ignores_nan() {
+        // Arrange
+        let mut sched = ReduceOnPlateau::new(0.1, 0, 0.05);
+        sched.step_metric(1.0);
+
+        // Act
+        let after_nan = sched.step_metric(f64::NAN);
+        let reduced = sched.step_metric(1.0);
+        let floored = sched.step_metric(1.0);
+
+        // Assert — NaN leaves state untouched, then 1*0.1 floors at 0.05
+        assert_eq!(after_nan, 1.0);
+        assert!((reduced - 0.1).abs() < 1e-12);
+        assert!((floored - 0.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_plateau_max_mode_and_cooldown() {
+        // Arrange — accuracy-like metric with a 1-epoch cooldown
+        let mut sched =
+            ReduceOnPlateau::new(0.5, 0, 0.0).mode(PlateauMode::Max).cooldown(1);
+        sched.step_metric(0.5);
+
+        // Act
+        let reduced = sched.step_metric(0.5);
+        let cooling = sched.step_metric(0.5);
+        let reduced_again = sched.step_metric(0.5);
+
+        // Assert
+        assert_eq!(reduced, 0.5);
+        assert_eq!(cooling, 0.5);
+        assert_eq!(reduced_again, 0.25);
+    }
+
+    #[test]
+    #[should_panic(expected = "factor must be in (0, 1)")]
+    fn test_plateau_rejects_growth_factor() {
+        // Arrange / Act / Assert — panics
+        ReduceOnPlateau::new(1.0, 2, 0.0);
+    }
+
+    #[test]
+    fn test_one_cycle_linear_endpoints() {
+        // Arrange — 100 steps, peak at 30, start 1/25, end 1/25000
+        let sched = OneCycle::new(100, 0.3, 25.0, 1000.0);
+
+        // Act / Assert
+        assert!((sched.lr_multiplier(0) - 0.04).abs() < 1e-12);
+        assert!((sched.lr_multiplier(30) - 1.0).abs() < 1e-12);
+        assert!((sched.lr_multiplier(100) - 0.00004).abs() < 1e-12);
+        assert!((sched.lr_multiplier(150) - 0.00004).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_one_cycle_linear_midpoints() {
+        // Arrange
+        let sched = OneCycle::new(100, 0.3, 25.0, 1000.0);
+
+        // Act / Assert — halfway up and halfway down interpolate linearly
+        assert!((sched.lr_multiplier(15) - 0.52).abs() < 1e-12);
+        let mid_down = sched.lr_multiplier(65);
+        assert!((mid_down - (1.0 + 0.00004) / 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_one_cycle_cosine_stays_in_bounds_and_peaks() {
+        // Arrange
+        let sched = OneCycle::new(100, 0.3, 25.0, 1000.0).anneal(OneCycleAnneal::Cosine);
+
+        // Act
+        let multipliers: Vec<f64> = (0..=100).map(|s| sched.lr_multiplier(s)).collect();
+
+        // Assert — rises to the peak, falls to the floor, never leaves [end, 1]
+        assert!((multipliers[0] - 0.04).abs() < 1e-12);
+        assert!((multipliers[30] - 1.0).abs() < 1e-12);
+        assert!((multipliers[100] - 0.00004).abs() < 1e-12);
+        assert!(multipliers[..30].windows(2).all(|w| w[1] >= w[0]));
+        assert!(multipliers[30..].windows(2).all(|w| w[1] <= w[0]));
+    }
+
+    #[test]
+    #[should_panic(expected = "pct_start must be in (0, 1)")]
+    fn test_one_cycle_rejects_degenerate_split() {
+        // Arrange / Act / Assert — panics
+        OneCycle::new(100, 1.0, 25.0, 1000.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "div_factor must be >= 1.0")]
+    fn test_one_cycle_rejects_div_below_one() {
+        // Arrange / Act / Assert — panics
+        OneCycle::new(100, 0.3, 0.5, 1000.0);
+    }
+
+    #[test]
+    fn test_schedule_composes_with_optimizer_lr() {
+        // Arrange
+        let x = Parameter::new(Tensor::from_vec(vec![1.0f32], (1,), Device::Cpu));
+        let mut opt = SGD::new(vec![x], 0.1);
+        let sched = StepDecay::new(10, 0.5, 0.0);
+        let base_lr = 0.1;
+
+        // Act
+        opt.set_lr(base_lr * sched.lr_multiplier(10));
+
+        // Assert
+        assert!((opt.lr() - 0.05).abs() < 1e-12);
     }
 }
