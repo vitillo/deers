@@ -390,24 +390,6 @@ pub trait BackendStorage: Sized {
         t_len: usize,
         mask_t_len: usize,
     ) -> Result<Self>;
-    /// Fused multi-head attention forward (inference):
-    /// `out = softmax(q.K*scale + mask) . V` with grouped-query heads.
-    ///
-    /// `q` is `[B, Hq, Tq, D]` with a linear span; `k`/`v` are
-    /// `[B, Hkv, Tk, D]` read through explicit strides (growing cache views
-    /// feed straight in); `mask` is `[1, 1, Tm, Tk]`.
-    #[allow(clippy::too_many_arguments)]
-    fn mha_fwd(
-        &self,
-        q_layout: &Layout,
-        k: &Self,
-        k_layout: &Layout,
-        v: &Self,
-        v_layout: &Layout,
-        mask: &Self,
-        mask_layout: &Layout,
-        scale: f32,
-    ) -> Result<Self>;
     /// Converts `layout` to `dtype` without leaving the device.
     ///
     /// The cast reads strided source elements and writes a compact output buffer:
@@ -724,32 +706,6 @@ impl BackendStorage for Storage {
                     outer_size, inner_size, scale, t_len, mask_t_len,
                 )?)),
             _ => Err(Error::DeviceMismatch { op: "masked_softmax_fwd" }),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn mha_fwd(
-        &self,
-        q_layout: &Layout,
-        k: &Self,
-        k_layout: &Layout,
-        v: &Self,
-        v_layout: &Layout,
-        mask: &Self,
-        mask_layout: &Layout,
-        scale: f32,
-    ) -> Result<Self> {
-        match (self, k, v, mask) {
-            (Storage::Cpu(q), Storage::Cpu(k), Storage::Cpu(v), Storage::Cpu(m)) => {
-                Ok(Self::Cpu(q.mha_fwd(q_layout, k, k_layout, v, v_layout, m, mask_layout, scale)?))
-            }
-            (Storage::Cuda(q), Storage::Cuda(k), Storage::Cuda(v), Storage::Cuda(m)) => {
-                Ok(Self::Cuda(q.mha_fwd(q_layout, k, k_layout, v, v_layout, m, mask_layout, scale)?))
-            }
-            (Storage::Mps(q), Storage::Mps(k), Storage::Mps(v), Storage::Mps(m)) => {
-                Ok(Self::Mps(q.mha_fwd(q_layout, k, k_layout, v, v_layout, m, mask_layout, scale)?))
-            }
-            _ => Err(Error::DeviceMismatch { op: "mha_fwd" }),
         }
     }
 

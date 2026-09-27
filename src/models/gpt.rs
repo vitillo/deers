@@ -495,22 +495,15 @@ impl CausalSelfAttention {
         // Inference on CUDA runs one fused attention kernel (scores, softmax,
         // context, group map); training and other devices keep the primitive
         // chain, which stays the exact tested path for gradients.
-        let y = if crate::tensor::no_grad_active() && q.device() == Device::Cuda {
-            crate::ops::FusedMha::new(q.clone(), k.clone(), v.clone(), mask.clone(), scale)
-                .unwrap()
-                .forward()
-                .unwrap()
-        } else {
-            // Grouped-query repeat for the primitive chain only; the fused
-            // kernel maps heads to groups natively.
-            let k = self.repeat_kv(k);
-            let v = self.repeat_kv(v);
-            let scores = Tensor::einsum("b h t d, b h s d -> b h t s", q, &k);
-            // One fused kernel on CUDA (scale, mask-add, softmax); the primitive
-            // chain everywhere else.
-            let attn = scores.scaled_masked_softmax(&mask, scale, 3);
-            attn.matmul(&v)
-        };
+        // Grouped-query repeat for the primitive chain; keys and values
+        // arrive unrepeated from the cache.
+        let k = self.repeat_kv(k);
+        let v = self.repeat_kv(v);
+        let scores = Tensor::einsum("b h t d, b h s d -> b h t s", q, &k);
+        // One fused kernel on CUDA (scale, mask-add, softmax); the primitive
+        // chain everywhere else.
+        let attn = scores.scaled_masked_softmax(&mask, scale, 3);
+        let y = attn.matmul(&v);
         let y_flat = y.rearrange("b h t d -> (b t) (h d)", &[]);
 
         let out = self.out_proj.forward(&y_flat)?;
