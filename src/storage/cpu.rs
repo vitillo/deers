@@ -319,11 +319,7 @@ fn fill<D: WithDType + Copy>(mask: &[bool], src: &CpuStorage, layout: &Layout, v
 /// first `k` ranks in order. Descending ranks the largest first; ties keep
 /// index order, matching the host selectors in `ops`.
 pub(crate) fn cmp_f32_rank(a: f32, b: f32) -> Ordering {
-    if a == b {
-        Ordering::Equal
-    } else {
-        a.total_cmp(&b)
-    }
+    if a == b { Ordering::Equal } else { a.total_cmp(&b) }
 }
 
 trait RankKey: PartialOrd {
@@ -356,13 +352,9 @@ fn rank_positions<V: RankKey>(
             let base = (o * dim_size) * inner + j;
             let mut order: Vec<usize> = (0..dim_size).collect();
             if descending {
-                order.sort_by(|&a, &b| {
-                    keys[base + b * inner].rank_cmp(&keys[base + a * inner])
-                });
+                order.sort_by(|&a, &b| keys[base + b * inner].rank_cmp(&keys[base + a * inner]));
             } else {
-                order.sort_by(|&a, &b| {
-                    keys[base + a * inner].rank_cmp(&keys[base + b * inner])
-                });
+                order.sort_by(|&a, &b| keys[base + a * inner].rank_cmp(&keys[base + b * inner]));
             }
             for (r, &i) in order.iter().take(k).enumerate() {
                 out[(o * k + r) * inner + j] = (base + i * inner, i as i64);

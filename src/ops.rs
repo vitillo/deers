@@ -2012,11 +2012,17 @@ pub fn sort_forward(arg: &Tensor, dim: usize, descending: bool) -> Result<(Tenso
                     let mut order: Vec<usize> = (0..dim_size).collect();
                     if descending {
                         order.sort_by(|&a, &b| {
-                            storage::cmp_f32_rank(as_f32[base + b * inner], as_f32[base + a * inner])
+                            storage::cmp_f32_rank(
+                                as_f32[base + b * inner],
+                                as_f32[base + a * inner],
+                            )
                         });
                     } else {
                         order.sort_by(|&a, &b| {
-                            storage::cmp_f32_rank(as_f32[base + a * inner], as_f32[base + b * inner])
+                            storage::cmp_f32_rank(
+                                as_f32[base + a * inner],
+                                as_f32[base + b * inner],
+                            )
                         });
                     }
                     for (rank, &i) in order.iter().enumerate() {
@@ -2041,11 +2047,17 @@ pub fn sort_forward(arg: &Tensor, dim: usize, descending: bool) -> Result<(Tenso
                     let mut order: Vec<usize> = (0..dim_size).collect();
                     if descending {
                         order.sort_by(|&a, &b| {
-                            storage::cmp_f32_rank(as_f32[base + b * inner], as_f32[base + a * inner])
+                            storage::cmp_f32_rank(
+                                as_f32[base + b * inner],
+                                as_f32[base + a * inner],
+                            )
                         });
                     } else {
                         order.sort_by(|&a, &b| {
-                            storage::cmp_f32_rank(as_f32[base + a * inner], as_f32[base + b * inner])
+                            storage::cmp_f32_rank(
+                                as_f32[base + a * inner],
+                                as_f32[base + b * inner],
+                            )
                         });
                     }
                     for (rank, &i) in order.iter().enumerate() {

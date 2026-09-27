@@ -350,8 +350,8 @@ mod imp {
 
     // Row-wise selectors: one thread per (outer, inner) output. Buffers are
     // compact; each row holds dim_size elements spaced by inner. Ties resolve
-    // to the lowest index, matching the host stable order. NaN ordering is
-    // unspecified on both paths.
+    // to the lowest index, matching the host stable order. NaN sorts largest
+    // on both paths.
     __device__ __forceinline__ float rank_value(float v) { return v; }
     __device__ __forceinline__ float rank_value(half v) { return __half2float(v); }
     __device__ __forceinline__ float rank_value(__nv_bfloat16 v) { return __bfloat162float(v); }
