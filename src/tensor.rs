@@ -343,6 +343,22 @@ impl Tensor {
         ops::ToDevice::new(self.clone(), device)?.forward()
     }
 
+    /// Converts this tensor to `dtype`, preserving shape and device.
+    ///
+    /// Same-dtype conversion is a no-op returning `self`. Float-to-float
+    /// conversions keep the autograd edge, so gradients flow back with the
+    /// gradient cast to the input dtype. Conversions targeting `I64` truncate
+    /// toward zero and do not track gradients, matching PyTorch.
+    pub fn to_dtype(&self, dtype: DType) -> Result<Tensor> {
+        if self.dtype() == dtype {
+            return Ok(self.clone());
+        }
+        if dtype == DType::I64 {
+            return ops::cast_to_dtype(self, dtype);
+        }
+        ops::ToDtype::new(self.clone(), dtype)?.forward()
+    }
+
     /// Creates a tensor of ones with the same shape, dtype, and device.
     pub fn ones_like(&self) -> Tensor {
         Tensor::ones(self.layout().shape().clone(), self.dtype(), self.device())
