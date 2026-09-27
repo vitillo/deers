@@ -2,7 +2,9 @@
 //!
 //! New code should import from [`crate::models::gpt2`] or [`crate::models::qwen3`]
 //! directly.
-//! This module keeps every previous `models::gpt::` path working.
+//! The shared `RopeScaling`, `KvCache`, `CausalSelfAttention`, and rotary helper
+//! names here are the GPT-2 copies; Qwen3 code must import those names from
+//! [`crate::models::qwen3`].
 
 pub use super::gpt2::{
     Block, CausalSelfAttention, GPT, GPTConfig, GptMlpKind, GptNormKind, KvCache, MLP,
