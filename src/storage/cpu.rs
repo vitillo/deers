@@ -1,6 +1,9 @@
 //! CPU tensor storage backed by typed `Vec` buffers with strided kernels.
 
-use std::borrow::{Borrow, Cow};
+use std::{
+    borrow::{Borrow, Cow},
+    cmp::Ordering,
+};
 
 use half::{bf16, f16};
 
@@ -57,6 +60,58 @@ impl CpuStorage {
             Cow::Borrowed(&data[layout.offset..layout.offset + layout.size()])
         } else {
             Cow::Owned(storage.to_vec(layout))
+        }
+    }
+
+    /// Collects strided values and ranks them per row along `dim`, returning
+    /// the ranked values with their dim indices. Used by the top-k and sort
+    /// storage paths.
+    fn ranked(
+        &self,
+        layout: &Layout,
+        dim: usize,
+        k: usize,
+        descending: bool,
+    ) -> Result<(Self, Vec<i64>)> {
+        let shape = layout.shape();
+        let outer: usize = shape.iter().take(dim).product();
+        let dim_size = shape[dim];
+        let inner: usize = shape.iter().skip(dim + 1).product();
+        match self {
+            CpuStorage::F16(_) => {
+                let values: Vec<f16> = self.iter(layout).copied().collect();
+                let keys: Vec<f32> = values.iter().map(|v| v.to_f32()).collect();
+                let ranks = rank_positions(&keys, outer, dim_size, inner, k, descending);
+                Ok((
+                    CpuStorage::F16(ranks.iter().map(|&(p, _)| values[p]).collect()),
+                    ranks.iter().map(|&(_, i)| i).collect(),
+                ))
+            }
+            CpuStorage::BF16(_) => {
+                let values: Vec<bf16> = self.iter(layout).copied().collect();
+                let keys: Vec<f32> = values.iter().map(|v| v.to_f32()).collect();
+                let ranks = rank_positions(&keys, outer, dim_size, inner, k, descending);
+                Ok((
+                    CpuStorage::BF16(ranks.iter().map(|&(p, _)| values[p]).collect()),
+                    ranks.iter().map(|&(_, i)| i).collect(),
+                ))
+            }
+            CpuStorage::F32(_) => {
+                let values: Vec<f32> = self.iter(layout).copied().collect();
+                let ranks = rank_positions(&values, outer, dim_size, inner, k, descending);
+                Ok((
+                    CpuStorage::F32(ranks.iter().map(|&(p, _)| values[p]).collect()),
+                    ranks.iter().map(|&(_, i)| i).collect(),
+                ))
+            }
+            CpuStorage::I64(_) => {
+                let values: Vec<i64> = self.iter(layout).copied().collect();
+                let ranks = rank_positions(&values, outer, dim_size, inner, k, descending);
+                Ok((
+                    CpuStorage::I64(ranks.iter().map(|&(p, _)| values[p]).collect()),
+                    ranks.iter().map(|&(_, i)| i).collect(),
+                ))
+            }
         }
     }
 
@@ -258,6 +313,43 @@ fn pick<D: WithDType + Copy>(
 /// Replaces strided source elements with `value` where the compact mask is set.
 fn fill<D: WithDType + Copy>(mask: &[bool], src: &CpuStorage, layout: &Layout, value: D) -> Vec<D> {
     src.iter(layout).enumerate().map(|(i, v)| if mask[i] { value } else { *v }).collect()
+}
+
+/// Ranks strided keys per row, returning (source position, dim index) for the
+/// first `k` ranks in order. Descending ranks the largest first; ties keep
+/// index order, matching the host selectors in `ops`.
+fn rank_positions<V: PartialOrd>(
+    keys: &[V],
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    k: usize,
+    descending: bool,
+) -> Vec<(usize, i64)> {
+    let mut out = Vec::with_capacity(outer * k * inner);
+    for o in 0..outer {
+        for j in 0..inner {
+            let base = (o * dim_size) * inner + j;
+            let mut order: Vec<usize> = (0..dim_size).collect();
+            if descending {
+                order.sort_by(|&a, &b| {
+                    keys[base + b * inner]
+                        .partial_cmp(&keys[base + a * inner])
+                        .unwrap_or(Ordering::Greater)
+                });
+            } else {
+                order.sort_by(|&a, &b| {
+                    keys[base + a * inner]
+                        .partial_cmp(&keys[base + b * inner])
+                        .unwrap_or(Ordering::Greater)
+                });
+            }
+            for &i in order.iter().take(k) {
+                out.push((base + i * inner, i as i64));
+            }
+        }
+    }
+    out
 }
 
 impl BackendStorage for CpuStorage {
@@ -575,6 +667,57 @@ impl BackendStorage for CpuStorage {
             CpuStorage::F32(_) => Ok(CpuStorage::F32(fill(&mask, self, layout, value as f32))),
             CpuStorage::I64(_) => Ok(CpuStorage::I64(fill(&mask, self, layout, value as i64))),
         }
+    }
+
+    fn argmax(&self, layout: &Layout, dim: usize) -> Result<Self> {
+        let shape = layout.shape();
+        let outer: usize = shape.iter().take(dim).product();
+        let dim_size = shape[dim];
+        let inner: usize = shape.iter().skip(dim + 1).product();
+        let out: Vec<i64> = match self {
+            CpuStorage::F16(_) => {
+                let values: Vec<f16> = self.iter(layout).copied().collect();
+                let keys: Vec<f32> = values.iter().map(|v| v.to_f32()).collect();
+                rank_positions(&keys, outer, dim_size, inner, 1, true)
+                    .iter()
+                    .map(|&(_, i)| i)
+                    .collect()
+            }
+            CpuStorage::BF16(_) => {
+                let values: Vec<bf16> = self.iter(layout).copied().collect();
+                let keys: Vec<f32> = values.iter().map(|v| v.to_f32()).collect();
+                rank_positions(&keys, outer, dim_size, inner, 1, true)
+                    .iter()
+                    .map(|&(_, i)| i)
+                    .collect()
+            }
+            CpuStorage::F32(_) => {
+                let values: Vec<f32> = self.iter(layout).copied().collect();
+                rank_positions(&values, outer, dim_size, inner, 1, true)
+                    .iter()
+                    .map(|&(_, i)| i)
+                    .collect()
+            }
+            CpuStorage::I64(_) => {
+                let values: Vec<i64> = self.iter(layout).copied().collect();
+                rank_positions(&values, outer, dim_size, inner, 1, true)
+                    .iter()
+                    .map(|&(_, i)| i)
+                    .collect()
+            }
+        };
+        Ok(CpuStorage::I64(out))
+    }
+
+    fn topk(&self, layout: &Layout, dim: usize, k: usize) -> Result<(Self, Self)> {
+        let (values, indices) = self.ranked(layout, dim, k, true)?;
+        Ok((values, CpuStorage::I64(indices)))
+    }
+
+    fn sort(&self, layout: &Layout, dim: usize, descending: bool) -> Result<(Self, Self)> {
+        let dim_size = layout.shape()[dim];
+        let (values, indices) = self.ranked(layout, dim, dim_size, descending)?;
+        Ok((values, CpuStorage::I64(indices)))
     }
 
     fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
@@ -1684,5 +1827,55 @@ mod tests {
         let err = result.expect_err("unary op on strided i64 must fail");
         assert!(matches!(err, Error::DTypeMismatch(_)), "unexpected error: {err}");
         assert!(err.to_string().contains("i64"), "message must name the dtype: {err}");
+    }
+
+    fn compact_layout(shape: (usize, usize)) -> Layout {
+        Layout::new(Shape::from(shape), Strides(vec![shape.1 as isize, 1]), 0)
+    }
+
+    #[test]
+    fn test_argmax_storage() {
+        // Arrange
+        let storage = CpuStorage::F32(vec![1.0, 3.0, 2.0, 4.0, 0.0, 5.0]);
+        let layout = compact_layout((2, 3));
+
+        // Act
+        let out = storage.argmax(&layout, 1).unwrap();
+
+        // Assert
+        let CpuStorage::I64(indices) = out else { panic!("argmax must return i64") };
+        assert_eq!(indices, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_topk_storage() {
+        // Arrange
+        let storage = CpuStorage::F32(vec![1.0, 3.0, 2.0, 4.0, 0.0, 5.0]);
+        let layout = compact_layout((2, 3));
+
+        // Act
+        let (values, indices) = storage.topk(&layout, 1, 2).unwrap();
+
+        // Assert
+        let CpuStorage::F32(values) = values else { panic!("topk values must keep dtype") };
+        let CpuStorage::I64(indices) = indices else { panic!("topk indices must be i64") };
+        assert_eq!(values, vec![3.0, 2.0, 5.0, 4.0]);
+        assert_eq!(indices, vec![1, 2, 2, 0]);
+    }
+
+    #[test]
+    fn test_sort_storage() {
+        // Arrange
+        let storage = CpuStorage::F32(vec![3.0, 1.0, 2.0, 5.0, 4.0, 0.0]);
+        let layout = compact_layout((2, 3));
+
+        // Act
+        let (values, indices) = storage.sort(&layout, 1, false).unwrap();
+
+        // Assert
+        let CpuStorage::F32(values) = values else { panic!("sort values must keep dtype") };
+        let CpuStorage::I64(indices) = indices else { panic!("sort indices must be i64") };
+        assert_eq!(values, vec![1.0, 2.0, 3.0, 0.0, 4.0, 5.0]);
+        assert_eq!(indices, vec![1, 2, 0, 2, 1, 0]);
     }
 }

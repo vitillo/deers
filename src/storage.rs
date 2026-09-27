@@ -300,6 +300,23 @@ pub trait BackendStorage: Sized {
         mask_layout: &Layout,
         value: f64,
     ) -> Result<Self>;
+    /// Returns row-wise argmax indices along `dim` as compact I64 storage.
+    ///
+    /// Ties resolve to the lowest index. Backends compute on device;
+    /// unsupported backends return an error instead of roundtripping.
+    fn argmax(&self, layout: &Layout, dim: usize) -> Result<Self>;
+    /// Returns the `k` largest values along `dim` with their indices.
+    ///
+    /// Values sort descending with ties broken toward the lowest index. The
+    /// returned pair is (values, I64 indices); both are compact. Backends
+    /// compute on device; unsupported backends return an error instead of
+    /// roundtripping through the host.
+    fn topk(&self, layout: &Layout, dim: usize, k: usize) -> Result<(Self, Self)>;
+    /// Sorts values along `dim`, returning compact (values, I64 indices).
+    ///
+    /// Ties keep index order. Backends compute on device; unsupported
+    /// backends return an error instead of roundtripping through the host.
+    fn sort(&self, layout: &Layout, dim: usize, descending: bool) -> Result<(Self, Self)>;
     /// Selects slices along `dim` using a compact 1-D integer index tensor.
     /// The output matches `layout` except the length at `dim` becomes `indices.len()`.
     fn index_select(
@@ -652,6 +669,48 @@ impl BackendStorage for Storage {
                 Ok(Self::Mps(storage.masked_fill(layout, mask, mask_layout, value)?))
             }
             _ => Err(Error::DeviceMismatch { op: "masked_fill" }),
+        }
+    }
+
+    fn argmax(&self, layout: &Layout, dim: usize) -> Result<Self> {
+        match self {
+            Storage::Cpu(storage) => Ok(Self::Cpu(storage.argmax(layout, dim)?)),
+            Storage::Cuda(storage) => Ok(Self::Cuda(storage.argmax(layout, dim)?)),
+            Storage::Mps(storage) => Ok(Self::Mps(storage.argmax(layout, dim)?)),
+        }
+    }
+
+    fn topk(&self, layout: &Layout, dim: usize, k: usize) -> Result<(Self, Self)> {
+        match self {
+            Storage::Cpu(storage) => {
+                let (values, indices) = storage.topk(layout, dim, k)?;
+                Ok((Self::Cpu(values), Self::Cpu(indices)))
+            }
+            Storage::Cuda(storage) => {
+                let (values, indices) = storage.topk(layout, dim, k)?;
+                Ok((Self::Cuda(values), Self::Cuda(indices)))
+            }
+            Storage::Mps(storage) => {
+                let (values, indices) = storage.topk(layout, dim, k)?;
+                Ok((Self::Mps(values), Self::Mps(indices)))
+            }
+        }
+    }
+
+    fn sort(&self, layout: &Layout, dim: usize, descending: bool) -> Result<(Self, Self)> {
+        match self {
+            Storage::Cpu(storage) => {
+                let (values, indices) = storage.sort(layout, dim, descending)?;
+                Ok((Self::Cpu(values), Self::Cpu(indices)))
+            }
+            Storage::Cuda(storage) => {
+                let (values, indices) = storage.sort(layout, dim, descending)?;
+                Ok((Self::Cuda(values), Self::Cuda(indices)))
+            }
+            Storage::Mps(storage) => {
+                let (values, indices) = storage.sort(layout, dim, descending)?;
+                Ok((Self::Mps(values), Self::Mps(indices)))
+            }
         }
     }
 

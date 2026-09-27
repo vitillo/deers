@@ -1748,6 +1748,24 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
+        fn argmax(&self, _: &Layout, _: usize) -> Result<Self> {
+            Err(Error::NotImplemented(
+                "mps argmax is not implemented; move the input to the host first",
+            ))
+        }
+
+        fn topk(&self, _: &Layout, _: usize, _: usize) -> Result<(Self, Self)> {
+            Err(Error::NotImplemented(
+                "mps topk is not implemented; move the input to the host first",
+            ))
+        }
+
+        fn sort(&self, _: &Layout, _: usize, _: bool) -> Result<(Self, Self)> {
+            Err(Error::NotImplemented(
+                "mps sort is not implemented; move the input to the host first",
+            ))
+        }
+
         fn where_cond(
             &self,
             _: &Layout,
@@ -2371,6 +2389,15 @@ mod imp {
             Self::unavailable()
         }
         fn index_select(&self, _: &Layout, _: usize, _: &Self, _: &Layout) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn argmax(&self, _: &Layout, _: usize) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn topk(&self, _: &Layout, _: usize, _: usize) -> Result<(Self, Self)> {
+            Self::unavailable()
+        }
+        fn sort(&self, _: &Layout, _: usize, _: bool) -> Result<(Self, Self)> {
             Self::unavailable()
         }
         fn where_cond(

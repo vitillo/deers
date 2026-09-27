@@ -1657,14 +1657,11 @@ fn cond_mask(cond: &Tensor) -> Result<Vec<bool>> {
     }
 }
 
-/// Refuses selection ops on accelerator tensors so callers cannot silently
-/// roundtrip whole tensors through the host. Every message names the host
-/// move that fixes the call.
-fn require_host(tensors: &[&Tensor], msg: &'static str) -> Result<()> {
-    for tensor in tensors {
-        if tensor.device() != crate::Device::Cpu {
-            return Err(Error::NotImplemented(msg));
-        }
+/// Refuses selection ops on MPS tensors, the only backend without select
+/// kernels. Every message names the host move that fixes the call.
+fn refuse_mps(device: crate::Device, msg: &'static str) -> Result<()> {
+    if device == crate::Device::Mps {
+        return Err(Error::NotImplemented(msg));
     }
     Ok(())
 }
@@ -1691,12 +1688,28 @@ fn check_same_shape(a: &Tensor, b: &Tensor, op: &str) -> Result<()> {
     Ok(())
 }
 
+/// Runs argmax on CUDA, returning compact I64 indices on the device.
+fn argmax_cuda(arg: &Tensor, dim: usize, keep_dims: bool, shape: &[usize]) -> Result<Tensor> {
+    let storage = arg.storage().argmax(arg.layout(), dim)?;
+    let mut out_shape = shape.to_vec();
+    if keep_dims {
+        out_shape[dim] = 1;
+    } else {
+        out_shape.remove(dim);
+    }
+    Ok(Tensor::new(Arc::new(RwLock::new(storage)), Shape::from(out_shape).into(), false, None))
+}
+
 pub fn argmax_forward(arg: &Tensor, dim: usize, keep_dims: bool) -> Result<Tensor> {
-    require_host(
-        &[arg],
-        "argmax runs on the host only; move the input to the host with to_device(Device::Cpu) first",
-    )?;
     check_select_dim(arg.layout().ndim(), dim, "argmax")?;
+    if arg.device() == crate::Device::Cuda {
+        let shape: Vec<usize> = arg.layout().shape().iter().copied().collect();
+        return argmax_cuda(arg, dim, keep_dims, &shape);
+    }
+    refuse_mps(
+        arg.device(),
+        "argmax is not implemented for MPS tensors; move the input to the host with to_device(Device::Cpu) first",
+    )?;
     let shape: Vec<usize> = arg.layout().shape().iter().copied().collect();
     let (outer, dim_size, inner) = split_dim(&shape, dim);
     assert!(dim_size > 0, "argmax requires a non-empty dimension");
@@ -1807,19 +1820,35 @@ fn topk_positions_f32(
     out
 }
 
+/// Runs top-k on CUDA, returning compact (values, I64 indices) on the device.
+fn topk_cuda(arg: &Tensor, k: usize, dim: usize, shape: &[usize]) -> Result<(Tensor, Tensor)> {
+    let (values, indices) = arg.storage().topk(arg.layout(), dim, k)?;
+    let mut out_shape = shape.to_vec();
+    out_shape[dim] = k;
+    let layout: Layout = Shape::from(out_shape).into();
+    Ok((
+        Tensor::new(Arc::new(RwLock::new(values)), layout.clone(), false, None),
+        Tensor::new(Arc::new(RwLock::new(indices)), layout, false, None),
+    ))
+}
+
 pub fn topk_forward(arg: &Tensor, k: usize, dim: usize) -> Result<(Tensor, Tensor)> {
-    require_host(
-        &[arg],
-        "topk runs on the host only; move the input to the host with to_device(Device::Cpu) first",
-    )?;
     check_select_dim(arg.layout().ndim(), dim, "topk")?;
     let shape: Vec<usize> = arg.layout().shape().iter().copied().collect();
-    let (outer, dim_size, inner) = split_dim(&shape, dim);
+    let dim_size = shape[dim];
     if k == 0 || k > dim_size {
         return Err(Error::LayoutMismatch(format!(
             "topk: k {k} out of bounds for dim size {dim_size}"
         )));
     }
+    if arg.device() == crate::Device::Cuda {
+        return topk_cuda(arg, k, dim, &shape);
+    }
+    refuse_mps(
+        arg.device(),
+        "topk is not implemented for MPS tensors; move the input to the host with to_device(Device::Cpu) first",
+    )?;
+    let (outer, dim_size, inner) = split_dim(&shape, dim);
     let inputs: Vec<&Tensor> = vec![arg];
     let _profile = profile_output("topk", &inputs, arg.layout().size(), arg.dtype());
 
@@ -1898,12 +1927,26 @@ pub fn topk_forward(arg: &Tensor, k: usize, dim: usize) -> Result<(Tensor, Tenso
     }
 }
 
+/// Runs sort on CUDA, returning compact (values, I64 indices) on the device.
+fn sort_cuda(arg: &Tensor, dim: usize, descending: bool, shape: &[usize]) -> Result<(Tensor, Tensor)> {
+    let (values, indices) = arg.storage().sort(arg.layout(), dim, descending)?;
+    let layout: Layout = Shape::from(shape.to_vec()).into();
+    Ok((
+        Tensor::new(Arc::new(RwLock::new(values)), layout.clone(), false, None),
+        Tensor::new(Arc::new(RwLock::new(indices)), layout, false, None),
+    ))
+}
+
 pub fn sort_forward(arg: &Tensor, dim: usize, descending: bool) -> Result<(Tensor, Tensor)> {
-    require_host(
-        &[arg],
-        "sort runs on the host only; move the input to the host with to_device(Device::Cpu) first",
-    )?;
     check_select_dim(arg.layout().ndim(), dim, "sort")?;
+    if arg.device() == crate::Device::Cuda {
+        let shape: Vec<usize> = arg.layout().shape().iter().copied().collect();
+        return sort_cuda(arg, dim, descending, &shape);
+    }
+    refuse_mps(
+        arg.device(),
+        "sort is not implemented for MPS tensors; move the input to the host with to_device(Device::Cpu) first",
+    )?;
     let shape: Vec<usize> = arg.layout().shape().iter().copied().collect();
     let (outer, dim_size, inner) = split_dim(&shape, dim);
     let inputs: Vec<&Tensor> = vec![arg];

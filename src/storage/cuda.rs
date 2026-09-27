@@ -348,6 +348,71 @@ mod imp {
         if (idx < size) { dst[idx] = mask[idx] ? meta.scalar : src[idx]; }
     }
 
+    // Row-wise selectors: one thread per (outer, inner) output. Buffers are
+    // compact; each row holds dim_size elements spaced by inner. Ties resolve
+    // to the lowest index, matching the host stable order. NaN ordering is
+    // unspecified on both paths.
+    __device__ __forceinline__ float rank_value(float v) { return v; }
+    __device__ __forceinline__ float rank_value(half v) { return __half2float(v); }
+    __device__ __forceinline__ float rank_value(__nv_bfloat16 v) { return __bfloat162float(v); }
+    __device__ __forceinline__ long long rank_value(index_t v) { return v; }
+
+    template <typename T>
+    __global__ void select_argmax_kernel(const T* src, index_t* dst, unsigned int outer, unsigned int dim_size, unsigned int inner) {
+        unsigned int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (out_idx >= outer * inner) return;
+        unsigned int base = (out_idx / inner * dim_size) * inner + out_idx % inner;
+        unsigned int best = 0;
+        for (unsigned int i = 1; i < dim_size; ++i) {
+            if (rank_value(src[base + i * inner]) > rank_value(src[base + best * inner])) best = i;
+        }
+        dst[out_idx] = (index_t)best;
+    }
+
+    extern "C" __global__ void select_argmax_f32(const float* src, index_t* dst, unsigned int outer, unsigned int dim_size, unsigned int inner) { select_argmax_kernel(src, dst, outer, dim_size, inner); }
+    extern "C" __global__ void select_argmax_f16(const half* src, index_t* dst, unsigned int outer, unsigned int dim_size, unsigned int inner) { select_argmax_kernel(src, dst, outer, dim_size, inner); }
+    extern "C" __global__ void select_argmax_bf16(const __nv_bfloat16* src, index_t* dst, unsigned int outer, unsigned int dim_size, unsigned int inner) { select_argmax_kernel(src, dst, outer, dim_size, inner); }
+    extern "C" __global__ void select_argmax_i64(const index_t* src, index_t* dst, unsigned int outer, unsigned int dim_size, unsigned int inner) { select_argmax_kernel(src, dst, outer, dim_size, inner); }
+
+    // Writes the first k ranks per row in order with their indices. k passes
+    // of max (or min) scans; each pass skips elements ranked above the
+    // previous pick, so state stays O(1) and time O(k * dim_size) per row.
+    template <typename T, typename V>
+    __global__ void select_rank_kernel(const T* src, T* dst_vals, index_t* dst_idx, unsigned int outer, unsigned int dim_size, unsigned int inner, unsigned int k, unsigned int descending) {
+        unsigned int out_row = blockIdx.x * blockDim.x + threadIdx.x;
+        if (out_row >= outer * inner) return;
+        unsigned int o = out_row / inner;
+        unsigned int j = out_row % inner;
+        unsigned int base = (o * dim_size) * inner + j;
+        V prev_val = V(0);
+        unsigned int prev_idx = 0;
+        for (unsigned int r = 0; r < k; ++r) {
+            unsigned int best = 0;
+            bool found = false;
+            for (unsigned int i = 0; i < dim_size; ++i) {
+                V v = rank_value(src[base + i * inner]);
+                if (r > 0) {
+                    if (descending ? (v > prev_val || (v == prev_val && i <= prev_idx))
+                                   : (v < prev_val || (v == prev_val && i <= prev_idx))) continue;
+                }
+                if (!found || (descending ? v > rank_value(src[base + best * inner])
+                                           : v < rank_value(src[base + best * inner]))) {
+                    best = i;
+                    found = true;
+                }
+            }
+            dst_vals[(o * k + r) * inner + j] = src[base + best * inner];
+            dst_idx[(o * k + r) * inner + j] = (index_t)best;
+            prev_val = rank_value(src[base + best * inner]);
+            prev_idx = best;
+        }
+    }
+
+    extern "C" __global__ void select_rank_f32(const float* src, float* dst_vals, index_t* dst_idx, unsigned int outer, unsigned int dim_size, unsigned int inner, unsigned int k, unsigned int descending) { select_rank_kernel<float, float>(src, dst_vals, dst_idx, outer, dim_size, inner, k, descending); }
+    extern "C" __global__ void select_rank_f16(const half* src, half* dst_vals, index_t* dst_idx, unsigned int outer, unsigned int dim_size, unsigned int inner, unsigned int k, unsigned int descending) { select_rank_kernel<half, float>(src, dst_vals, dst_idx, outer, dim_size, inner, k, descending); }
+    extern "C" __global__ void select_rank_bf16(const __nv_bfloat16* src, __nv_bfloat16* dst_vals, index_t* dst_idx, unsigned int outer, unsigned int dim_size, unsigned int inner, unsigned int k, unsigned int descending) { select_rank_kernel<__nv_bfloat16, float>(src, dst_vals, dst_idx, outer, dim_size, inner, k, descending); }
+    extern "C" __global__ void select_rank_i64(const index_t* src, index_t* dst_vals, index_t* dst_idx, unsigned int outer, unsigned int dim_size, unsigned int inner, unsigned int k, unsigned int descending) { select_rank_kernel<index_t, long long>(src, dst_vals, dst_idx, outer, dim_size, inner, k, descending); }
+
     // Warp-shuffle sum of 32 floats within a single warp — no __syncthreads needed.
     __device__ __forceinline__ float warp_reduce_sum(float v) {
         #pragma unroll
@@ -1305,6 +1370,60 @@ mod imp {
             Ok(out)
         }
 
+        /// Writes row-wise argmax indices along one dimension as i64.
+        /// Buffers are compact; `outer` and `inner` flank the reduced dim.
+        fn launch_select_argmax<T: DeviceRepr>(
+            &self,
+            kernel: &str,
+            src: &CudaSlice<T>,
+            outer: usize,
+            dim_size: usize,
+            inner: usize,
+        ) -> Result<Self> {
+            let out = unsafe { alloc_uninit::<i64>(&self.runtime, outer * inner) }?;
+            if outer * inner == 0 {
+                return Ok(Self { inner: CudaInner::I64(out), runtime: self.runtime.clone() });
+            }
+            let (o, d, n) = (outer as u32, dim_size as u32, inner as u32);
+            launch_1d!(&self.runtime, kernel, outer * inner, src, &out, &o, &d, &n);
+            Ok(Self { inner: CudaInner::I64(out), runtime: self.runtime.clone() })
+        }
+
+        /// Writes the first `k` ranks per row with their indices. Values keep
+        /// the source dtype; indices are i64. One thread handles each row.
+        fn launch_select_rank<T: DeviceRepr>(
+            &self,
+            kernel: &str,
+            src: &CudaSlice<T>,
+            outer: usize,
+            dim_size: usize,
+            inner: usize,
+            k: usize,
+            descending: bool,
+        ) -> Result<(CudaSlice<T>, CudaSlice<i64>)> {
+            let out_vals = unsafe { alloc_uninit::<T>(&self.runtime, outer * k * inner) }?;
+            let out_idx = unsafe { alloc_uninit::<i64>(&self.runtime, outer * k * inner) }?;
+            if outer * inner == 0 {
+                return Ok((out_vals, out_idx));
+            }
+            let (o, d, n) = (outer as u32, dim_size as u32, inner as u32);
+            let (kk, desc) = (k as u32, u32::from(descending));
+            launch_1d!(
+                &self.runtime,
+                kernel,
+                outer * inner,
+                src,
+                &out_vals,
+                &out_idx,
+                &o,
+                &d,
+                &n,
+                &kk,
+                &desc
+            );
+            Ok((out_vals, out_idx))
+        }
+
         /// Replaces compact i64 source elements with an i64 scalar where the
         /// i64 0/1 mask is set.
         fn launch_select_fill_i64(
@@ -1978,6 +2097,157 @@ mod imp {
             }
         }
 
+        fn argmax(&self, layout: &Layout, dim: usize) -> Result<Self> {
+            let src = self.compact(layout)?;
+            let shape = layout.shape();
+            let outer: usize = shape.iter().take(dim).product();
+            let dim_size = shape[dim];
+            let inner: usize = shape.iter().skip(dim + 1).product();
+            assert!(dim_size > 0, "argmax requires a non-empty dimension");
+            match &src.inner {
+                CudaInner::F16(data) => {
+                    src.launch_select_argmax("select_argmax_f16", data, outer, dim_size, inner)
+                }
+                CudaInner::BF16(data) => {
+                    src.launch_select_argmax("select_argmax_bf16", data, outer, dim_size, inner)
+                }
+                CudaInner::F32(data) => {
+                    src.launch_select_argmax("select_argmax_f32", data, outer, dim_size, inner)
+                }
+                CudaInner::I64(data) => {
+                    src.launch_select_argmax("select_argmax_i64", data, outer, dim_size, inner)
+                }
+            }
+        }
+
+        fn topk(&self, layout: &Layout, dim: usize, k: usize) -> Result<(Self, Self)> {
+            let src = self.compact(layout)?;
+            let shape = layout.shape();
+            let outer: usize = shape.iter().take(dim).product();
+            let dim_size = shape[dim];
+            let inner: usize = shape.iter().skip(dim + 1).product();
+            let wrap = |vals: CudaInner, idx: CudaSlice<i64>| {
+                (
+                    Self { inner: vals, runtime: src.runtime.clone() },
+                    Self { inner: CudaInner::I64(idx), runtime: src.runtime.clone() },
+                )
+            };
+            match &src.inner {
+                CudaInner::F16(data) => {
+                    let (vals, idx) = src.launch_select_rank(
+                        "select_rank_f16",
+                        data,
+                        outer,
+                        dim_size,
+                        inner,
+                        k,
+                        true,
+                    )?;
+                    Ok(wrap(CudaInner::F16(vals), idx))
+                }
+                CudaInner::BF16(data) => {
+                    let (vals, idx) = src.launch_select_rank(
+                        "select_rank_bf16",
+                        data,
+                        outer,
+                        dim_size,
+                        inner,
+                        k,
+                        true,
+                    )?;
+                    Ok(wrap(CudaInner::BF16(vals), idx))
+                }
+                CudaInner::F32(data) => {
+                    let (vals, idx) = src.launch_select_rank(
+                        "select_rank_f32",
+                        data,
+                        outer,
+                        dim_size,
+                        inner,
+                        k,
+                        true,
+                    )?;
+                    Ok(wrap(CudaInner::F32(vals), idx))
+                }
+                CudaInner::I64(data) => {
+                    let (vals, idx) = src.launch_select_rank(
+                        "select_rank_i64",
+                        data,
+                        outer,
+                        dim_size,
+                        inner,
+                        k,
+                        true,
+                    )?;
+                    Ok(wrap(CudaInner::I64(vals), idx))
+                }
+            }
+        }
+
+        fn sort(&self, layout: &Layout, dim: usize, descending: bool) -> Result<(Self, Self)> {
+            let src = self.compact(layout)?;
+            let shape = layout.shape();
+            let outer: usize = shape.iter().take(dim).product();
+            let dim_size = shape[dim];
+            let inner: usize = shape.iter().skip(dim + 1).product();
+            let wrap = |vals: CudaInner, idx: CudaSlice<i64>| {
+                (
+                    Self { inner: vals, runtime: src.runtime.clone() },
+                    Self { inner: CudaInner::I64(idx), runtime: src.runtime.clone() },
+                )
+            };
+            match &src.inner {
+                CudaInner::F16(data) => {
+                    let (vals, idx) = src.launch_select_rank(
+                        "select_rank_f16",
+                        data,
+                        outer,
+                        dim_size,
+                        inner,
+                        dim_size,
+                        descending,
+                    )?;
+                    Ok(wrap(CudaInner::F16(vals), idx))
+                }
+                CudaInner::BF16(data) => {
+                    let (vals, idx) = src.launch_select_rank(
+                        "select_rank_bf16",
+                        data,
+                        outer,
+                        dim_size,
+                        inner,
+                        dim_size,
+                        descending,
+                    )?;
+                    Ok(wrap(CudaInner::BF16(vals), idx))
+                }
+                CudaInner::F32(data) => {
+                    let (vals, idx) = src.launch_select_rank(
+                        "select_rank_f32",
+                        data,
+                        outer,
+                        dim_size,
+                        inner,
+                        dim_size,
+                        descending,
+                    )?;
+                    Ok(wrap(CudaInner::F32(vals), idx))
+                }
+                CudaInner::I64(data) => {
+                    let (vals, idx) = src.launch_select_rank(
+                        "select_rank_i64",
+                        data,
+                        outer,
+                        dim_size,
+                        inner,
+                        dim_size,
+                        descending,
+                    )?;
+                    Ok(wrap(CudaInner::I64(vals), idx))
+                }
+            }
+        }
+
         fn scatter_add(
             &self,
             layout: &Layout,
@@ -2630,6 +2900,15 @@ mod imp {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn index_select(&self, _: &Layout, _: usize, _: &Self, _: &Layout) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn argmax(&self, _: &Layout, _: usize) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn topk(&self, _: &Layout, _: usize, _: usize) -> Result<(Self, Self)> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn sort(&self, _: &Layout, _: usize, _: bool) -> Result<(Self, Self)> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn where_cond(

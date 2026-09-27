@@ -611,9 +611,8 @@ impl Tensor {
     /// Returns indices of maximum values along `dim` as `I64`.
     ///
     /// This is a non-differentiable selector. The output drops `dim` unless
-    /// `keep_dims` sets it to size 1. Runs on the host only: panics on
-    /// accelerator tensors, so move the input with
-    /// `to_device(Device::Cpu)` first.
+    /// `keep_dims` sets it to size 1. Runs on device for CUDA; MPS inputs
+    /// panic, so move the input with `to_device(Device::Cpu)` first.
     pub fn argmax(&self, dim: usize, keep_dims: bool) -> Tensor {
         ops::argmax_forward(self, dim, keep_dims).unwrap()
     }
@@ -621,17 +620,16 @@ impl Tensor {
     /// Returns the `k` largest values along `dim` with their indices.
     ///
     /// Values are sorted descending. Both outputs are non-differentiable.
-    /// Runs on the host only: panics on accelerator tensors, so move the
-    /// input with `to_device(Device::Cpu)` first.
+    /// Runs on device for CUDA; MPS inputs panic, so move the input with
+    /// `to_device(Device::Cpu)` first.
     pub fn topk(&self, k: usize, dim: usize) -> (Tensor, Tensor) {
         ops::topk_forward(self, k, dim).unwrap()
     }
 
     /// Sorts values along `dim`, returning values with their indices.
     ///
-    /// Both outputs are non-differentiable. Runs on the host only: panics
-    /// on accelerator tensors, so move the input with
-    /// `to_device(Device::Cpu)` first.
+    /// Both outputs are non-differentiable. Runs on device for CUDA; MPS
+    /// inputs panic, so move the input with `to_device(Device::Cpu)` first.
     pub fn sort(&self, dim: usize, descending: bool) -> (Tensor, Tensor) {
         ops::sort_forward(self, dim, descending).unwrap()
     }
