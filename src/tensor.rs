@@ -611,7 +611,9 @@ impl Tensor {
     /// Returns indices of maximum values along `dim` as `I64`.
     ///
     /// This is a non-differentiable selector. The output drops `dim` unless
-    /// `keep_dims` sets it to size 1.
+    /// `keep_dims` sets it to size 1. Runs on the host only: panics on
+    /// accelerator tensors, so move the input with
+    /// `to_device(Device::Cpu)` first.
     pub fn argmax(&self, dim: usize, keep_dims: bool) -> Tensor {
         ops::argmax_forward(self, dim, keep_dims).unwrap()
     }
@@ -619,13 +621,17 @@ impl Tensor {
     /// Returns the `k` largest values along `dim` with their indices.
     ///
     /// Values are sorted descending. Both outputs are non-differentiable.
+    /// Runs on the host only: panics on accelerator tensors, so move the
+    /// input with `to_device(Device::Cpu)` first.
     pub fn topk(&self, k: usize, dim: usize) -> (Tensor, Tensor) {
         ops::topk_forward(self, k, dim).unwrap()
     }
 
     /// Sorts values along `dim`, returning values with their indices.
     ///
-    /// Both outputs are non-differentiable.
+    /// Both outputs are non-differentiable. Runs on the host only: panics
+    /// on accelerator tensors, so move the input with
+    /// `to_device(Device::Cpu)` first.
     pub fn sort(&self, dim: usize, descending: bool) -> (Tensor, Tensor) {
         ops::sort_forward(self, dim, descending).unwrap()
     }
@@ -637,8 +643,10 @@ impl Tensor {
 
     /// Picks from `on_true` where `self` is nonzero, else from `on_false`.
     ///
-    /// All three tensors must share one shape and the branches one dtype.
-    /// Gradient routes to the picked branch. No gradient flows into `self`.
+    /// All three tensors must share one shape, one device, and the branches
+    /// one dtype. Gradient routes to the picked branch. No gradient flows
+    /// into `self`. Runs on device for CUDA; MPS inputs panic, so move them
+    /// with `to_device(Device::Cpu)` first.
     pub fn where_cond(&self, on_true: &Tensor, on_false: &Tensor) -> Tensor {
         ops::WhereCond::new(self.clone(), on_true.clone(), on_false.clone())
             .unwrap()
@@ -648,7 +656,9 @@ impl Tensor {
 
     /// Replaces values with `value` where `mask` is nonzero.
     ///
-    /// Gradient is zeroed at masked positions.
+    /// `self` and `mask` must share one shape and one device. Gradient is
+    /// zeroed at masked positions. Runs on device for CUDA; MPS inputs
+    /// panic, so move them with `to_device(Device::Cpu)` first.
     pub fn masked_fill(&self, mask: &Tensor, value: f64) -> Tensor {
         ops::MaskedFill::new(self.clone(), mask.clone(), value).unwrap().forward().unwrap()
     }

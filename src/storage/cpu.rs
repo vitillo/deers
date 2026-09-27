@@ -256,12 +256,7 @@ fn pick<D: WithDType + Copy>(
 }
 
 /// Replaces strided source elements with `value` where the compact mask is set.
-fn fill<D: WithDType + Copy>(
-    mask: &[bool],
-    src: &CpuStorage,
-    layout: &Layout,
-    value: D,
-) -> Vec<D> {
+fn fill<D: WithDType + Copy>(mask: &[bool], src: &CpuStorage, layout: &Layout, value: D) -> Vec<D> {
     src.iter(layout).enumerate().map(|(i, v)| if mask[i] { value } else { *v }).collect()
 }
 

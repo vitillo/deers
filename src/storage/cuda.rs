@@ -1966,7 +1966,8 @@ mod imp {
                     Ok(Self { inner: CudaInner::BF16(out), runtime: src.runtime.clone() })
                 }
                 CudaInner::F32(data) => {
-                    let out = src.launch_select_fill("select_fill_f32", mask, data, value as f32)?;
+                    let out =
+                        src.launch_select_fill("select_fill_f32", mask, data, value as f32)?;
                     Ok(Self { inner: CudaInner::F32(out), runtime: src.runtime.clone() })
                 }
                 CudaInner::I64(data) => {
