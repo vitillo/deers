@@ -112,8 +112,8 @@ fn ignore_mask(
     // One scalar download for the mean divisor; the F32 sum of 0/1 flags is
     // exact for every batch that fits in memory.
     let kept =
-        keep_i64.to_dtype(crate::DType::F32).unwrap().sum(vec![0], false).to_vec::<f32>().unwrap()[0]
-            as usize;
+        keep_i64.to_dtype(crate::DType::F32).unwrap().sum(vec![0], false).to_vec::<f32>().unwrap()
+            [0] as usize;
     (safe_targets, Some(keep), kept)
 }
 
@@ -263,8 +263,7 @@ mod tests {
         // Arrange
         let data = vec![-0.9f32, -1.2, -2.4, -0.4, -1.9, -1.5];
         let targets = Tensor::from_vec(vec![1i64, -100], (2,), Device::Cpu);
-        let log_probs_f32 =
-            Tensor::from_vec(data.clone(), (2, 3), Device::Cpu).attach();
+        let log_probs_f32 = Tensor::from_vec(data.clone(), (2, 3), Device::Cpu).attach();
         let log_probs_f16 = Tensor::from_vec(
             data.iter().map(|&v| half::f16::from_f32(v)).collect::<Vec<_>>(),
             (2, 3),
@@ -273,14 +272,12 @@ mod tests {
         .attach();
 
         // Act
-        let loss_f32 =
-            nll_loss_with_options(&log_probs_f32, &targets, Reduction::Mean, Some(-100))
-                .to_vec::<f32>()
-                .unwrap();
-        let loss_f16 =
-            nll_loss_with_options(&log_probs_f16, &targets, Reduction::Mean, Some(-100))
-                .to_vec::<half::f16>()
-                .unwrap();
+        let loss_f32 = nll_loss_with_options(&log_probs_f32, &targets, Reduction::Mean, Some(-100))
+            .to_vec::<f32>()
+            .unwrap();
+        let loss_f16 = nll_loss_with_options(&log_probs_f16, &targets, Reduction::Mean, Some(-100))
+            .to_vec::<half::f16>()
+            .unwrap();
         let grads = nll_loss_with_options(&log_probs_f16, &targets, Reduction::Mean, Some(-100))
             .backward()
             .unwrap();

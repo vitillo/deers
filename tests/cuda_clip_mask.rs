@@ -35,14 +35,8 @@ fn cuda_f16_clip_norm_above_f16_range() {
 
     // Act
     let norm = clip_grad_norm(std::slice::from_ref(&x), &mut grads, 1.0).unwrap();
-    let clipped: Vec<f32> = grads
-        .get(x.id())
-        .unwrap()
-        .to_vec::<f16>()
-        .unwrap()
-        .iter()
-        .map(|v| v.to_f32())
-        .collect();
+    let clipped: Vec<f32> =
+        grads.get(x.id()).unwrap().to_vec::<f16>().unwrap().iter().map(|v| v.to_f32()).collect();
 
     // Assert
     assert!((norm - 50_000.0).abs() < 5.0, "norm={norm}");
@@ -57,12 +51,8 @@ fn cuda_ignore_mask_mean_and_all_ignored() {
         return;
     }
     let device = Device::Cuda;
-    let log_probs = Tensor::from_vec(
-        vec![-0.9f32, -1.2, -2.4, -0.4, -1.9, -1.5],
-        (2, 3),
-        device,
-    )
-    .attach();
+    let log_probs =
+        Tensor::from_vec(vec![-0.9f32, -1.2, -2.4, -0.4, -1.9, -1.5], (2, 3), device).attach();
     let targets = Tensor::from_vec(vec![1i64, -100], (2,), device);
     let all_ignored = Tensor::from_vec(vec![-100i64, -100], (2,), device);
 
@@ -70,8 +60,9 @@ fn cuda_ignore_mask_mean_and_all_ignored() {
     let loss = nll_loss_with_options(&log_probs, &targets, Reduction::Mean, Some(-100))
         .to_vec::<f32>()
         .unwrap();
-    let grads =
-        nll_loss_with_options(&log_probs, &targets, Reduction::Mean, Some(-100)).backward().unwrap();
+    let grads = nll_loss_with_options(&log_probs, &targets, Reduction::Mean, Some(-100))
+        .backward()
+        .unwrap();
     let grad: Vec<f32> = grads.get(log_probs.id()).unwrap().to_vec().unwrap();
     let zero = nll_loss_with_options(&log_probs, &all_ignored, Reduction::Mean, Some(-100))
         .to_vec::<f32>()

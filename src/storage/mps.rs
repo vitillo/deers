@@ -1258,13 +1258,8 @@ mod imp {
                 (Self::ne_scalar_kernel_name(dtype), self.accelerated(dtype))
             {
                 let meta = Self::strided_meta(layout);
-                let scalar_meta = ScalarMeta {
-                    input: meta,
-                    scalar: scalar as f32,
-                    pad0: 0,
-                    pad1: 0,
-                    pad2: 0,
-                };
+                let scalar_meta =
+                    ScalarMeta { input: meta, scalar: scalar as f32, pad0: 0, pad1: 0, pad2: 0 };
                 if dtype == DType::F16 {
                     let out = ctx.empty_f16_buffer(layout.size());
                     ctx.dispatch_1d(kernel, layout.size(), |encoder| {
@@ -1362,11 +1357,9 @@ mod imp {
                     return Ok(Self::from_cpu_storage(inner));
                 }
             };
-            if let (Some((ctx, cond, _)), Some((_, on_true, _)), Some((_, on_false, _))) = (
-                self.accelerated(dtype),
-                on_true.accelerated(dtype),
-                on_false.accelerated(dtype),
-            ) {
+            if let (Some((ctx, cond, _)), Some((_, on_true, _)), Some((_, on_false, _))) =
+                (self.accelerated(dtype), on_true.accelerated(dtype), on_false.accelerated(dtype))
+            {
                 let out = match dtype {
                     DType::F16 => ctx.empty_f16_buffer(cond_layout.size()),
                     DType::F32 => ctx.empty_f32_buffer(cond_layout.size()),
@@ -2334,14 +2327,7 @@ mod imp {
         fn ne_scalar_i64(&self, _: &Layout, _: i64) -> Result<Self> {
             Self::unavailable()
         }
-        fn select(
-            &self,
-            _: &Layout,
-            _: &Self,
-            _: &Layout,
-            _: &Self,
-            _: &Layout,
-        ) -> Result<Self> {
+        fn select(&self, _: &Layout, _: &Self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
             Self::unavailable()
         }
         fn reduce<O: ReduceOp>(&self, _: &Layout, _: &mut Self) -> Result<()> {
