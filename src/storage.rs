@@ -358,8 +358,9 @@ pub trait BackendStorage: Sized {
     /// into `self`, where destination run `n` starts at
     /// `dst_base + n * dst_stride`.
     ///
-    /// `src_layout.size()` must equal `blocks * block_len`. A strided source
-    /// is compacted first, so callers pass any layout.
+    /// `src_layout.size()` must equal `blocks * block_len`. The source is
+    /// read in view order through its strides (repeat broadcast views feed
+    /// straight in), so callers pass any layout with no pre-compact.
     fn copy_blocks_into(
         &mut self,
         src: &Self,
