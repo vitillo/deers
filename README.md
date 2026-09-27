@@ -90,7 +90,7 @@ See [`examples/mnist_train.rs`](examples/mnist_train.rs) for a simpler MNIST cla
 
 **Optimizers** — SGD, AdamW (decoupled weight decay with per-parameter-group overrides, bias correction)
 
-**LR Schedules** — warmup/constant/warmdown scheduler
+**LR Schedules** — WarmupWarmdown, CosineDecay, StepDecay, ReduceOnPlateau, OneCycle
 
 **Losses** — `cross_entropy`, `nll_loss` (`*_with_options` variants add `Reduction::{Mean, Sum, None}` and `ignore_index`)
 

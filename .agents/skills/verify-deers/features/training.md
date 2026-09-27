@@ -2,7 +2,7 @@
 
 ## Sub-features
 
-SGD and AdamW (incl. AdamW state save/load), WarmupWarmdown LR schedule, clip_grad_norm, cross_entropy and nll_loss, safetensors checkpoints (incl. sharded Qwen loads), MNIST and TinyStories example trainers, the `qwen3_run` inference example, `eval` perplexity scoring, `sample` (temperature/top-k/top-p), the `tokenizer` family (GPT-2, Qwen3, Qwen3.5), and `dataset` loaders.
+SGD and AdamW (incl. AdamW state save/load), LR schedules (WarmupWarmdown, CosineDecay, StepDecay, ReduceOnPlateau, OneCycle), clip_grad_norm, cross_entropy and nll_loss, safetensors checkpoints (incl. sharded Qwen loads), MNIST and TinyStories example trainers, the `qwen3_run` inference example, `eval` perplexity scoring, `sample` (temperature/top-k/top-p), the `tokenizer` family (GPT-2, Qwen3, Qwen3.5), and `dataset` loaders.
 
 ## How to get to it (user POV)
 
