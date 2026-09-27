@@ -3230,7 +3230,7 @@ fn scalar_compare_i64_conforms() {
         .into_iter()
         .map(|device| {
             let input = Tensor::from_vec(targets.clone(), (5,), device);
-            let ne = input.ne_scalar(-100.0).to_vec::<i64>().unwrap();
+            let ne = input.ne_scalar_i64(-100).to_vec::<i64>().unwrap();
             (device, ne)
         })
         .collect();
@@ -3269,7 +3269,7 @@ fn scalar_compare_strided_cpu() {
     let transposed = input.transpose(None);
 
     // Act
-    let ne = transposed.ne_scalar(-100.0).to_vec::<i64>().unwrap();
+    let ne = transposed.ne_scalar_i64(-100).to_vec::<i64>().unwrap();
 
     // Assert: the strided (3, 2) view compares in logical order.
     assert_eq!(ne, vec![1, 1, 1, 0, 0, 1]);
@@ -3281,7 +3281,7 @@ fn scalar_compare_carries_no_gradient() {
     let input = Tensor::from_vec(vec![1i64, -100, 2], (3,), Device::Cpu);
 
     // Act
-    let mask = input.ne_scalar(-100.0);
+    let mask = input.ne_scalar_i64(-100);
 
     // Assert
     assert!(!mask.requires_grad());

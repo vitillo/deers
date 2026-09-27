@@ -929,7 +929,6 @@ mod imp {
             match dtype {
                 DType::F16 => Some("ne_scalar_f16"),
                 DType::F32 => Some("ne_scalar_f32"),
-                DType::I64 => Some("ne_scalar_i64"),
                 _ => None,
             }
         }
@@ -1250,32 +1249,15 @@ mod imp {
 
         fn ne_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self> {
             let dtype = self.dtype();
+            if dtype == DType::I64 {
+                return Err(crate::error::Error::DTypeMismatch(
+                    "ne_scalar requires float dtype".into(),
+                ));
+            }
             if let (Some(kernel), Some((ctx, input, _))) =
                 (Self::ne_scalar_kernel_name(dtype), self.accelerated(dtype))
             {
                 let meta = Self::strided_meta(layout);
-                if dtype == DType::I64 {
-                    let out = ctx.empty_i64_buffer(layout.size());
-                    let params = ScalarI64Meta {
-                        input: meta,
-                        scalar: scalar as i64,
-                        pad0: 0,
-                        pad1: 0,
-                    };
-                    ctx.dispatch_1d(kernel, layout.size(), |encoder| {
-                        encoder.set_buffer(0, Some(input), 0);
-                        encoder.set_buffer(1, Some(&out), 0);
-                        MpsContext::set_params(encoder, 2, &params);
-                    });
-                    return Ok(Self {
-                        inner: MpsInner::Accelerated {
-                            ctx: ctx.clone(),
-                            buffer: out,
-                            len: layout.size(),
-                            dtype,
-                        },
-                    });
-                }
                 let scalar_meta = ScalarMeta {
                     input: meta,
                     scalar: scalar as f32,
@@ -1316,6 +1298,35 @@ mod imp {
             }
 
             let inner = self.as_cpu_storage().ne_scalar(layout, scalar)?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
+        fn ne_scalar_i64(&self, layout: &Layout, scalar: i64) -> Result<Self> {
+            let dtype = self.dtype();
+            if dtype != DType::I64 {
+                return Err(crate::error::Error::DTypeMismatch(
+                    "ne_scalar_i64 requires i64 dtype".into(),
+                ));
+            }
+            if let Some((ctx, input, _)) = self.accelerated(dtype) {
+                let meta = Self::strided_meta(layout);
+                let out = ctx.empty_i64_buffer(layout.size());
+                let params = ScalarI64Meta { input: meta, scalar, pad0: 0, pad1: 0 };
+                ctx.dispatch_1d("ne_scalar_i64", layout.size(), |encoder| {
+                    encoder.set_buffer(0, Some(input), 0);
+                    encoder.set_buffer(1, Some(&out), 0);
+                    MpsContext::set_params(encoder, 2, &params);
+                });
+                return Ok(Self {
+                    inner: MpsInner::Accelerated {
+                        ctx: ctx.clone(),
+                        buffer: out,
+                        len: layout.size(),
+                        dtype,
+                    },
+                });
+            }
+            let inner = self.as_cpu_storage().ne_scalar_i64(layout, scalar)?;
             Ok(Self::from_cpu_storage(inner))
         }
 
@@ -2318,6 +2329,9 @@ mod imp {
             Self::unavailable()
         }
         fn ne_scalar(&self, _: &Layout, _: f64) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn ne_scalar_i64(&self, _: &Layout, _: i64) -> Result<Self> {
             Self::unavailable()
         }
         fn select(

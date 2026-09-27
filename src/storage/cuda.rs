@@ -266,13 +266,13 @@ mod imp {
     #define DEFINE_CMP_SCALAR_F16(name, op) \
     extern "C" __global__ void name(const half* src, half* dst, unsigned int size, ScalarMeta meta) { \
         unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x; \
-        if (idx < size) { dst[idx] = (__half2float(src[idx]) op meta.scalar ? __float2half(1.0f) : __float2half(0.0f)); } \
+        if (idx < size) { dst[idx] = (__half2float(src[idx]) op __half2float(__float2half(meta.scalar)) ? __float2half(1.0f) : __float2half(0.0f)); } \
     }
 
     #define DEFINE_CMP_SCALAR_BF16(name, op) \
     extern "C" __global__ void name(const __nv_bfloat16* src, __nv_bfloat16* dst, unsigned int size, ScalarMeta meta) { \
         unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x; \
-        if (idx < size) { dst[idx] = (__bfloat162float(src[idx]) op meta.scalar ? __float2bfloat16(1.0f) : __float2bfloat16(0.0f)); } \
+        if (idx < size) { dst[idx] = (__bfloat162float(src[idx]) op __bfloat162float(__float2bfloat16(meta.scalar)) ? __float2bfloat16(1.0f) : __float2bfloat16(0.0f)); } \
     }
 
     DEFINE_CMP_SCALAR_F32(ne_scalar_f32, !=)
@@ -1394,9 +1394,19 @@ mod imp {
                 CudaInner::F32(src) => {
                     compact.launch_scalar_f32("ne_scalar_f32", src, scalar as f32)
                 }
-                CudaInner::I64(src) => {
-                    compact.launch_cmp_i64("ne_scalar_i64", src, scalar as i64)
+                CudaInner::I64(_) => {
+                    Err(Error::DTypeMismatch("ne_scalar requires float dtype".into()))
                 }
+            }
+        }
+
+        fn ne_scalar_i64(&self, layout: &Layout, scalar: i64) -> Result<Self> {
+            let compact = self.compact(layout)?;
+            match &compact.inner {
+                CudaInner::I64(src) => {
+                    compact.launch_cmp_i64("ne_scalar_i64", src, scalar)
+                }
+                _ => Err(Error::DTypeMismatch("ne_scalar_i64 requires i64 dtype".into())),
             }
         }
 
@@ -2399,6 +2409,9 @@ mod imp {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn ne_scalar(&self, _: &Layout, _: f64) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn ne_scalar_i64(&self, _: &Layout, _: i64) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn select(

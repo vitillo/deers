@@ -425,12 +425,16 @@ impl BackendStorage for CpuStorage {
                     self.iter(layout).map(|v: &f32| if *v != s { 1.0 } else { 0.0 }).collect(),
                 ))
             }
-            CpuStorage::I64(_) => {
-                let s = scalar as i64;
-                Ok(CpuStorage::I64(
-                    self.iter(layout).map(|v: &i64| if *v != s { 1 } else { 0 }).collect(),
-                ))
-            }
+            CpuStorage::I64(_) => Err(Error::DTypeMismatch("ne_scalar requires float dtype".into())),
+        }
+    }
+
+    fn ne_scalar_i64(&self, layout: &Layout, scalar: i64) -> Result<Self> {
+        match self {
+            CpuStorage::I64(_) => Ok(CpuStorage::I64(
+                self.iter(layout).map(|v: &i64| if *v != scalar { 1 } else { 0 }).collect(),
+            )),
+            _ => Err(Error::DTypeMismatch("ne_scalar_i64 requires i64 dtype".into())),
         }
     }
 

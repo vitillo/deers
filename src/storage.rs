@@ -238,6 +238,9 @@ pub trait BackendStorage: Sized {
     /// Element-wise `!= scalar`: 1 where different, else 0, in the input dtype.
     /// Returns compact storage and carries no gradient.
     fn ne_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self>;
+    /// Element-wise `!= scalar` for integer storage: 1 where different, else 0.
+    /// Returns compact storage and carries no gradient.
+    fn ne_scalar_i64(&self, layout: &Layout, scalar: i64) -> Result<Self>;
     /// Picks from `on_true` where `cond` is nonzero, else from `on_false`.
     /// All three share one dtype and shape; returns compact storage.
     fn select(
@@ -379,6 +382,14 @@ impl BackendStorage for Storage {
             Storage::Cpu(storage) => Ok(Self::Cpu(storage.ne_scalar(layout, scalar)?)),
             Storage::Cuda(storage) => Ok(Self::Cuda(storage.ne_scalar(layout, scalar)?)),
             Storage::Mps(storage) => Ok(Self::Mps(storage.ne_scalar(layout, scalar)?)),
+        }
+    }
+
+    fn ne_scalar_i64(&self, layout: &Layout, scalar: i64) -> Result<Self> {
+        match self {
+            Storage::Cpu(storage) => Ok(Self::Cpu(storage.ne_scalar_i64(layout, scalar)?)),
+            Storage::Cuda(storage) => Ok(Self::Cuda(storage.ne_scalar_i64(layout, scalar)?)),
+            Storage::Mps(storage) => Ok(Self::Mps(storage.ne_scalar_i64(layout, scalar)?)),
         }
     }
 
