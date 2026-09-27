@@ -1192,8 +1192,10 @@ pub struct FusedRope {
     x: Tensor,
     cos: Tensor,
     sin: Tensor,
-    /// Saved compacted `(input, cos, sin)` for the backward pass.
-    saved: Option<(Tensor, Tensor, Tensor)>,
+    /// Saved `(cos, sin)` for the backward pass, uncompacted: the backward
+    /// gradient math broadcasts either way, so no forward compact is spent
+    /// (those copies ran even under `no_grad` before).
+    saved: Option<(Tensor, Tensor)>,
 }
 
 impl FusedRope {
@@ -1229,9 +1231,7 @@ impl TensorOp for FusedRope {
         let x_c = self.x.compact();
         // Cos/sin stay uncompacted: the kernel reads the narrowed cache rows
         // through their view offset, saving two tiny compacts per rope.
-        // Backward keeps compacted copies for its broadcast gradient math.
-        let cos_c = self.cos.compact();
-        let sin_c = self.sin.compact();
+        // Backward keeps uncompacted clones for its broadcast gradient math.
         let out_storage = {
             let x_storage = x_c.storage();
             let cos_storage = self.cos.storage();
@@ -1251,7 +1251,7 @@ impl TensorOp for FusedRope {
         };
         let output =
             Tensor::new(Arc::new(RwLock::new(out_storage)), self.x.layout().clone(), false, None);
-        self.saved = Some((x_c, cos_c, sin_c));
+        self.saved = Some((self.cos.clone(), self.sin.clone()));
         Ok(Tensor::new(
             output.storage_clone(),
             output.layout().clone(),
@@ -1261,7 +1261,7 @@ impl TensorOp for FusedRope {
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
-        let (_, cos, sin) = self.saved.as_ref().expect("forward must run before backward");
+        let (cos, sin) = self.saved.as_ref().expect("forward must run before backward");
         let half_dim = self.x.layout().shape()[3] / 2;
         let grad_c = out_grad.compact();
         // y1 = x1*c - x2*s, y2 = x1*s + x2*c, so
