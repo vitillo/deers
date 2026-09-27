@@ -42,6 +42,15 @@ struct ScalarMeta {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct ScalarI64Meta {
+    input: StridedMeta,
+    scalar: i64,
+    pad0: u32,
+    pad1: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct BinaryMeta {
     lhs: StridedMeta,
     rhs: StridedMeta,
@@ -908,6 +917,18 @@ mod imp {
             }
         }
 
+        fn cmp_scalar_kernel_name(eq: bool, dtype: DType) -> Option<&'static str> {
+            match (eq, dtype) {
+                (true, DType::F16) => Some("eq_scalar_f16"),
+                (true, DType::F32) => Some("eq_scalar_f32"),
+                (true, DType::I64) => Some("eq_scalar_i64"),
+                (false, DType::F16) => Some("ne_scalar_f16"),
+                (false, DType::F32) => Some("ne_scalar_f32"),
+                (false, DType::I64) => Some("ne_scalar_i64"),
+                _ => None,
+            }
+        }
+
         fn binary_kernel_name<O: BinaryOp>(dtype: DType) -> Option<&'static str> {
             match (O::KERNEL, dtype) {
                 ("add", DType::F16) => Some("add_f16"),
@@ -1220,6 +1241,89 @@ mod imp {
                 other_layout,
             )?;
             Ok(Self::from_cpu_storage(inner))
+        }
+
+        fn cmp_scalar(&self, layout: &Layout, scalar: f64, eq: bool) -> Result<Self> {
+            let dtype = self.dtype();
+            if let (Some(kernel), Some((ctx, input, _))) =
+                (Self::cmp_scalar_kernel_name(eq, dtype), self.accelerated(dtype))
+            {
+                let meta = Self::strided_meta(layout);
+                if dtype == DType::I64 {
+                    let out = ctx.empty_i64_buffer(layout.size());
+                    let params = ScalarI64Meta {
+                        input: meta,
+                        scalar: scalar as i64,
+                        pad0: 0,
+                        pad1: 0,
+                    };
+                    ctx.dispatch_1d(kernel, layout.size(), |encoder| {
+                        encoder.set_buffer(0, Some(input), 0);
+                        encoder.set_buffer(1, Some(&out), 0);
+                        MpsContext::set_params(encoder, 2, &params);
+                    });
+                    return Ok(Self {
+                        inner: MpsInner::Accelerated {
+                            ctx: ctx.clone(),
+                            buffer: out,
+                            len: layout.size(),
+                            dtype,
+                        },
+                    });
+                }
+                let scalar_meta = ScalarMeta {
+                    input: meta,
+                    scalar: scalar as f32,
+                    pad0: 0,
+                    pad1: 0,
+                    pad2: 0,
+                };
+                if dtype == DType::F16 {
+                    let out = ctx.empty_f16_buffer(layout.size());
+                    ctx.dispatch_1d(kernel, layout.size(), |encoder| {
+                        encoder.set_buffer(0, Some(input), 0);
+                        encoder.set_buffer(1, Some(&out), 0);
+                        MpsContext::set_params(encoder, 2, &scalar_meta);
+                    });
+                    return Ok(Self {
+                        inner: MpsInner::Accelerated {
+                            ctx: ctx.clone(),
+                            buffer: out,
+                            len: layout.size(),
+                            dtype,
+                        },
+                    });
+                }
+                let out = ctx.empty_f32_buffer(layout.size());
+                ctx.dispatch_1d(kernel, layout.size(), |encoder| {
+                    encoder.set_buffer(0, Some(input), 0);
+                    encoder.set_buffer(1, Some(&out), 0);
+                    MpsContext::set_params(encoder, 2, &scalar_meta);
+                });
+                return Ok(Self {
+                    inner: MpsInner::Accelerated {
+                        ctx: ctx.clone(),
+                        buffer: out,
+                        len: layout.size(),
+                        dtype,
+                    },
+                });
+            }
+
+            let inner = if eq {
+                self.as_cpu_storage().eq_scalar(layout, scalar)?
+            } else {
+                self.as_cpu_storage().ne_scalar(layout, scalar)?
+            };
+            Ok(Self::from_cpu_storage(inner))
+        }
+
+        fn eq_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self> {
+            self.cmp_scalar(layout, scalar, true)
+        }
+
+        fn ne_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self> {
+            self.cmp_scalar(layout, scalar, false)
         }
 
         fn reduce<O: ReduceOp>(&self, layout: &Layout, dst: &mut Self) -> Result<()> {
@@ -2143,6 +2247,12 @@ mod imp {
             Self::unavailable()
         }
         fn binary_op<O: BinaryOp>(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn eq_scalar(&self, _: &Layout, _: f64) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn ne_scalar(&self, _: &Layout, _: f64) -> Result<Self> {
             Self::unavailable()
         }
         fn reduce<O: ReduceOp>(&self, _: &Layout, _: &mut Self) -> Result<()> {

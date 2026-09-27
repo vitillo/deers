@@ -257,6 +257,44 @@ mod imp {
     DEFINE_CAST(cast_i64_f16, long long, half, __float2half((float)x))
     DEFINE_CAST(cast_i64_bf16, long long, __nv_bfloat16, __float2bfloat16((float)x))
 
+    #define DEFINE_CMP_SCALAR_F32(name, op) \
+    extern "C" __global__ void name(const float* src, float* dst, unsigned int size, ScalarMeta meta) { \
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x; \
+        if (idx < size) { dst[idx] = (src[idx] op meta.scalar ? 1.0f : 0.0f); } \
+    }
+
+    #define DEFINE_CMP_SCALAR_F16(name, op) \
+    extern "C" __global__ void name(const half* src, half* dst, unsigned int size, ScalarMeta meta) { \
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x; \
+        if (idx < size) { dst[idx] = (__half2float(src[idx]) op meta.scalar ? __float2half(1.0f) : __float2half(0.0f)); } \
+    }
+
+    #define DEFINE_CMP_SCALAR_BF16(name, op) \
+    extern "C" __global__ void name(const __nv_bfloat16* src, __nv_bfloat16* dst, unsigned int size, ScalarMeta meta) { \
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x; \
+        if (idx < size) { dst[idx] = (__bfloat162float(src[idx]) op meta.scalar ? __float2bfloat16(1.0f) : __float2bfloat16(0.0f)); } \
+    }
+
+    DEFINE_CMP_SCALAR_F32(eq_scalar_f32, ==)
+    DEFINE_CMP_SCALAR_F32(ne_scalar_f32, !=)
+    DEFINE_CMP_SCALAR_F16(eq_scalar_f16, ==)
+    DEFINE_CMP_SCALAR_F16(ne_scalar_f16, !=)
+    DEFINE_CMP_SCALAR_BF16(eq_scalar_bf16, ==)
+    DEFINE_CMP_SCALAR_BF16(ne_scalar_bf16, !=)
+
+    typedef struct {
+        long long scalar;
+    } ScalarMetaI64;
+
+    #define DEFINE_CMP_SCALAR_I64(name, op) \
+    extern "C" __global__ void name(const long long* src, long long* dst, unsigned int size, ScalarMetaI64 meta) { \
+        unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x; \
+        if (idx < size) { dst[idx] = (src[idx] op meta.scalar ? 1LL : 0LL); } \
+    }
+
+    DEFINE_CMP_SCALAR_I64(eq_scalar_i64, ==)
+    DEFINE_CMP_SCALAR_I64(ne_scalar_i64, !=)
+
     // Warp-shuffle sum of 32 floats within a single warp — no __syncthreads needed.
     __device__ __forceinline__ float warp_reduce_sum(float v) {
         #pragma unroll
@@ -525,6 +563,14 @@ mod imp {
     }
 
     unsafe impl DeviceRepr for ScalarMeta {}
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct ScalarMetaI64 {
+        scalar: i64,
+    }
+
+    unsafe impl DeviceRepr for ScalarMetaI64 {}
 
     #[derive(Clone, Debug)]
     pub enum CudaInner {
@@ -1090,6 +1136,14 @@ mod imp {
             Ok(Self { inner: wrap(out), runtime: self.runtime.clone() })
         }
 
+        fn launch_cmp_i64(&self, kernel: &str, src: &CudaSlice<i64>, scalar: i64) -> Result<Self> {
+            let out = unsafe { alloc_uninit::<i64>(&self.runtime, src.len()) }?;
+            let len = src.len() as u32;
+            let meta = ScalarMetaI64 { scalar };
+            launch_1d!(&self.runtime, kernel, src.len(), src, &out, &len, &meta);
+            Ok(Self { inner: CudaInner::I64(out), runtime: self.runtime.clone() })
+        }
+
         fn reduce_impl(&self, kernel: &str, outer_size: usize, reduce_size: usize) -> Result<Self> {
             match &self.inner {
                 CudaInner::F16(src) => {
@@ -1266,6 +1320,42 @@ mod imp {
                     lhs.launch_binary_f32("eq_f32", a, b)
                 }
                 _ => Err(Error::NotImplemented("cuda binary op is not implemented for this dtype")),
+            }
+        }
+
+        fn eq_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self> {
+            let compact = self.compact(layout)?;
+            match &compact.inner {
+                (CudaInner::F16(src)) => {
+                    compact.launch_scalar_f16("eq_scalar_f16", src, scalar as f32)
+                }
+                (CudaInner::BF16(src)) => {
+                    compact.launch_scalar_bf16("eq_scalar_bf16", src, scalar as f32)
+                }
+                (CudaInner::F32(src)) => {
+                    compact.launch_scalar_f32("eq_scalar_f32", src, scalar as f32)
+                }
+                (CudaInner::I64(src)) => {
+                    compact.launch_cmp_i64("eq_scalar_i64", src, scalar as i64)
+                }
+            }
+        }
+
+        fn ne_scalar(&self, layout: &Layout, scalar: f64) -> Result<Self> {
+            let compact = self.compact(layout)?;
+            match &compact.inner {
+                (CudaInner::F16(src)) => {
+                    compact.launch_scalar_f16("ne_scalar_f16", src, scalar as f32)
+                }
+                (CudaInner::BF16(src)) => {
+                    compact.launch_scalar_bf16("ne_scalar_bf16", src, scalar as f32)
+                }
+                (CudaInner::F32(src)) => {
+                    compact.launch_scalar_f32("ne_scalar_f32", src, scalar as f32)
+                }
+                (CudaInner::I64(src)) => {
+                    compact.launch_cmp_i64("ne_scalar_i64", src, scalar as i64)
+                }
             }
         }
 
@@ -2237,6 +2327,12 @@ mod imp {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn binary_op<O: BinaryOp>(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn eq_scalar(&self, _: &Layout, _: f64) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn ne_scalar(&self, _: &Layout, _: f64) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn reduce<O: ReduceOp>(&self, _: &Layout, _: &mut Self) -> Result<()> {
