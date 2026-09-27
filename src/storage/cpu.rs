@@ -1520,6 +1520,88 @@ impl BackendStorage for CpuStorage {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn masked_softmax_fwd(
+        &self,
+        layout: &Layout,
+        mask: &Self,
+        mask_layout: &Layout,
+        outer_size: usize,
+        inner_size: usize,
+        scale: f32,
+        t_len: usize,
+        mask_t_len: usize,
+    ) -> crate::error::Result<Self> {
+        assert!(layout.is_compact());
+        assert_eq!(layout.size(), outer_size * inner_size);
+        // The op compacts the mask first, so one linear row read suffices.
+        assert!(mask_layout.is_compact());
+        let scores: Vec<f32> = match self {
+            CpuStorage::F32(data) => data[layout.offset..].to_vec(),
+            CpuStorage::F16(data) => data[layout.offset..].iter().map(|v| v.to_f32()).collect(),
+            CpuStorage::BF16(data) => data[layout.offset..].iter().map(|v| v.to_f32()).collect(),
+            CpuStorage::I64(_) => {
+                return Err(crate::error::Error::DTypeMismatch(
+                    "masked_softmax_fwd: i64 is not supported, use a float dtype".into(),
+                ));
+            }
+        };
+        let mask_row: Vec<f32> = match mask {
+            CpuStorage::F32(data) => data[mask_layout.offset..].to_vec(),
+            CpuStorage::F16(data) => {
+                data[mask_layout.offset..].iter().map(|v| v.to_f32()).collect()
+            }
+            CpuStorage::BF16(data) => {
+                data[mask_layout.offset..].iter().map(|v| v.to_f32()).collect()
+            }
+            CpuStorage::I64(_) => {
+                return Err(crate::error::Error::DTypeMismatch(
+                    "masked_softmax_fwd: i64 is not supported, use a float dtype".into(),
+                ));
+            }
+        };
+        assert_eq!(scores.len(), outer_size * inner_size);
+        let mask_rows: Vec<f32> =
+            mask_row.into_iter().take(mask_t_len * inner_size).collect();
+        assert_eq!(mask_rows.len(), mask_t_len * inner_size);
+        let out: Vec<f32> = (0..outer_size)
+            .flat_map(|row| {
+                let start = row * inner_size;
+                let slice = &scores[start..start + inner_size];
+                let t = row % t_len % mask_t_len;
+                let mrow = &mask_rows[t * inner_size..(t + 1) * inner_size];
+                let max = slice
+                    .iter()
+                    .zip(mrow.iter())
+                    .map(|(&x, &m)| x * scale + m)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let sum: f32 = slice
+                    .iter()
+                    .zip(mrow.iter())
+                    .map(|(&x, &m)| (x * scale + m - max).exp())
+                    .sum();
+                slice
+                    .iter()
+                    .zip(mrow.iter())
+                    .map(|(&x, &m)| ((x * scale + m - max).exp() / sum))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        match self {
+            CpuStorage::F32(_) => Ok(CpuStorage::F32(out)),
+            CpuStorage::F16(_) => {
+                use half::f16;
+                Ok(CpuStorage::F16(out.iter().map(|&v| f16::from_f32(v)).collect()))
+            }
+            CpuStorage::BF16(_) => Ok(CpuStorage::BF16(
+                out.iter().map(|&v| bf16::from_f32(v)).collect(),
+            )),
+            CpuStorage::I64(_) => Err(crate::error::Error::DTypeMismatch(
+                "masked_softmax_fwd: i64 is not supported, use a float dtype".into(),
+            )),
+        }
+    }
+
     fn copy_blocks_into(
         &mut self,
         src: &Self,

@@ -2055,6 +2055,31 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
+        fn masked_softmax_fwd(
+            &self,
+            layout: &Layout,
+            mask: &Self,
+            mask_layout: &Layout,
+            outer_size: usize,
+            inner_size: usize,
+            scale: f32,
+            t_len: usize,
+            mask_t_len: usize,
+        ) -> Result<Self> {
+            // No Metal masked-softmax kernel yet: round-trip through the CPU fallback.
+            let inner = self.as_cpu_storage().masked_softmax_fwd(
+                layout,
+                &mask.as_cpu_storage(),
+                mask_layout,
+                outer_size,
+                inner_size,
+                scale,
+                t_len,
+                mask_t_len,
+            )?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
         fn copy_blocks_into(
             &mut self,
             src: &Self,
@@ -2483,6 +2508,19 @@ mod imp {
             Self::unavailable()
         }
         fn silu_mul_fwd(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn masked_softmax_fwd(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: usize,
+            _: usize,
+            _: f32,
+            _: usize,
+            _: usize,
+        ) -> Result<Self> {
             Self::unavailable()
         }
         fn copy_blocks_into(

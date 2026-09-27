@@ -1365,6 +1365,96 @@ impl TensorOp for CacheAppend {
     }
 }
 
+/// Fused scaled masked softmax: `softmax(scores*scale + mask)` rows, one CUDA kernel.
+///
+/// Replaces the scale multiply, the mask broadcast-add (plus its compact),
+/// and the log-softmax/exp pair. The backward reuses the unfused primitive
+/// decomposition (training only; decode runs under `no_grad`), so no fused
+/// backward exists.
+#[derive(Debug)]
+pub struct FusedMaskedSoftmax {
+    scores: Tensor,
+    mask: Tensor,
+    scale: f64,
+    /// Saved compacted `(scores, mask)` for the backward pass.
+    saved: Option<(Tensor, Tensor)>,
+}
+
+impl FusedMaskedSoftmax {
+    pub fn new(scores: Tensor, mask: Tensor, scale: f64) -> Result<Self> {
+        Ok(Self { scores, mask, scale, saved: None })
+    }
+}
+
+impl TensorOp for FusedMaskedSoftmax {
+    fn forward(mut self) -> Result<Tensor> {
+        let _profile = profile_like("masked_softmax", &self.scores);
+        let shape = self.scores.layout().shape();
+        assert!(shape.ndim() == 4, "masked softmax expects [B, H, T, K] scores");
+        let (t_len, inner_size) = (shape[2], shape[3]);
+        let outer_size = self.scores.layout().size() / inner_size;
+        let mask_shape = self.mask.layout().shape();
+        assert_eq!(mask_shape.ndim(), 4, "mask must be shaped [1, 1, Tm, K]");
+        assert_eq!(mask_shape[0], 1, "fused masked softmax needs batch-1 masks");
+        assert_eq!(mask_shape[1], 1, "fused masked softmax needs head-1 masks");
+        assert_eq!(mask_shape[3], inner_size, "mask width must match scores");
+        assert_eq!(self.scores.dtype(), self.mask.dtype(), "scores/mask dtype mismatch");
+        let mask_t_len = mask_shape[2];
+        let scores_c = self.scores.compact();
+        let mask_c = self.mask.compact();
+        let out_storage = {
+            let scores_storage = scores_c.storage();
+            let mask_storage = mask_c.storage();
+            scores_storage.masked_softmax_fwd(
+                scores_c.layout(),
+                &mask_storage,
+                mask_c.layout(),
+                outer_size,
+                inner_size,
+                self.scale as f32,
+                t_len,
+                mask_t_len,
+            )?
+        };
+        let output = Tensor::new(
+            Arc::new(RwLock::new(out_storage)),
+            self.scores.layout().clone(),
+            false,
+            None,
+        );
+        self.saved = Some((scores_c, mask_c));
+        Ok(Tensor::new(
+            output.storage_clone(),
+            output.layout().clone(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let (scores, mask) = self.saved.as_ref().expect("forward must run before backward");
+        let last = self.scores.layout().ndim() - 1;
+        // Recompute the probabilities with the unfused chain, then apply the
+        // standard softmax gradient with the scale folded back into scores.
+        // The mask carries its unscaled share so every dependency gradients.
+        let probs = ((scores * self.scale) + mask).softmax(last);
+        let grad_c = out_grad.compact();
+        let dot = (&grad_c * &probs).sum(vec![last], true);
+        let shared = (&grad_c - &dot) * &probs;
+        grads.accumulate(&self.scores, &shared * self.scale);
+        // The mask broadcasts over its length-1 dims; its gradient sums them.
+        let mask_shape = self.mask.layout().shape();
+        let axes: Vec<usize> =
+            (0..last).filter(|&a| mask_shape[a] == 1).collect();
+        grads.accumulate(&self.mask, shared.sum(axes, true));
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.scores, &self.mask]
+    }
+}
+
 /// Fused SiLU-gate product: `silu(gate) * up`, one CUDA kernel.
 ///
 /// Folds the SwiGLU gate multiply into the activation, dropping the SiLU

@@ -581,6 +581,60 @@ mod imp {
     extern "C" __global__ void silu_mul_fwd_f16(const half* gate, const half* up, half* dst, unsigned int size) { silu_mul_fwd_kernel(gate, up, dst, size); }
     extern "C" __global__ void silu_mul_fwd_bf16(const __nv_bfloat16* gate, const __nv_bfloat16* up, __nv_bfloat16* dst, unsigned int size) { silu_mul_fwd_kernel(gate, up, dst, size); }
 
+    // Fused scaled masked softmax: dst[row,col] = softmax(scores*scale + mask).
+    // One block per query row; the mask holds one row per query position.
+    // Scores are row-major [B, H, Tq, Tk]: the query position is row % t_len.
+    template <typename T>
+    __global__ void masked_softmax_fwd_kernel(const T* scores, const T* mask, T* dst, float scale, unsigned int outer_size, unsigned int inner_size, unsigned int t_len, unsigned int mask_t_len, unsigned int mask_base) {
+        unsigned int row = blockIdx.x;
+        if (row >= outer_size) return;
+        __shared__ float smem[REDUCE_THREADS];
+        unsigned int t = row % t_len;
+        unsigned int mt = t % mask_t_len;
+
+        // Pass 1: row max of scores*scale + mask.
+        float row_max = -1.0f / 0.0f;
+        for (unsigned int col = threadIdx.x; col < inner_size; col += blockDim.x) {
+            float v = to_float(scores[row * inner_size + col]) * scale + to_float(mask[mask_base + mt * inner_size + col]);
+            row_max = fmaxf(row_max, v);
+        }
+        smem[threadIdx.x] = row_max;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+            if (threadIdx.x < stride) smem[threadIdx.x] = fmaxf(smem[threadIdx.x], smem[threadIdx.x + stride]);
+            __syncthreads();
+        }
+        if (threadIdx.x < 32) smem[threadIdx.x] = warp_reduce_max(smem[threadIdx.x]);
+        __syncthreads();
+        row_max = smem[0];
+
+        // Pass 2: sum(exp(v - max)).
+        float acc = 0.0f;
+        for (unsigned int col = threadIdx.x; col < inner_size; col += blockDim.x) {
+            float v = to_float(scores[row * inner_size + col]) * scale + to_float(mask[mask_base + mt * inner_size + col]);
+            acc += expf(v - row_max);
+        }
+        smem[threadIdx.x] = acc;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+            if (threadIdx.x < stride) smem[threadIdx.x] += smem[threadIdx.x + stride];
+            __syncthreads();
+        }
+        if (threadIdx.x < 32) smem[threadIdx.x] = warp_reduce_sum(smem[threadIdx.x]);
+        __syncthreads();
+        float inv_sum = 1.0f / smem[0];
+
+        // Pass 3: write normalized probabilities.
+        for (unsigned int col = threadIdx.x; col < inner_size; col += blockDim.x) {
+            float v = to_float(scores[row * inner_size + col]) * scale + to_float(mask[mask_base + mt * inner_size + col]);
+            dst[row * inner_size + col] = from_float<T>(expf(v - row_max) * inv_sum);
+        }
+    }
+
+    extern "C" __global__ void masked_softmax_fwd_f32(const float* scores, const float* mask, float* dst, float scale, unsigned int outer_size, unsigned int inner_size, unsigned int t_len, unsigned int mask_t_len, unsigned int mask_base) { masked_softmax_fwd_kernel(scores, mask, dst, scale, outer_size, inner_size, t_len, mask_t_len, mask_base); }
+    extern "C" __global__ void masked_softmax_fwd_f16(const half* scores, const half* mask, half* dst, float scale, unsigned int outer_size, unsigned int inner_size, unsigned int t_len, unsigned int mask_t_len, unsigned int mask_base) { masked_softmax_fwd_kernel(scores, mask, dst, scale, outer_size, inner_size, t_len, mask_t_len, mask_base); }
+    extern "C" __global__ void masked_softmax_fwd_bf16(const __nv_bfloat16* scores, const __nv_bfloat16* mask, __nv_bfloat16* dst, float scale, unsigned int outer_size, unsigned int inner_size, unsigned int t_len, unsigned int mask_t_len, unsigned int mask_base) { masked_softmax_fwd_kernel(scores, mask, dst, scale, outer_size, inner_size, t_len, mask_t_len, mask_base); }
+
     // Block copy for cache appends: `blocks` contiguous `block_len`-element runs
     // from compact `src`, where destination run `n` starts at
     // `dst_base + n * dst_stride`. Copies one `[B, H, T, D]` slice into the
@@ -2404,6 +2458,68 @@ mod imp {
             }
         }
 
+        /// Fused scaled masked softmax: `dst = softmax(scores*scale + mask)` rows.
+        ///
+        /// `outer_size * inner_size` must equal `layout.size()`. The mask holds
+        /// `mask_t_len` compact rows of `inner_size`, one per query position.
+        #[allow(clippy::too_many_arguments)]
+        fn masked_softmax_fwd(
+            &self,
+            layout: &Layout,
+            mask: &Self,
+            mask_layout: &Layout,
+            outer_size: usize,
+            inner_size: usize,
+            scale: f32,
+            t_len: usize,
+            mask_t_len: usize,
+        ) -> Result<Self> {
+            let scores = self.compact(layout)?;
+            assert!(has_compact_strides(mask_layout));
+            let dims = [
+                outer_size as u32,
+                inner_size as u32,
+                t_len as u32,
+                mask_t_len as u32,
+                mask_layout.offset as u32,
+            ];
+            match (&scores.inner, &mask.inner) {
+                (CudaInner::F16(s), CudaInner::F16(m)) => {
+                    let out =
+                        unsafe { alloc_uninit::<f16>(&scores.runtime, outer_size * inner_size) }?;
+                    launch_reduce!(
+                        &scores.runtime, "masked_softmax_fwd_f16", outer_size,
+                        s, m, &out, &scale,
+                        &dims[0], &dims[1], &dims[2], &dims[3], &dims[4]
+                    );
+                    Ok(Self { inner: CudaInner::F16(out), runtime: scores.runtime.clone() })
+                }
+                (CudaInner::BF16(s), CudaInner::BF16(m)) => {
+                    let out =
+                        unsafe { alloc_uninit::<bf16>(&scores.runtime, outer_size * inner_size) }?;
+                    launch_reduce!(
+                        &scores.runtime, "masked_softmax_fwd_bf16", outer_size,
+                        s, m, &out, &scale,
+                        &dims[0], &dims[1], &dims[2], &dims[3], &dims[4]
+                    );
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: scores.runtime.clone() })
+                }
+                (CudaInner::F32(s), CudaInner::F32(m)) => {
+                    let out =
+                        unsafe { alloc_uninit::<f32>(&scores.runtime, outer_size * inner_size) }?;
+                    launch_reduce!(
+                        &scores.runtime, "masked_softmax_fwd_f32", outer_size,
+                        s, m, &out, &scale,
+                        &dims[0], &dims[1], &dims[2], &dims[3], &dims[4]
+                    );
+                    Ok(Self { inner: CudaInner::F32(out), runtime: scores.runtime.clone() })
+                }
+                _ => Err(Error::DTypeMismatch(
+                    "masked_softmax_fwd: dtype mismatch between scores and mask".into(),
+                )),
+            }
+        }
+
         /// Fused SiLU-gate product: `dst[i] = silu(gate[i]) * up[i]`.
         ///
         /// Both inputs share `layout.size()` elements, read in compact order.
@@ -2954,6 +3070,19 @@ mod imp {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn silu_mul_fwd(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn masked_softmax_fwd(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: usize,
+            _: usize,
+            _: f32,
+            _: usize,
+            _: usize,
+        ) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn copy_blocks_into(

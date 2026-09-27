@@ -373,6 +373,22 @@ pub trait BackendStorage: Sized {
     ///
     /// Both inputs share `layout.size()` elements, read in compact order.
     fn silu_mul_fwd(&self, layout: &Layout, up: &Self, up_layout: &Layout) -> Result<Self>;
+    /// Fused scaled masked softmax: `dst = softmax(scores*scale + mask)` rows.
+    ///
+    /// `outer_size * inner_size` must equal `layout.size()`. The mask holds
+    /// `mask_t_len` rows of `inner_size`, one per query position.
+    #[allow(clippy::too_many_arguments)]
+    fn masked_softmax_fwd(
+        &self,
+        layout: &Layout,
+        mask: &Self,
+        mask_layout: &Layout,
+        outer_size: usize,
+        inner_size: usize,
+        scale: f32,
+        t_len: usize,
+        mask_t_len: usize,
+    ) -> Result<Self>;
     /// Converts `layout` to `dtype` without leaving the device.
     ///
     /// The cast reads strided source elements and writes a compact output buffer:
@@ -658,6 +674,37 @@ impl BackendStorage for Storage {
                 Ok(Self::Mps(gate.silu_mul_fwd(layout, u, up_layout)?))
             }
             _ => Err(Error::DeviceMismatch { op: "silu_mul_fwd" }),
+        }
+    }
+
+    fn masked_softmax_fwd(
+        &self,
+        layout: &Layout,
+        mask: &Self,
+        mask_layout: &Layout,
+        outer_size: usize,
+        inner_size: usize,
+        scale: f32,
+        t_len: usize,
+        mask_t_len: usize,
+    ) -> Result<Self> {
+        match (self, mask) {
+            (Storage::Cpu(scores), Storage::Cpu(m)) => Ok(Self::Cpu(scores
+                .masked_softmax_fwd(
+                    layout, m, mask_layout,
+                    outer_size, inner_size, scale, t_len, mask_t_len,
+                )?)),
+            (Storage::Cuda(scores), Storage::Cuda(m)) => Ok(Self::Cuda(scores
+                .masked_softmax_fwd(
+                    layout, m, mask_layout,
+                    outer_size, inner_size, scale, t_len, mask_t_len,
+                )?)),
+            (Storage::Mps(scores), Storage::Mps(m)) => Ok(Self::Mps(scores
+                .masked_softmax_fwd(
+                    layout, m, mask_layout,
+                    outer_size, inner_size, scale, t_len, mask_t_len,
+                )?)),
+            _ => Err(Error::DeviceMismatch { op: "masked_softmax_fwd" }),
         }
     }
 
