@@ -3151,6 +3151,10 @@ mod imp {
             panic!("CUDA backend is only available on Linux with the `cuda` feature enabled")
         }
 
+        pub(crate) fn uninit(_size: usize, _dtype: DType) -> Result<Self> {
+            panic!("CUDA backend is only available on Linux with the `cuda` feature enabled")
+        }
+
         pub fn from_cpu_storage(_inner: CpuStorage) -> Self {
             panic!("CUDA backend is only available on Linux with the `cuda` feature enabled")
         }
