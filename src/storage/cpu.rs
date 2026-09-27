@@ -256,6 +256,27 @@ fn rms_norm_rows<T: Copy, O>(
         .collect()
 }
 
+/// Writes `blocks` contiguous `block_len`-element runs from `vals` into `dst`,
+/// where run `n` starts at `dst_base + n * dst_stride`.
+fn write_blocks<T: Copy>(
+    dst: &mut [T],
+    vals: &[f32],
+    blocks: usize,
+    block_len: usize,
+    dst_base: usize,
+    dst_stride: usize,
+    cast: impl Fn(f32) -> T + Copy,
+) {
+    assert_eq!(vals.len(), blocks * block_len);
+    for (n, run) in vals.chunks_exact(block_len).enumerate() {
+        let start = dst_base + n * dst_stride;
+        assert!(start + block_len <= dst.len(), "copy_blocks_into writes past the buffer");
+        for (slot, &v) in dst[start..].iter_mut().zip(run) {
+            *slot = cast(v);
+        }
+    }
+}
+
 impl BackendStorage for CpuStorage {
     fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self> {
         if l.is_compact() {
@@ -1426,6 +1447,61 @@ impl BackendStorage for CpuStorage {
             CpuStorage::I64(_) => Err(crate::error::Error::DTypeMismatch(
                 "silu_fwd: i64 is not supported, use a float dtype".into(),
             )),
+        }
+    }
+
+    fn copy_blocks_into(
+        &mut self,
+        src: &Self,
+        src_layout: &Layout,
+        blocks: usize,
+        block_len: usize,
+        dst_base: usize,
+        dst_stride: usize,
+    ) -> crate::error::Result<()> {
+        assert_eq!(src_layout.size(), blocks * block_len);
+        let kinds_match = matches!(
+            (&self, &src),
+            (CpuStorage::F32(_), CpuStorage::F32(_))
+                | (CpuStorage::F16(_), CpuStorage::F16(_))
+                | (CpuStorage::BF16(_), CpuStorage::BF16(_))
+                | (CpuStorage::I64(_), CpuStorage::I64(_))
+        );
+        if !kinds_match {
+            return Err(crate::error::Error::DTypeMismatch(
+                "copy_blocks_into: dtype mismatch between source and destination".into(),
+            ));
+        }
+        // Read the source in view order first: the destination borrow below
+        // must not overlap the source read when both alias one buffer.
+        let vals: Vec<f32> = match src {
+            CpuStorage::F32(_) => src.iter::<f32>(src_layout).copied().collect(),
+            CpuStorage::F16(_) => src.iter::<f16>(src_layout).map(|v| v.to_f32()).collect(),
+            CpuStorage::BF16(_) => src.iter::<bf16>(src_layout).map(|v| v.to_f32()).collect(),
+            CpuStorage::I64(_) => src.iter::<i64>(src_layout).map(|&v| v as f32).collect(),
+        };
+        match self {
+            CpuStorage::F32(dst) => {
+                write_blocks(dst, &vals, blocks, block_len, dst_base, dst_stride, |v| v);
+                Ok(())
+            }
+            CpuStorage::F16(dst) => {
+                use half::f16;
+                write_blocks(dst, &vals, blocks, block_len, dst_base, dst_stride, |v| {
+                    f16::from_f32(v)
+                });
+                Ok(())
+            }
+            CpuStorage::BF16(dst) => {
+                write_blocks(dst, &vals, blocks, block_len, dst_base, dst_stride, |v| {
+                    bf16::from_f32(v)
+                });
+                Ok(())
+            }
+            CpuStorage::I64(dst) => {
+                write_blocks(dst, &vals, blocks, block_len, dst_base, dst_stride, |v| v as i64);
+                Ok(())
+            }
         }
     }
 }
