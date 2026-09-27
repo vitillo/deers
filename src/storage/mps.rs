@@ -2088,6 +2088,32 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
+        #[allow(clippy::too_many_arguments)]
+        fn mha_fwd(
+            &self,
+            q_layout: &Layout,
+            k: &Self,
+            k_layout: &Layout,
+            v: &Self,
+            v_layout: &Layout,
+            mask: &Self,
+            mask_layout: &Layout,
+            scale: f32,
+        ) -> Result<Self> {
+            // No Metal attention kernel yet: round-trip through the CPU fallback.
+            let inner = self.as_cpu_storage().mha_fwd(
+                q_layout,
+                &k.as_cpu_storage(),
+                k_layout,
+                &v.as_cpu_storage(),
+                v_layout,
+                &mask.as_cpu_storage(),
+                mask_layout,
+                scale,
+            )?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
         fn copy_blocks_into(
             &mut self,
             src: &Self,
@@ -2528,6 +2554,20 @@ mod imp {
             _: f32,
             _: usize,
             _: usize,
+        ) -> Result<Self> {
+            Self::unavailable()
+        }
+        #[allow(clippy::too_many_arguments)]
+        fn mha_fwd(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: f32,
         ) -> Result<Self> {
             Self::unavailable()
         }
