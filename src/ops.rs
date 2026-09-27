@@ -1824,7 +1824,7 @@ fn topk_positions_f32(
             let base = (o * dim_size) * inner + j;
             let mut order: Vec<usize> = (0..dim_size).collect();
             order.sort_by(|&a, &b| {
-                vals[base + b * inner].total_cmp(&vals[base + a * inner])
+                storage::cmp_f32_rank(vals[base + b * inner], vals[base + a * inner])
             });
             for (r, &i) in order.iter().take(k).enumerate() {
                 out[(o * k + r) * inner + j] = base + i * inner;
@@ -1983,11 +1983,11 @@ pub fn sort_forward(arg: &Tensor, dim: usize, descending: bool) -> Result<(Tenso
                     let mut order: Vec<usize> = (0..dim_size).collect();
                     if descending {
                         order.sort_by(|&a, &b| {
-                            vals[base + b * inner].total_cmp(&vals[base + a * inner])
+                            storage::cmp_f32_rank(vals[base + b * inner], vals[base + a * inner])
                         });
                     } else {
                         order.sort_by(|&a, &b| {
-                            vals[base + a * inner].total_cmp(&vals[base + b * inner])
+                            storage::cmp_f32_rank(vals[base + a * inner], vals[base + b * inner])
                         });
                     }
                     for (rank, &i) in order.iter().enumerate() {
@@ -2012,11 +2012,11 @@ pub fn sort_forward(arg: &Tensor, dim: usize, descending: bool) -> Result<(Tenso
                     let mut order: Vec<usize> = (0..dim_size).collect();
                     if descending {
                         order.sort_by(|&a, &b| {
-                            as_f32[base + b * inner].total_cmp(&as_f32[base + a * inner])
+                            storage::cmp_f32_rank(as_f32[base + b * inner], as_f32[base + a * inner])
                         });
                     } else {
                         order.sort_by(|&a, &b| {
-                            as_f32[base + a * inner].total_cmp(&as_f32[base + b * inner])
+                            storage::cmp_f32_rank(as_f32[base + a * inner], as_f32[base + b * inner])
                         });
                     }
                     for (rank, &i) in order.iter().enumerate() {
@@ -2041,11 +2041,11 @@ pub fn sort_forward(arg: &Tensor, dim: usize, descending: bool) -> Result<(Tenso
                     let mut order: Vec<usize> = (0..dim_size).collect();
                     if descending {
                         order.sort_by(|&a, &b| {
-                            as_f32[base + b * inner].total_cmp(&as_f32[base + a * inner])
+                            storage::cmp_f32_rank(as_f32[base + b * inner], as_f32[base + a * inner])
                         });
                     } else {
                         order.sort_by(|&a, &b| {
-                            as_f32[base + a * inner].total_cmp(&as_f32[base + b * inner])
+                            storage::cmp_f32_rank(as_f32[base + a * inner], as_f32[base + b * inner])
                         });
                     }
                     for (rank, &i) in order.iter().enumerate() {

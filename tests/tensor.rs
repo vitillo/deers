@@ -3603,6 +3603,35 @@ fn sort_host_places_nan_largest() {
 }
 
 #[test]
+fn topk_host_ties_signed_zero_to_lowest_index() {
+    // Arrange
+    let device = Device::Cpu;
+
+    // Act
+    let (_, indices) =
+        Tensor::from_vec(vec![-0.0f32, 0.0], (2,), device).topk(1, 0);
+
+    // Assert
+    assert_eq!(indices.to_vec::<i64>().unwrap(), vec![0], "topk signed-zero tie host");
+}
+
+#[test]
+fn sort_host_ties_signed_zero_to_lowest_index() {
+    // Arrange
+    let device = Device::Cpu;
+
+    // Act
+    let (_, desc_indices) =
+        Tensor::from_vec(vec![-0.0f32, 0.0], (2,), device).sort(0, true);
+    let (_, asc_indices) =
+        Tensor::from_vec(vec![-0.0f32, 0.0], (2,), device).sort(0, false);
+
+    // Assert
+    assert_eq!(desc_indices.to_vec::<i64>().unwrap(), vec![0, 1], "sort signed-zero tie desc");
+    assert_eq!(asc_indices.to_vec::<i64>().unwrap(), vec![0, 1], "sort signed-zero tie asc");
+}
+
+#[test]
 fn topk_host_supports_all_dtypes() {
     // Arrange
     let device = Device::Cpu;

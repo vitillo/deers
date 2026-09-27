@@ -318,13 +318,21 @@ fn fill<D: WithDType + Copy>(mask: &[bool], src: &CpuStorage, layout: &Layout, v
 /// Ranks strided keys per row, returning (source position, dim index) for the
 /// first `k` ranks in order. Descending ranks the largest first; ties keep
 /// index order, matching the host selectors in `ops`.
+pub(crate) fn cmp_f32_rank(a: f32, b: f32) -> Ordering {
+    if a == b {
+        Ordering::Equal
+    } else {
+        a.total_cmp(&b)
+    }
+}
+
 trait RankKey: PartialOrd {
     fn rank_cmp(&self, other: &Self) -> Ordering;
 }
 
 impl RankKey for f32 {
     fn rank_cmp(&self, other: &Self) -> Ordering {
-        self.total_cmp(other)
+        cmp_f32_rank(*self, *other)
     }
 }
 
@@ -1906,5 +1914,19 @@ mod tests {
         assert_eq!(indices, vec![0, 2]);
         assert!(values[0].is_nan());
         assert_eq!(values[1], 2.0);
+    }
+
+    #[test]
+    fn test_topk_storage_ties_signed_zero() {
+        // Arrange
+        let storage = CpuStorage::F32(vec![-0.0, 0.0]);
+        let layout = compact_layout((2, 1));
+
+        // Act
+        let (_, indices) = storage.topk(&layout, 0, 1).unwrap();
+
+        // Assert
+        let CpuStorage::I64(indices) = indices else { panic!("topk indices must be i64") };
+        assert_eq!(indices, vec![0]);
     }
 }
