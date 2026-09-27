@@ -1399,6 +1399,35 @@ impl BackendStorage for CpuStorage {
             )),
         }
     }
+
+    fn silu_fwd(&self, layout: &Layout) -> crate::error::Result<Self> {
+        assert!(layout.is_compact());
+        let data: Vec<f32> = match self {
+            CpuStorage::F32(data) => data[layout.offset..].to_vec(),
+            CpuStorage::F16(data) => data[layout.offset..].iter().map(|v| v.to_f32()).collect(),
+            CpuStorage::BF16(data) => data[layout.offset..].iter().map(|v| v.to_f32()).collect(),
+            CpuStorage::I64(_) => {
+                return Err(crate::error::Error::DTypeMismatch(
+                    "silu_fwd: i64 is not supported, use a float dtype".into(),
+                ));
+            }
+        };
+        assert_eq!(data.len(), layout.size());
+        let out: Vec<f32> = data.iter().map(|&v| v / (1.0 + (-v).exp())).collect();
+        match self {
+            CpuStorage::F32(_) => Ok(CpuStorage::F32(out)),
+            CpuStorage::F16(_) => {
+                use half::f16;
+                Ok(CpuStorage::F16(out.iter().map(|&v| f16::from_f32(v)).collect()))
+            }
+            CpuStorage::BF16(_) => {
+                Ok(CpuStorage::BF16(out.iter().map(|&v| bf16::from_f32(v)).collect()))
+            }
+            CpuStorage::I64(_) => Err(crate::error::Error::DTypeMismatch(
+                "silu_fwd: i64 is not supported, use a float dtype".into(),
+            )),
+        }
+    }
 }
 
 /// Reads `layout` from `storage` and converts each element with `f`.

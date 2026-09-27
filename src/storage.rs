@@ -349,6 +349,11 @@ pub trait BackendStorage: Sized {
         t_len: usize,
         cos_t_len: usize,
     ) -> Result<Self>;
+    /// Fused SiLU forward: `dst[i] = src[i] / (1 + exp(-src[i]))`.
+    ///
+    /// `layout.size()` elements are read in compact order and written to a
+    /// fresh compact buffer.
+    fn silu_fwd(&self, layout: &Layout) -> Result<Self>;
     /// Converts `layout` to `dtype` without leaving the device.
     ///
     /// The cast reads strided source elements and writes a compact output buffer:
@@ -588,6 +593,14 @@ impl BackendStorage for Storage {
                 outer_size, head_dim, n_heads, t_len, cos_t_len,
             )?)),
             _ => Err(Error::DeviceMismatch { op: "rope_fwd" }),
+        }
+    }
+
+    fn silu_fwd(&self, layout: &Layout) -> Result<Self> {
+        match self {
+            Storage::Cpu(storage) => Ok(Self::Cpu(storage.silu_fwd(layout)?)),
+            Storage::Cuda(storage) => Ok(Self::Cuda(storage.silu_fwd(layout)?)),
+            Storage::Mps(storage) => Ok(Self::Mps(storage.silu_fwd(layout)?)),
         }
     }
 
