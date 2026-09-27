@@ -364,8 +364,7 @@ fn qwen3_bf16_greedy_generate_matches_manual_decode() {
 #[test]
 fn qwen3_generate_runs_on_accelerator_when_available() {
     // Arrange: a small constant model moved off CPU.
-    let Some(device) = [Device::Cuda, Device::Mps].into_iter().find(|d| d.is_available())
-    else {
+    let Some(device) = [Device::Cuda, Device::Mps].into_iter().find(|d| d.is_available()) else {
         return;
     };
     let (mut model, _) = constant_model(0.02);

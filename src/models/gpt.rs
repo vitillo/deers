@@ -1320,8 +1320,7 @@ impl Qwen3 {
         no_grad(|| {
             assert!(!prompt.is_empty(), "Qwen3 generate needs a non-empty prompt");
             let device = self.device();
-            let mut caches: Vec<KvCache> =
-                (0..self.layers.len()).map(|_| KvCache::new()).collect();
+            let mut caches: Vec<KvCache> = (0..self.layers.len()).map(|_| KvCache::new()).collect();
             let ids: Vec<i64> = prompt.iter().map(|&id| id as i64).collect();
             let idx = Tensor::from_vec(ids, (1, prompt.len()), device);
             let logits = self.prefill(&idx, &mut caches)?;
