@@ -696,7 +696,10 @@ impl Qwen3Block {
 pub struct GPTConfig {
     /// Token vocabulary size.
     pub vocab_size: usize,
-    /// Maximum sequence length supported by the rotary cache.
+    /// Positions covered by the precomputed rotary cache.
+    ///
+    /// Longer inputs recompute the needed prefix on demand (see [`GPT::rotary`]),
+    /// so this sizes the fast path rather than capping the input length.
     pub sequence_len: usize,
     /// Number of transformer blocks.
     pub n_layer: usize,
@@ -722,6 +725,10 @@ impl GPTConfig {
 }
 
 /// Minimal GPT model: token embedding, decoder blocks, final norm, and LM head.
+///
+/// The rotary cache covers `sequence_len` positions up front. Inputs longer than
+/// the cache recompute the needed prefix on demand instead of panicking; inputs
+/// within the cache narrow the stored tensors and behave exactly as before.
 #[derive(Debug)]
 pub struct GPT {
     vocab_size: usize,
@@ -731,6 +738,9 @@ pub struct GPT {
     lm_head: Linear,
     cos: Tensor,
     sin: Tensor,
+    head_dim: usize,
+    rope_base: f32,
+    rope_scaling: RopeScaling,
 }
 
 impl GPT {
@@ -761,7 +771,41 @@ impl GPT {
             Device::Cpu,
         );
 
-        Self { vocab_size: config.vocab_size, wte, blocks, norm, lm_head, cos, sin }
+        Self {
+            vocab_size: config.vocab_size,
+            wte,
+            blocks,
+            norm,
+            lm_head,
+            cos,
+            sin,
+            head_dim: config.head_dim(),
+            rope_base: config.rope_base,
+            rope_scaling: config.rope_scaling,
+        }
+    }
+
+    /// Returns RoPE cos/sin covering `seq_len` positions shaped `[1, T, 1, D/2]`.
+    ///
+    /// Inputs within the precomputed cache narrow the stored tensors, so short
+    /// contexts pay no recompute and match previous results exactly. Inputs past
+    /// the cache recompute the full prefix with the model's base frequency and
+    /// scaling at the cache's dtype and device. Each position's angles depend
+    /// only on its own index, so the recomputed prefix equals a natively sized
+    /// cache row for row. Only genuine backend failures (such as running out of
+    /// memory for the longer sequence) surface as errors.
+    fn rotary(&self, seq_len: usize) -> (Tensor, Tensor) {
+        if seq_len <= self.cos.layout().shape()[1] {
+            return (self.cos.narrow(1, 0, seq_len), self.sin.narrow(1, 0, seq_len));
+        }
+        precompute_rotary_embeddings_scaled(
+            seq_len,
+            self.head_dim,
+            self.rope_base,
+            self.rope_scaling,
+            self.cos.dtype(),
+            self.cos.device(),
+        )
     }
 
     /// Runs the decoder on token ids shaped `[B, T]`.
@@ -771,15 +815,13 @@ impl GPT {
 
         let batch_size = shape[0];
         let seq_len = shape[1];
-        assert!(seq_len <= self.cos.layout().shape()[1], "sequence length exceeds rotary cache");
         assert_eq!(
             idx.device(),
             self.cos.device(),
             "token ids and rotary cache must be on the same device"
         );
 
-        let cos = self.cos.narrow(1, 0, seq_len); // [1, T, 1, D/2]
-        let sin = self.sin.narrow(1, 0, seq_len); // [1, T, 1, D/2]
+        let (cos, sin) = self.rotary(seq_len); // [1, T, 1, D/2]
 
         let mut x = self.wte.forward(idx)?; // [B, T, C]
         for block in &self.blocks {
@@ -831,7 +873,10 @@ impl GPT {
 pub struct Qwen3Config {
     /// Token vocabulary size.
     pub vocab_size: usize,
-    /// Maximum sequence length supported by the rotary cache.
+    /// Positions covered by the precomputed rotary cache.
+    ///
+    /// Longer inputs recompute the needed prefix on demand (see [`Qwen3::rotary`]),
+    /// so this sizes the fast path rather than capping the input length.
     pub sequence_len: usize,
     /// Number of decoder blocks.
     pub n_layers: usize,
@@ -910,6 +955,10 @@ fn cast_tensor(tensor: &Tensor, dtype: DType) -> Result<Tensor> {
 
 /// Full Qwen3 model: token embedding, decoder blocks, final norm, tied LM head.
 ///
+/// The rotary cache covers `sequence_len` positions up front. Inputs longer than
+/// the cache recompute the needed prefix on demand instead of panicking; inputs
+/// within the cache narrow the stored tensors and behave exactly as before.
+///
 /// The head reuses the embedding storage under `lm_head.weight`, so the
 /// checkpoint names both while the parameter list holds one tensor.
 #[derive(Debug)]
@@ -921,6 +970,9 @@ pub struct Qwen3 {
     lm_head: Parameter,
     cos: Tensor,
     sin: Tensor,
+    head_dim: usize,
+    rope_base: f32,
+    rope_scaling: RopeScaling,
 }
 
 impl Qwen3 {
@@ -958,7 +1010,54 @@ impl Qwen3 {
             DType::F32,
             Device::Cpu,
         );
-        Self { vocab_size: config.vocab_size, embed_tokens, layers, norm, lm_head, cos, sin }
+        Self {
+            vocab_size: config.vocab_size,
+            embed_tokens,
+            layers,
+            norm,
+            lm_head,
+            cos,
+            sin,
+            head_dim: config.head_dim,
+            rope_base: config.rope_base,
+            rope_scaling: config.rope_scaling,
+        }
+    }
+
+    /// Returns RoPE cos/sin covering `seq_len` positions shaped `[1, T, 1, D/2]`.
+    ///
+    /// Inputs within the precomputed cache narrow the stored tensors, so short
+    /// contexts pay no recompute and match previous results exactly. Inputs past
+    /// the cache recompute the full prefix with the model's base frequency and
+    /// scaling at the cache's dtype and device. Each position's angles depend
+    /// only on its own index, so the recomputed prefix equals a natively sized
+    /// cache row for row. Only genuine backend failures (such as running out of
+    /// memory for the longer sequence) surface as errors.
+    fn rotary(&self, seq_len: usize) -> (Tensor, Tensor) {
+        if seq_len <= self.cos.layout().shape()[1] {
+            return (self.cos.narrow(1, 0, seq_len), self.sin.narrow(1, 0, seq_len));
+        }
+        precompute_rotary_embeddings_scaled(
+            seq_len,
+            self.head_dim,
+            self.rope_base,
+            self.rope_scaling,
+            self.cos.dtype(),
+            self.cos.device(),
+        )
+    }
+
+    /// Returns RoPE cos/sin for the single absolute position `pos` shaped `[1, 1, 1, D/2]`.
+    ///
+    /// Positions within the precomputed cache narrow the stored tensors directly.
+    /// Positions past the cache recompute the prefix on demand, so generation
+    /// continues past the configured context length.
+    fn rotary_at(&self, pos: usize) -> (Tensor, Tensor) {
+        if pos < self.cos.layout().shape()[1] {
+            return (self.cos.narrow(1, pos, 1), self.sin.narrow(1, pos, 1));
+        }
+        let (full_cos, full_sin) = self.rotary(pos + 1);
+        (full_cos.narrow(1, pos, 1), full_sin.narrow(1, pos, 1))
     }
 
     /// Returns the number of decoder blocks.
@@ -973,15 +1072,13 @@ impl Qwen3 {
 
         let batch_size = shape[0];
         let seq_len = shape[1];
-        assert!(seq_len <= self.cos.layout().shape()[1], "sequence length exceeds rotary cache");
         assert_eq!(
             idx.device(),
             self.cos.device(),
             "token ids and rotary cache must be on the same device"
         );
 
-        let cos = self.cos.narrow(1, 0, seq_len); // [1, T, 1, D/2]
-        let sin = self.sin.narrow(1, 0, seq_len); // [1, T, 1, D/2]
+        let (cos, sin) = self.rotary(seq_len); // [1, T, 1, D/2]
 
         let mut x = self.embed_tokens.forward(idx)?; // [B, T, C]
         for layer in &self.layers {
@@ -1004,10 +1101,8 @@ impl Qwen3 {
         assert_eq!(shape.ndim(), 2, "Qwen3 expects token ids with shape [B, T]");
         let batch_size = shape[0];
         let seq_len = shape[1];
-        assert!(seq_len <= self.cos.layout().shape()[1], "sequence length exceeds rotary cache");
 
-        let cos = self.cos.narrow(1, 0, seq_len); // [1, T, 1, D/2]
-        let sin = self.sin.narrow(1, 0, seq_len); // [1, T, 1, D/2]
+        let (cos, sin) = self.rotary(seq_len); // [1, T, 1, D/2]
 
         let mut x = self.embed_tokens.forward(idx)?; // [B, T, C]
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
@@ -1019,6 +1114,8 @@ impl Qwen3 {
     /// Scores one token at absolute position `pos` against the filled caches.
     ///
     /// `token` holds one id shaped `[1, 1]`. Returns logits `[1, 1, V]`.
+    /// Positions past the rotary cache recompute the prefix on demand, so
+    /// generation continues past the configured context length.
     pub fn decode(
         &self,
         token: &Tensor,
@@ -1030,8 +1127,7 @@ impl Qwen3 {
             self.layers.len(),
             "Qwen3 decode needs one cache per layer"
         );
-        let cos = self.cos.narrow(1, pos, 1); // [1, 1, 1, D/2]
-        let sin = self.sin.narrow(1, pos, 1); // [1, 1, 1, D/2]
+        let (cos, sin) = self.rotary_at(pos); // [1, 1, 1, D/2]
 
         let mut x = self.embed_tokens.forward(token)?; // [1, 1, C]
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {

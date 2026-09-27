@@ -359,3 +359,80 @@ fn test_gpt_backward_conforms_with_candle_on_cpu_and_accelerators() {
         }
     }
 }
+
+fn tiny_extension_config(sequence_len: usize) -> gpt::GPTConfig {
+    gpt::GPTConfig {
+        vocab_size: 16,
+        sequence_len,
+        n_layer: 1,
+        n_head: 2,
+        n_embd: 8,
+        mlp_hidden_dim: 16,
+        rms_norm_eps: 1e-5,
+        rope_base: 10_000.0,
+        rope_scaling: gpt::RopeScaling::None,
+    }
+}
+
+fn share_gpt_weights(from: &gpt::GPT, to: &gpt::GPT) {
+    let from_parameters = from.parameters();
+    let to_parameters = to.parameters();
+    assert_eq!(from_parameters.len(), to_parameters.len(), "models must match");
+    for (source, target) in from_parameters.iter().zip(to_parameters.iter()) {
+        target.set(&source.detach()).unwrap();
+    }
+}
+
+fn extension_ids(seq_len: usize) -> Vec<i64> {
+    (0..seq_len).map(|i| (i % 15 + 1) as i64).collect()
+}
+
+#[test]
+fn test_gpt_within_context_matches_larger_native_cache() {
+    // Arrange: same weights under a 4-position cache and a 32-position cache.
+    let short = gpt::GPT::new(tiny_extension_config(4), ParamStore::new().root());
+    let long = gpt::GPT::new(tiny_extension_config(32), ParamStore::new().root());
+    share_gpt_weights(&short, &long);
+    let idx = Tensor::from_vec(extension_ids(4), (1, 4), Device::Cpu);
+
+    // Act
+    let short_logits = short.forward(&idx).unwrap().to_vec::<f32>().unwrap();
+    let long_logits = long.forward(&idx).unwrap().to_vec::<f32>().unwrap();
+
+    // Assert: the stored-cache path is untouched by the extension machinery.
+    assert_eq!(short_logits, long_logits);
+}
+
+#[test]
+fn test_gpt_just_over_boundary_matches_native_cache() {
+    // Arrange: a 4-position cache asked for 5 positions.
+    let short = gpt::GPT::new(tiny_extension_config(4), ParamStore::new().root());
+    let long = gpt::GPT::new(tiny_extension_config(32), ParamStore::new().root());
+    share_gpt_weights(&short, &long);
+    let idx = Tensor::from_vec(extension_ids(5), (1, 5), Device::Cpu);
+
+    // Act
+    let extended = short.forward(&idx).unwrap().to_vec::<f32>().unwrap();
+    let native = long.forward(&idx).unwrap().to_vec::<f32>().unwrap();
+
+    // Assert: the recomputed row matches a natively sized cache exactly.
+    assert_eq!(extended, native);
+    assert!(extended.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn test_gpt_long_prompt_matches_native_cache() {
+    // Arrange: a 4-position cache asked for 32 positions (8x over).
+    let short = gpt::GPT::new(tiny_extension_config(4), ParamStore::new().root());
+    let long = gpt::GPT::new(tiny_extension_config(32), ParamStore::new().root());
+    share_gpt_weights(&short, &long);
+    let idx = Tensor::from_vec(extension_ids(32), (1, 32), Device::Cpu);
+
+    // Act
+    let extended = short.forward(&idx).unwrap().to_vec::<f32>().unwrap();
+    let native = long.forward(&idx).unwrap().to_vec::<f32>().unwrap();
+
+    // Assert: every recomputed row matches a natively sized cache exactly.
+    assert_eq!(extended, native);
+    assert!(extended.iter().all(|v| v.is_finite()));
+}
