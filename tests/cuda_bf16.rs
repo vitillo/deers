@@ -644,3 +644,76 @@ fn bf16_checkpoint_loads_onto_cuda() {
     assert_eq!(loaded["w"].dtype(), DType::BF16);
     assert_eq!(loaded["w"].to_vec::<bf16>().unwrap(), values);
 }
+
+/// Primitive RMSNorm decomposition, mirroring the pre-fusion `RMSNorm::forward`.
+fn unfused_rms_norm(x: &Tensor, weight: Option<&Tensor>, eps: f64) -> Tensor {
+    let last = x.layout().ndim() - 1;
+    let mean_sq = (x * x).mean(vec![last], true);
+    let inv_norm = (mean_sq + eps).scalar_powf(-0.5);
+    let normed = x * &inv_norm;
+    match weight {
+        Some(w) => &normed * w,
+        None => normed,
+    }
+}
+
+#[test]
+fn fused_rms_norm_forward_and_backward_match_unfused() {
+    // Arrange: inner width past the 256-thread block with a tail, plus a
+    // small even-width case for the QK-norm shape family.
+    if !require_cuda() {
+        return;
+    }
+    for (outer, inner) in [(3usize, 300usize), (2, 128)] {
+        let values: Vec<f32> =
+            (0..outer * inner).map(|i| ((i * 37) % 101) as f32 / 50.0 - 1.0).collect();
+        let weights: Vec<f32> =
+            (0..inner).map(|i| 0.5 + ((i * 13) % 7) as f32 * 0.1).collect();
+        let x_cpu = Tensor::from_vec(
+            values.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+            vec![outer, inner],
+            Device::Cpu,
+        )
+        .attach();
+        let w_cpu = Tensor::from_vec(
+            weights.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+            vec![inner],
+            Device::Cpu,
+        )
+        .attach();
+        let x_cuda = Tensor::from_vec(
+            values.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+            vec![outer, inner],
+            Device::Cuda,
+        )
+        .attach();
+        let w_cuda = Tensor::from_vec(
+            weights.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+            vec![inner],
+            Device::Cuda,
+        )
+        .attach();
+
+        // Act: fused on CUDA against the primitive chain on CPU, forward and
+        // backward (the fused op reuses the unfused backward decomposition).
+        let expected_fwd = to_f32(&unfused_rms_norm(&x_cpu, Some(&w_cpu), 1e-6));
+        let actual_fwd = to_f32(&x_cuda.fused_rms_norm(Some(&w_cuda), 1e-6));
+        let cpu_loss = unfused_rms_norm(&x_cpu, Some(&w_cpu), 1e-6).sum(vec![0, 1], true);
+        let cuda_loss = x_cuda.fused_rms_norm(Some(&w_cuda), 1e-6).sum(vec![0, 1], true);
+        let expected_gx = to_f32(&cpu_loss.backward().unwrap().get(x_cpu.id()).unwrap());
+        let actual_gx = to_f32(&cuda_loss.backward().unwrap().get(x_cuda.id()).unwrap());
+        let expected_gw = to_f32(&cpu_loss.backward().unwrap().get(w_cpu.id()).unwrap());
+        let actual_gw = to_f32(&cuda_loss.backward().unwrap().get(w_cuda.id()).unwrap());
+
+        // Weightless forward must also match (scale of 1, no second input).
+        let expected_plain = to_f32(&unfused_rms_norm(&x_cpu, None, 1e-5));
+        let actual_plain = to_f32(&x_cuda.fused_rms_norm(None, 1e-5));
+
+        // Assert
+        let label = format!("fused rms_norm [{outer}, {inner}]");
+        assert_close(&actual_fwd, &expected_fwd, &format!("{label} fwd"));
+        assert_close(&actual_gx, &expected_gx, &format!("{label} bwd input grad"));
+        assert_close(&actual_gw, &expected_gw, &format!("{label} bwd weight grad"));
+        assert_close(&actual_plain, &expected_plain, &format!("{label} weightless fwd"));
+    }
+}

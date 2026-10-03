@@ -486,6 +486,16 @@ impl Tensor {
         ops::ScalarPowf::new(self.clone(), e).unwrap().forward().unwrap()
     }
 
+    /// RMSNorm over the last axis: `x * rsqrt(mean(x^2) + eps) * w`.
+    ///
+    /// CPU and CUDA run one fused kernel over the compacted input, replacing the
+    /// mul-mean-powf-mul-mul chain plus its two broadcast compacts. `weight`
+    /// holds one scale per last-axis element, or `None` for the weightless variant.
+    /// MPS has no Metal kernel yet and fails loudly until one lands.
+    pub fn fused_rms_norm(&self, weight: Option<&Tensor>, eps: f64) -> Tensor {
+        ops::FusedRmsNorm::new(self.clone(), weight.cloned(), eps).unwrap().forward().unwrap()
+    }
+
     /// Matrix multiplication: `[..., m, k] @ [..., k, n] -> [..., m, n]`.
     pub fn matmul(&self, other: &Tensor) -> Tensor {
         ops::MatMul::new(self.clone(), other.clone()).unwrap().forward().unwrap()

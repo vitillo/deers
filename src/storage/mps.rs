@@ -1997,6 +1997,20 @@ mod imp {
             Ok(Self::from_cpu_storage(inner))
         }
 
+        fn rms_norm_fwd(
+            &self,
+            _layout: &Layout,
+            _weight: Option<(&Self, &Layout)>,
+            _outer_size: usize,
+            _inner_size: usize,
+            _eps: f32,
+        ) -> Result<Self> {
+            // No Metal RMSNorm kernel yet: fail loudly instead of silently
+            // staging through the CPU, so the gap is visible until a native
+            // kernel lands.
+            Err(crate::error::Error::NotImplemented("mps rms_norm_fwd is not implemented"))
+        }
+
         fn dtype(&self) -> DType {
             match &self.inner {
                 MpsInner::Accelerated { dtype, .. } => *dtype,
@@ -2369,6 +2383,16 @@ mod imp {
             Self::unavailable()
         }
         fn log_softmax_bwd(&self, _: &Layout, _: &Self, _: &Layout, _: usize, _: usize) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn rms_norm_fwd(
+            &self,
+            _: &Layout,
+            _: Option<(&Self, &Layout)>,
+            _: usize,
+            _: usize,
+            _: f32,
+        ) -> Result<Self> {
             Self::unavailable()
         }
         fn dtype(&self) -> DType {
