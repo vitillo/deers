@@ -1259,7 +1259,7 @@ impl TensorOp for FusedRope {
             )?
         };
         let output =
-            Tensor::new(Arc::new(RwLock::new(out_storage)), self.x.layout().clone(), false, None);
+            Tensor::new(Arc::new(RwLock::new(out_storage)), Layout::from(self.x.layout().shape().clone()), false, None);
         self.saved = Some((self.cos.clone(), self.sin.clone()));
         Ok(Tensor::new(
             output.storage_clone(),
@@ -1429,7 +1429,7 @@ impl TensorOp for FusedMaskedSoftmax {
         };
         let output = Tensor::new(
             Arc::new(RwLock::new(out_storage)),
-            self.scores.layout().clone(),
+            Layout::from(self.scores.layout().shape().clone()),
             false,
             None,
         );
@@ -1504,7 +1504,7 @@ impl TensorOp for FusedSiluMul {
             gate_storage.silu_mul_fwd(gate_c.layout(), &up_storage, up_c.layout())?
         };
         let output =
-            Tensor::new(Arc::new(RwLock::new(out_storage)), self.gate.layout().clone(), false, None);
+            Tensor::new(Arc::new(RwLock::new(out_storage)), Layout::from(self.gate.layout().shape().clone()), false, None);
         self.saved = Some((gate_c, up_c));
         Ok(Tensor::new(
             output.storage_clone(),
@@ -1560,7 +1560,7 @@ impl TensorOp for FusedSilu {
             storage.silu_fwd(input.layout())?
         };
         let output =
-            Tensor::new(Arc::new(RwLock::new(out_storage)), self.arg.layout().clone(), false, None);
+            Tensor::new(Arc::new(RwLock::new(out_storage)), Layout::from(self.arg.layout().shape().clone()), false, None);
         self.saved = Some(input);
         Ok(Tensor::new(
             output.storage_clone(),
@@ -1648,7 +1648,7 @@ impl TensorOp for FusedRmsNorm {
         };
         let output = Tensor::new(
             Arc::new(RwLock::new(out_storage)),
-            self.arg.layout().clone(),
+            Layout::from(self.arg.layout().shape().clone()),
             false,
             None,
         );
@@ -1678,7 +1678,7 @@ impl TensorOp for FusedRmsNorm {
             let axes: Vec<usize> = (0..last).collect();
             let grad_w = (&grad_c * &xh).sum(axes, false);
             grads.accumulate(&self.arg, grad_x);
-            grads.accumulate(w, grad_w);
+            grads.accumulate(self.weight.as_ref().unwrap(), grad_w);
         } else {
             let dot = (&grad_c * &xh).sum(vec![last], true);
             let grad_x = (&grad_c - &((&xh * &dot) / inner_size as f64)) * &inv_r;
