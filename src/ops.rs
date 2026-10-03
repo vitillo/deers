@@ -14,7 +14,7 @@ use crate::backprop::GradientStore;
 use crate::error::{Error, Result};
 use crate::layout::{Layout, Shape};
 use crate::profiler;
-use crate::storage::{self, BackendStorage, MpsStorage, ReduceMax, ReduceSum, Storage};
+use crate::storage::{self, BackendStorage, ReduceMax, ReduceSum, Storage};
 use crate::tensor::Tensor;
 
 fn allocated_bytes(elements: usize, dtype: crate::DType) -> usize {
@@ -912,7 +912,12 @@ impl Reshape {
                 new_shape.size()
             )));
         }
-        Ok(Self { arg: arg.compact(), new_shape })
+        // A linear-span input reshapes as a view (length-1 dims never index,
+        // so narrowed/transposed views with parent strides stay views);
+        // anything else compacts once here instead of per read downstream.
+        let arg =
+            if arg.layout().has_compact_strides() { arg } else { arg.compact() };
+        Ok(Self { arg, new_shape })
     }
 }
 
@@ -920,8 +925,12 @@ impl TensorOp for Reshape {
     fn forward(self) -> Result<Tensor> {
         let _profile = profile_view("reshape", &[&self.arg]);
         let storage = self.arg.storage_clone();
+        // The constructor guarantees a linear span, so the view reuses the
+        // input offset with compact strides instead of dropping it.
+        let strides = self.new_shape.compact_strides();
+        let layout = Layout::new(self.new_shape.clone(), strides, self.arg.layout().offset);
 
-        Ok(Tensor::new(storage, Layout::from(self.new_shape.clone()), false, Some(Box::new(self))))
+        Ok(Tensor::new(storage, layout, false, Some(Box::new(self))))
     }
 
     fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
@@ -1181,7 +1190,510 @@ impl TensorOp for LogSumExp {
     }
 }
 
-/// Fused log-softmax: `x[i] - log(sum_j exp(x[j]))` per row, single kernel on CUDA.
+/// Fused RoPE over `[B, T, H, D]` rows: `y1 = x1*cos - x2*sin`,
+/// `y2 = x1*sin + x2*cos`, one CUDA kernel.
+///
+/// Replaces the narrow/broadcast-mul/sub/add/cat chain (16 kernels, 10 of
+/// them compacts). The backward reuses the unfused primitive decomposition
+/// (training only; decode runs under `no_grad`), so no fused backward exists.
+#[derive(Debug)]
+pub struct FusedRope {
+    x: Tensor,
+    cos: Tensor,
+    sin: Tensor,
+    /// Saved `(cos, sin)` for the backward pass, uncompacted: the backward
+    /// gradient math broadcasts either way, so no forward compact is spent
+    /// (those copies ran even under `no_grad` before).
+    saved: Option<(Tensor, Tensor)>,
+}
+
+impl FusedRope {
+    pub fn new(x: Tensor, cos: Tensor, sin: Tensor) -> Result<Self> {
+        Ok(Self { x, cos, sin, saved: None })
+    }
+}
+
+impl TensorOp for FusedRope {
+    fn forward(mut self) -> Result<Tensor> {
+        let _profile = profile_like("rope", &self.x);
+        let shape = self.x.layout().shape();
+        assert_eq!(shape.ndim(), 4, "RoPE expects a 4D attention tensor");
+        let head_dim = shape[3];
+        assert!(head_dim.is_multiple_of(2), "RoPE requires an even head dimension");
+        let half_dim = head_dim / 2;
+        assert_eq!(
+            self.cos.layout().shape(),
+            self.sin.layout().shape(),
+            "RoPE cos/sin shapes must match"
+        );
+        assert_eq!(
+            self.cos.layout().shape()[3],
+            half_dim,
+            "RoPE cache last dimension must equal head_dim / 2"
+        );
+        assert_eq!(self.cos.dtype(), self.x.dtype(), "RoPE cos dtype must match input");
+        assert_eq!(self.sin.dtype(), self.x.dtype(), "RoPE sin dtype must match input");
+        let outer_size = self.x.layout().size() / head_dim;
+        let n_heads = shape[2];
+        let t_len = shape[1];
+        let cos_t_len = self.cos.layout().shape()[1];
+        let x_c = self.x.compact();
+        // Cos/sin stay uncompacted: the kernel reads the narrowed cache rows
+        // through their view offset, saving two tiny compacts per rope.
+        // Backward keeps uncompacted clones for its broadcast gradient math.
+        let out_storage = {
+            let x_storage = x_c.storage();
+            let cos_storage = self.cos.storage();
+            let sin_storage = self.sin.storage();
+            x_storage.rope_fwd(
+                x_c.layout(),
+                &cos_storage,
+                self.cos.layout(),
+                &sin_storage,
+                self.sin.layout(),
+                outer_size,
+                head_dim,
+                n_heads,
+                t_len,
+                cos_t_len,
+            )?
+        };
+        let output =
+            Tensor::new(Arc::new(RwLock::new(out_storage)), Layout::from(self.x.layout().shape().clone()), false, None);
+        self.saved = Some((self.cos.clone(), self.sin.clone()));
+        Ok(Tensor::new(
+            output.storage_clone(),
+            output.layout().clone(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let (cos, sin) = self.saved.as_ref().expect("forward must run before backward");
+        let half_dim = self.x.layout().shape()[3] / 2;
+        let grad_c = out_grad.compact();
+        // y1 = x1*c - x2*s, y2 = x1*s + x2*c, so
+        // gx1 = g1*c + g2*s and gx2 = g2*c - g1*s.
+        let g1 = grad_c.narrow(3, 0, half_dim);
+        let g2 = grad_c.narrow(3, half_dim, half_dim);
+        let gx1 = (&g1 * cos) + &(&g2 * sin);
+        let gx2 = (&g2 * cos) - &(&g1 * sin);
+        grads.accumulate(&self.x, Tensor::cat(&[gx1, gx2], 3));
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.x, &self.cos, &self.sin]
+    }
+}
+
+/// Preallocated KV-cache append: writes one slice into the buffer at `offset`
+/// and returns the extended prefix view.
+///
+/// The hot path is one block copy with no realloc: the whole-cache compact,
+/// the double allocation, and the two device memcpys of the reallocating cat
+/// disappear. Growth stays outside this op: the caller concatenates once into
+/// a bigger buffer, so the hot path never pays it. The backward chains the
+/// prefix gradient into the previous view — the same chain the reallocating
+/// cat forms — so cache gradients stay exact; the holder is only a storage
+/// vehicle and never a gradient parent.
+#[derive(Debug)]
+pub struct CacheAppend {
+    buf: Tensor,
+    prev: Option<Tensor>,
+    new: Tensor,
+    offset: usize,
+}
+
+impl CacheAppend {
+    pub fn new(buf: Tensor, prev: Option<Tensor>, new: Tensor, offset: usize) -> Result<Self> {
+        Ok(Self { buf, prev, new, offset })
+    }
+}
+
+impl TensorOp for CacheAppend {
+    fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("cache_append", &self.new);
+        let buf_shape = self.buf.layout().shape();
+        let new_shape = self.new.layout().shape();
+        assert_eq!(buf_shape.ndim(), 4, "cache buffer must be shaped [B, H, Cap, D]");
+        assert_eq!(new_shape.ndim(), 4, "cache entries must be shaped [B, H, T, D]");
+        assert_eq!(new_shape[0], buf_shape[0], "cache batch mismatch");
+        assert_eq!(new_shape[1], buf_shape[1], "cache head mismatch");
+        assert_eq!(new_shape[3], buf_shape[3], "cache head width mismatch");
+        assert_eq!(self.new.dtype(), self.buf.dtype(), "cache dtype mismatch");
+        assert_eq!(self.new.device(), self.buf.device(), "cache device mismatch");
+        assert!(self.buf.is_compact(), "cache buffer must stay compact");
+        let grown = self.offset + new_shape[2];
+        assert!(
+            grown <= buf_shape[2],
+            "cache append overflows its buffer; grow first"
+        );
+        let out_layout = self.new.layout();
+        {
+            let mut buf_storage = self.buf.storage_mut();
+            // One `[B, H, T_new, D]` slice lands in buffer rows
+            // `[offset, offset + T_new)`: each of the B*H head runs copies
+            // T_new*D view-order elements to its own buffer row, so repeat
+            // broadcast views feed straight in with no pre-compact.
+            let blocks = buf_shape[0] * buf_shape[1];
+            let block_len = new_shape[2] * buf_shape[3];
+            let dst_base = self.offset * buf_shape[3];
+            let dst_stride = buf_shape[2] * buf_shape[3];
+            let new_storage = self.new.storage();
+            buf_storage.copy_blocks_into(
+                &new_storage,
+                out_layout,
+                blocks,
+                block_len,
+                dst_base,
+                dst_stride,
+            )?;
+        }
+        let view_shape =
+            vec![buf_shape[0], buf_shape[1], grown, buf_shape[3]];
+        let strides = buf_shape.clone().compact_strides();
+        let view_layout = Layout::new(view_shape, strides, 0);
+        Ok(Tensor::new(self.buf.storage_clone(), view_layout, false, Some(Box::new(self))))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let t_new = self.new.layout().shape()[2];
+        let grad_c = out_grad.compact();
+        grads.accumulate(&self.new, grad_c.narrow(2, self.offset, t_new));
+        if let Some(prev) = &self.prev {
+            grads.accumulate(prev, grad_c.narrow(2, 0, self.offset));
+        }
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        match &self.prev {
+            Some(prev) => vec![prev, &self.new],
+            None => vec![&self.new],
+        }
+    }
+}
+
+/// Fused scaled masked softmax: `softmax(scores*scale + mask)` rows, one CUDA kernel.
+///
+/// Replaces the scale multiply, the mask broadcast-add (plus its compact),
+/// and the log-softmax/exp pair. The backward reuses the unfused primitive
+/// decomposition (training only; decode runs under `no_grad`), so no fused
+/// backward exists.
+#[derive(Debug)]
+pub struct FusedMaskedSoftmax {
+    scores: Tensor,
+    mask: Tensor,
+    scale: f64,
+    /// Saved compacted `(scores, mask)` for the backward pass.
+    saved: Option<(Tensor, Tensor)>,
+}
+
+impl FusedMaskedSoftmax {
+    pub fn new(scores: Tensor, mask: Tensor, scale: f64) -> Result<Self> {
+        Ok(Self { scores, mask, scale, saved: None })
+    }
+}
+
+impl TensorOp for FusedMaskedSoftmax {
+    fn forward(mut self) -> Result<Tensor> {
+        let _profile = profile_like("masked_softmax", &self.scores);
+        let shape = self.scores.layout().shape();
+        assert!(shape.ndim() == 4, "masked softmax expects [B, H, T, K] scores");
+        let (t_len, inner_size) = (shape[2], shape[3]);
+        let outer_size = self.scores.layout().size() / inner_size;
+        let mask_shape = self.mask.layout().shape();
+        assert_eq!(mask_shape.ndim(), 4, "mask must be shaped [1, 1, Tm, K]");
+        assert_eq!(mask_shape[0], 1, "fused masked softmax needs batch-1 masks");
+        assert_eq!(mask_shape[1], 1, "fused masked softmax needs head-1 masks");
+        assert_eq!(mask_shape[3], inner_size, "mask width must match scores");
+        assert_eq!(self.scores.dtype(), self.mask.dtype(), "scores/mask dtype mismatch");
+        let mask_t_len = mask_shape[2];
+        let scores_c = self.scores.compact();
+        let mask_c = self.mask.compact();
+        let out_storage = {
+            let scores_storage = scores_c.storage();
+            let mask_storage = mask_c.storage();
+            scores_storage.masked_softmax_fwd(
+                scores_c.layout(),
+                &mask_storage,
+                mask_c.layout(),
+                outer_size,
+                inner_size,
+                self.scale as f32,
+                t_len,
+                mask_t_len,
+            )?
+        };
+        let output = Tensor::new(
+            Arc::new(RwLock::new(out_storage)),
+            Layout::from(self.scores.layout().shape().clone()),
+            false,
+            None,
+        );
+        self.saved = Some((scores_c, mask_c));
+        Ok(Tensor::new(
+            output.storage_clone(),
+            output.layout().clone(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let (scores, mask) = self.saved.as_ref().expect("forward must run before backward");
+        let last = self.scores.layout().ndim() - 1;
+        // Recompute the probabilities with the unfused chain, then apply the
+        // standard softmax gradient with the scale folded back into scores.
+        // The mask carries its unscaled share so every dependency gradients.
+        let probs = ((scores * self.scale) + mask).softmax(last);
+        let grad_c = out_grad.compact();
+        let dot = (&grad_c * &probs).sum(vec![last], true);
+        let shared = (&grad_c - &dot) * &probs;
+        grads.accumulate(&self.scores, &shared * self.scale);
+        // The mask broadcasts over its length-1 dims; its gradient sums them.
+        let mask_shape = self.mask.layout().shape();
+        let axes: Vec<usize> =
+            (0..last).filter(|&a| mask_shape[a] == 1).collect();
+        grads.accumulate(&self.mask, shared.sum(axes, true));
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.scores, &self.mask]
+    }
+}
+
+/// Fused SiLU-gate product: `silu(gate) * up`, one CUDA kernel.
+///
+/// Folds the SwiGLU gate multiply into the activation, dropping the SiLU
+/// intermediate, its allocation, and both launches. The backward reuses the
+/// unfused primitive decomposition (training only; decode runs under
+/// `no_grad`), so no fused backward exists.
+#[derive(Debug)]
+pub struct FusedSiluMul {
+    gate: Tensor,
+    up: Tensor,
+    /// Saved compacted `(gate, up)` for the backward pass. The SiLU output
+    /// is recomputed there, so inference pays no extra kernel.
+    saved: Option<(Tensor, Tensor)>,
+}
+
+impl FusedSiluMul {
+    pub fn new(gate: Tensor, up: Tensor) -> Result<Self> {
+        Ok(Self { gate, up, saved: None })
+    }
+}
+
+impl TensorOp for FusedSiluMul {
+    fn forward(mut self) -> Result<Tensor> {
+        let _profile = profile_like("silu_mul", &self.gate);
+        assert_eq!(
+            self.gate.layout().shape(),
+            self.up.layout().shape(),
+            "silu gate and up shapes must match"
+        );
+        assert_eq!(self.gate.dtype(), self.up.dtype(), "silu gate/up dtype mismatch");
+        let gate_c = self.gate.compact();
+        let up_c = self.up.compact();
+        let out_storage = {
+            let gate_storage = gate_c.storage();
+            let up_storage = up_c.storage();
+            gate_storage.silu_mul_fwd(gate_c.layout(), &up_storage, up_c.layout())?
+        };
+        let output =
+            Tensor::new(Arc::new(RwLock::new(out_storage)), Layout::from(self.gate.layout().shape().clone()), false, None);
+        self.saved = Some((gate_c, up_c));
+        Ok(Tensor::new(
+            output.storage_clone(),
+            output.layout().clone(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let (gate, up) = self.saved.as_ref().expect("forward must run before backward");
+        // y = silu(g) * u; dy/dg = u * sig(g) * (1 + g * (1 - sig(g))), dy/du = silu(g).
+        let grad_c = out_grad.compact();
+        let sig = gate.sigmoid();
+        let one_minus_sig = (&sig * -1.0) + 1.0;
+        let dgate = &grad_c * up;
+        let dgate = &dgate * &sig;
+        let dgate = &dgate * &((gate * &one_minus_sig) + 1.0);
+        grads.accumulate(&self.gate, dgate);
+        grads.accumulate(&self.up, &grad_c * &gate.silu());
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.gate, &self.up]
+    }
+}
+
+/// Fused SiLU: `x / (1 + exp(-x))`, one CUDA kernel.
+///
+/// Replaces the neg/exp/scalar-add/div/mul chain plus the broadcast compact
+/// in `sigmoid`. The backward reuses the unfused primitive decomposition
+/// (training only; decode runs under `no_grad`), so no fused backward exists.
+#[derive(Debug)]
+pub struct FusedSilu {
+    arg: Tensor,
+    /// Saved compacted input for the backward pass.
+    saved: Option<Tensor>,
+}
+
+impl FusedSilu {
+    pub fn new(arg: Tensor) -> Result<Self> {
+        Ok(Self { arg, saved: None })
+    }
+}
+
+impl TensorOp for FusedSilu {
+    fn forward(mut self) -> Result<Tensor> {
+        let _profile = profile_like("silu", &self.arg);
+        let input = self.arg.compact();
+        let out_storage = {
+            let storage = input.storage();
+            storage.silu_fwd(input.layout())?
+        };
+        let output =
+            Tensor::new(Arc::new(RwLock::new(out_storage)), Layout::from(self.arg.layout().shape().clone()), false, None);
+        self.saved = Some(input);
+        Ok(Tensor::new(
+            output.storage_clone(),
+            output.layout().clone(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let input = self.saved.as_ref().expect("forward must run before backward");
+        // y = x*sig(x); dy/dx = sig(x) * (1 + x * (1 - sig(x))).
+        let grad_c = out_grad.compact();
+        let sig = input.sigmoid();
+        let one_minus_sig = (&sig * -1.0) + 1.0;
+        let inner = (input * &one_minus_sig) + 1.0;
+        grads.accumulate(&self.arg, &grad_c * &(&sig * &inner));
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        vec![&self.arg]
+    }
+}
+
+/// Fused RMSNorm over the last axis: `x * rsqrt(mean(x^2) + eps) * w`, one CUDA kernel.
+///
+/// The forward compacts the input and reads the affine scale straight from the
+/// `[inner]` weight, replacing the mul-mean-powf-mul-mul chain plus its two
+/// broadcast compacts. The backward reuses the unfused primitive decomposition
+/// (training only; decode runs under `no_grad`), so no fused backward kernel exists.
+#[derive(Debug)]
+pub struct FusedRmsNorm {
+    arg: Tensor,
+    weight: Option<Tensor>,
+    eps: f64,
+    /// Saved compacted `(input, weight)` for the backward pass.
+    saved: Option<(Tensor, Option<Tensor>)>,
+}
+
+impl FusedRmsNorm {
+    pub fn new(arg: Tensor, weight: Option<Tensor>, eps: f64) -> Result<Self> {
+        Ok(Self { arg, weight, eps, saved: None })
+    }
+}
+
+impl TensorOp for FusedRmsNorm {
+    fn forward(mut self) -> Result<Tensor> {
+        let _profile = profile_like("rms_norm", &self.arg);
+        let ndim = self.arg.layout().ndim();
+        assert!(ndim >= 1, "rms_norm needs at least one axis");
+        let inner_size = self.arg.layout().shape()[ndim - 1];
+        let outer_size = self.arg.layout().size() / inner_size;
+        if let Some(weight) = &self.weight {
+            assert_eq!(weight.layout().ndim(), 1, "rms_norm weight must be a vector");
+            assert_eq!(
+                weight.layout().size(),
+                inner_size,
+                "rms_norm weight must match the last axis"
+            );
+            assert_eq!(
+                weight.dtype(),
+                self.arg.dtype(),
+                "rms_norm weight and input dtypes must match"
+            );
+        }
+        let input = self.arg.compact();
+        let weight_c = self.weight.as_ref().map(|w| w.compact());
+        let out_storage = {
+            let weight_storage;
+            let weight_pair = match &weight_c {
+                Some(w) => {
+                    weight_storage = w.storage();
+                    Some((&*weight_storage, w.layout()))
+                }
+                None => None,
+            };
+            input.storage().rms_norm_fwd(
+                input.layout(),
+                weight_pair,
+                outer_size,
+                inner_size,
+                self.eps as f32,
+            )?
+        };
+        let output = Tensor::new(
+            Arc::new(RwLock::new(out_storage)),
+            Layout::from(self.arg.layout().shape().clone()),
+            false,
+            None,
+        );
+        self.saved = Some((input, weight_c));
+        Ok(Tensor::new(
+            output.storage_clone(),
+            output.layout().clone(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        let (input, weight) =
+            self.saved.as_ref().expect("forward must run before backward");
+        let ndim = self.arg.layout().ndim();
+        let last = ndim - 1;
+        let inner_size = self.arg.layout().shape()[last];
+        let grad_c = out_grad.compact();
+        // y = w * x / r with r = sqrt(mean(x^2) + eps); xh = x / r.
+        let inv_r = ((input * input).mean(vec![last], true) + self.eps).scalar_powf(-0.5);
+        let xh = input * &inv_r;
+        if let Some(w) = weight {
+            let gw = &grad_c * w;
+            let dot = (&gw * &xh).sum(vec![last], true);
+            let grad_x = (&gw - &((&xh * &dot) / inner_size as f64)) * &inv_r;
+            let axes: Vec<usize> = (0..last).collect();
+            let grad_w = (&grad_c * &xh).sum(axes, false);
+            grads.accumulate(&self.arg, grad_x);
+            grads.accumulate(self.weight.as_ref().unwrap(), grad_w);
+        } else {
+            let dot = (&grad_c * &xh).sum(vec![last], true);
+            let grad_x = (&grad_c - &((&xh * &dot) / inner_size as f64)) * &inv_r;
+            grads.accumulate(&self.arg, grad_x);
+        }
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        match &self.weight {
+            Some(w) => vec![&self.arg, w],
+            None => vec![&self.arg],
+        }
+    }
+}
 ///
 /// The forward saves the output for use in the backward pass to avoid recomputing softmax.
 #[derive(Debug)]
@@ -1266,12 +1778,9 @@ impl Compact {
 impl TensorOp for Compact {
     fn forward(self) -> Result<Tensor> {
         let _profile = profile_like("compact", &self.arg);
-        let mut storage = match self.arg.device() {
-            crate::Device::Mps => {
-                Storage::Mps(MpsStorage::empty(self.arg.layout().size(), self.arg.dtype()))
-            }
-            _ => self.arg.device().zeros(self.arg.layout().size(), self.arg.dtype()),
-        };
+        // The copy kernel writes every element, so the buffer needs no
+        // zero-init (MPS already allocated it uninitialized).
+        let mut storage = self.arg.device().empty(self.arg.layout().size(), self.arg.dtype());
         self.arg.storage().copy_compact(self.arg.layout(), &mut storage)?;
         let strides = self.arg.layout().shape().compact_strides();
         let layout = Layout::new(self.arg.layout().shape().clone(), strides, 0);
@@ -2580,3 +3089,4 @@ impl TensorOp for Triu {
         vec![&self.arg]
     }
 }
+

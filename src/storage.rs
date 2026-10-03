@@ -317,6 +317,79 @@ pub trait BackendStorage: Sized {
         outer_size: usize,
         inner_size: usize,
     ) -> Result<Self>;
+    /// Fused RMSNorm forward: `dst = src * rsqrt(mean(src^2) + eps) * w` per row.
+    ///
+    /// `outer_size * inner_size` must equal `layout.size()`. The fused kernel
+    /// reads a compacted input; `weight` (if any) holds `inner_size` elements
+    /// of the same dtype.
+    fn rms_norm_fwd(
+        &self,
+        layout: &Layout,
+        weight: Option<(&Self, &Layout)>,
+        outer_size: usize,
+        inner_size: usize,
+        eps: f32,
+    ) -> Result<Self>;
+    /// Fused RoPE forward over `[B, T, H, D]` rows: `y1 = x1*cos - x2*sin`,
+    /// `y2 = x1*sin + x2*cos`, with the cos/sin row selected per token.
+    ///
+    /// `outer_size * head_dim` must equal `layout.size()`. Cos/sin hold
+    /// `cos_t_len` rows of `head_dim / 2` in the same dtype as the input.
+    #[allow(clippy::too_many_arguments)]
+    fn rope_fwd(
+        &self,
+        layout: &Layout,
+        cos: &Self,
+        cos_layout: &Layout,
+        sin: &Self,
+        sin_layout: &Layout,
+        outer_size: usize,
+        head_dim: usize,
+        n_heads: usize,
+        t_len: usize,
+        cos_t_len: usize,
+    ) -> Result<Self>;
+    /// Fused SiLU forward: `dst[i] = src[i] / (1 + exp(-src[i]))`.
+    ///
+    /// `layout.size()` elements are read in compact order and written to a
+    /// fresh compact buffer.
+    fn silu_fwd(&self, layout: &Layout) -> Result<Self>;
+    /// Copies `blocks` contiguous `block_len`-element runs from compact `src`
+    /// into `self`, where destination run `n` starts at
+    /// `dst_base + n * dst_stride`.
+    ///
+    /// `src_layout.size()` must equal `blocks * block_len`. The source is
+    /// read in view order through its strides (repeat broadcast views feed
+    /// straight in), so callers pass any layout with no pre-compact.
+    fn copy_blocks_into(
+        &mut self,
+        src: &Self,
+        src_layout: &Layout,
+        blocks: usize,
+        block_len: usize,
+        dst_base: usize,
+        dst_stride: usize,
+    ) -> Result<()>;
+    /// Fused SiLU-gate product: `dst[i] = silu(gate[i]) * up[i]`.
+    ///
+    /// Both inputs share `layout.size()` elements, read in compact order.
+    fn silu_mul_fwd(&self, layout: &Layout, up: &Self, up_layout: &Layout) -> Result<Self>;
+    /// Fused scaled masked softmax: `dst = softmax(scores*scale + mask)` rows.
+    ///
+    /// `outer_size * inner_size` must equal `layout.size()`. The mask holds
+    /// `mask_t_len` rows of `inner_size`, one per query position.
+    #[allow(clippy::too_many_arguments)]
+    fn masked_softmax_fwd(
+        &self,
+        layout: &Layout,
+        mask: &Self,
+        mask_layout: &Layout,
+        outer_size: usize,
+        inner_size: usize,
+        scale: f32,
+        t_len: usize,
+        mask_t_len: usize,
+    ) -> Result<Self>;
     /// Converts `layout` to `dtype` without leaving the device.
     ///
     /// The cast reads strided source elements and writes a compact output buffer:
@@ -476,6 +549,163 @@ impl BackendStorage for Storage {
                 grad.log_softmax_bwd(grad_layout, lsm, lsm_layout, outer_size, inner_size)?,
             )),
             _ => Err(Error::DeviceMismatch { op: "log_softmax_bwd" }),
+        }
+    }
+
+    fn rms_norm_fwd(
+        &self,
+        layout: &Layout,
+        weight: Option<(&Self, &Layout)>,
+        outer_size: usize,
+        inner_size: usize,
+        eps: f32,
+    ) -> Result<Self> {
+        match (self, weight) {
+            (Storage::Cpu(storage), None) => Ok(Self::Cpu(
+                storage.rms_norm_fwd(layout, None, outer_size, inner_size, eps)?,
+            )),
+            (Storage::Cpu(storage), Some((Storage::Cpu(w), w_layout))) => {
+                Ok(Self::Cpu(storage.rms_norm_fwd(
+                    layout,
+                    Some((w, w_layout)),
+                    outer_size,
+                    inner_size,
+                    eps,
+                )?))
+            }
+            (Storage::Cuda(storage), None) => Ok(Self::Cuda(
+                storage.rms_norm_fwd(layout, None, outer_size, inner_size, eps)?,
+            )),
+            (Storage::Cuda(storage), Some((Storage::Cuda(w), w_layout))) => {
+                Ok(Self::Cuda(storage.rms_norm_fwd(
+                    layout,
+                    Some((w, w_layout)),
+                    outer_size,
+                    inner_size,
+                    eps,
+                )?))
+            }
+            (Storage::Mps(storage), None) => Ok(Self::Mps(
+                storage.rms_norm_fwd(layout, None, outer_size, inner_size, eps)?,
+            )),
+            (Storage::Mps(storage), Some((Storage::Mps(w), w_layout))) => {
+                Ok(Self::Mps(storage.rms_norm_fwd(
+                    layout,
+                    Some((w, w_layout)),
+                    outer_size,
+                    inner_size,
+                    eps,
+                )?))
+            }
+            _ => Err(Error::DeviceMismatch { op: "rms_norm_fwd" }),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rope_fwd(
+        &self,
+        layout: &Layout,
+        cos: &Self,
+        cos_layout: &Layout,
+        sin: &Self,
+        sin_layout: &Layout,
+        outer_size: usize,
+        head_dim: usize,
+        n_heads: usize,
+        t_len: usize,
+        cos_t_len: usize,
+    ) -> Result<Self> {
+        match (self, cos, sin) {
+            (Storage::Cpu(x), Storage::Cpu(c), Storage::Cpu(s)) => Ok(Self::Cpu(x.rope_fwd(
+                layout, c, cos_layout, s, sin_layout,
+                outer_size, head_dim, n_heads, t_len, cos_t_len,
+            )?)),
+            (Storage::Cuda(x), Storage::Cuda(c), Storage::Cuda(s)) => Ok(Self::Cuda(x.rope_fwd(
+                layout, c, cos_layout, s, sin_layout,
+                outer_size, head_dim, n_heads, t_len, cos_t_len,
+            )?)),
+            (Storage::Mps(x), Storage::Mps(c), Storage::Mps(s)) => Ok(Self::Mps(x.rope_fwd(
+                layout, c, cos_layout, s, sin_layout,
+                outer_size, head_dim, n_heads, t_len, cos_t_len,
+            )?)),
+            _ => Err(Error::DeviceMismatch { op: "rope_fwd" }),
+        }
+    }
+
+    fn silu_fwd(&self, layout: &Layout) -> Result<Self> {
+        match self {
+            Storage::Cpu(storage) => Ok(Self::Cpu(storage.silu_fwd(layout)?)),
+            Storage::Cuda(storage) => Ok(Self::Cuda(storage.silu_fwd(layout)?)),
+            Storage::Mps(storage) => Ok(Self::Mps(storage.silu_fwd(layout)?)),
+        }
+    }
+
+    fn copy_blocks_into(
+        &mut self,
+        src: &Self,
+        src_layout: &Layout,
+        blocks: usize,
+        block_len: usize,
+        dst_base: usize,
+        dst_stride: usize,
+    ) -> Result<()> {
+        match (self, src) {
+            (Storage::Cpu(dst), Storage::Cpu(s)) => {
+                dst.copy_blocks_into(s, src_layout, blocks, block_len, dst_base, dst_stride)
+            }
+            (Storage::Cuda(dst), Storage::Cuda(s)) => {
+                dst.copy_blocks_into(s, src_layout, blocks, block_len, dst_base, dst_stride)
+            }
+            (Storage::Mps(dst), Storage::Mps(s)) => {
+                dst.copy_blocks_into(s, src_layout, blocks, block_len, dst_base, dst_stride)
+            }
+            _ => Err(Error::DeviceMismatch { op: "copy_blocks_into" }),
+        }
+    }
+
+    fn silu_mul_fwd(&self, layout: &Layout, up: &Self, up_layout: &Layout) -> Result<Self> {
+        match (self, up) {
+            (Storage::Cpu(gate), Storage::Cpu(u)) => {
+                Ok(Self::Cpu(gate.silu_mul_fwd(layout, u, up_layout)?))
+            }
+            (Storage::Cuda(gate), Storage::Cuda(u)) => {
+                Ok(Self::Cuda(gate.silu_mul_fwd(layout, u, up_layout)?))
+            }
+            (Storage::Mps(gate), Storage::Mps(u)) => {
+                Ok(Self::Mps(gate.silu_mul_fwd(layout, u, up_layout)?))
+            }
+            _ => Err(Error::DeviceMismatch { op: "silu_mul_fwd" }),
+        }
+    }
+
+    fn masked_softmax_fwd(
+        &self,
+        layout: &Layout,
+        mask: &Self,
+        mask_layout: &Layout,
+        outer_size: usize,
+        inner_size: usize,
+        scale: f32,
+        t_len: usize,
+        mask_t_len: usize,
+    ) -> Result<Self> {
+        match (self, mask) {
+            (Storage::Cpu(scores), Storage::Cpu(m)) => Ok(Self::Cpu(scores
+                .masked_softmax_fwd(
+                    layout, m, mask_layout,
+                    outer_size, inner_size, scale, t_len, mask_t_len,
+                )?)),
+            (Storage::Cuda(scores), Storage::Cuda(m)) => Ok(Self::Cuda(scores
+                .masked_softmax_fwd(
+                    layout, m, mask_layout,
+                    outer_size, inner_size, scale, t_len, mask_t_len,
+                )?)),
+            (Storage::Mps(scores), Storage::Mps(m)) => Ok(Self::Mps(scores
+                .masked_softmax_fwd(
+                    layout, m, mask_layout,
+                    outer_size, inner_size, scale, t_len, mask_t_len,
+                )?)),
+            _ => Err(Error::DeviceMismatch { op: "masked_softmax_fwd" }),
         }
     }
 

@@ -486,6 +486,26 @@ impl Tensor {
         ops::ScalarPowf::new(self.clone(), e).unwrap().forward().unwrap()
     }
 
+    /// RMSNorm over the last axis: `x * rsqrt(mean(x^2) + eps) * w`.
+    ///
+    /// On CUDA this is one fused kernel over the compacted input, replacing the
+    /// mul-mean-powf-mul-mul chain plus its two broadcast compacts. All other
+    /// devices run the primitive decomposition. `weight` holds one scale per
+    /// last-axis element, or `None` for the weightless variant.
+    pub fn fused_rms_norm(&self, weight: Option<&Tensor>, eps: f64) -> Tensor {
+        ops::FusedRmsNorm::new(self.clone(), weight.cloned(), eps).unwrap().forward().unwrap()
+    }
+
+    /// Fused RoPE over `[B, T, H, D]` rows: `y1 = x1*cos - x2*sin`, `y2 = x1*sin + x2*cos`.
+    ///
+    /// One kernel reads both halves plus the cos/sin row for the token position,
+    /// replacing the narrow/broadcast-mul/sub/add/cat chain. Cos/sin cover the
+    /// sequence with `head_dim / 2` elements per row, narrowing to one row per
+    /// token exactly like the unfused path.
+    pub fn fused_rope(&self, cos: &Tensor, sin: &Tensor) -> Tensor {
+        ops::FusedRope::new(self.clone(), cos.clone(), sin.clone()).unwrap().forward().unwrap()
+    }
+
     /// Matrix multiplication: `[..., m, k] @ [..., k, n] -> [..., m, n]`.
     pub fn matmul(&self, other: &Tensor) -> Tensor {
         ops::MatMul::new(self.clone(), other.clone()).unwrap().forward().unwrap()
@@ -560,7 +580,27 @@ impl Tensor {
 
     /// Element-wise SiLU (swish): `x * sigmoid(x)`.
     pub fn silu(&self) -> Tensor {
+        // Decode is launch-bound on this chain, so CUDA runs one fused kernel
+        // while every other device keeps the primitive decomposition.
+        if self.device() == crate::device::Device::Cuda {
+            return ops::FusedSilu::new(self.clone()).unwrap().forward().unwrap();
+        }
         self * &self.sigmoid()
+    }
+
+    /// SiLU-gate product: `silu(self) * up`, shapes must match.
+    ///
+    /// On CUDA this is one fused kernel over both inputs, dropping the SiLU
+    /// intermediate and the gate multiply launch. All other devices run the
+    /// primitive decomposition.
+    pub fn silu_mul(&self, up: &Tensor) -> Tensor {
+        if self.device() == crate::device::Device::Cuda {
+            return ops::FusedSiluMul::new(self.clone(), up.clone())
+                .unwrap()
+                .forward()
+                .unwrap();
+        }
+        &self.silu() * up
     }
 
     /// Element-wise GELU using the tanh approximation (candle / PyTorch `gelu`):
@@ -582,6 +622,31 @@ impl Tensor {
     /// Numerically stable softmax along the given axis.
     pub fn softmax(&self, axis: usize) -> Tensor {
         self.log_softmax(axis).exp()
+    }
+
+    /// Scaled masked softmax along `axis`: `softmax(self*scale + mask)`.
+    ///
+    /// On CUDA with a last-axis layout and a `[1, 1, Tm, K]` mask this is one
+    /// fused kernel over the compacted scores and the mask rows, replacing
+    /// the scale multiply, the mask broadcast-add, and the log-softmax/exp
+    /// pair. All other cases run the primitive decomposition.
+    pub fn scaled_masked_softmax(&self, mask: &Tensor, scale: f64, axis: usize) -> Tensor {
+        let last_axis = self.layout().ndim() - 1;
+        let mask_shape = mask.layout().shape();
+        let standard_mask = mask_shape.ndim() == 4
+            && mask_shape[0] == 1
+            && mask_shape[1] == 1
+            && mask_shape[3] == self.layout().shape()[last_axis];
+        if axis == last_axis
+            && standard_mask
+            && self.device() == crate::device::Device::Cuda
+        {
+            return ops::FusedMaskedSoftmax::new(self.clone(), mask.clone(), scale)
+                .unwrap()
+                .forward()
+                .unwrap();
+        }
+        ((self * scale) + mask).softmax(axis)
     }
 
     /// Mean along the given axes. If `keep_dims`, reduced axes become size 1.

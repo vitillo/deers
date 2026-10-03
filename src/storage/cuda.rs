@@ -14,8 +14,9 @@ const MAX_DIMS: usize = 8;
 #[cfg(all(feature = "cuda", target_os = "linux"))]
 mod imp {
     use super::*;
+    use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::{Arc, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use half::{bf16, f16};
 
@@ -25,7 +26,8 @@ mod imp {
         cublas::{CudaBlas, result as cublas_result, sys as cublas_sys},
         driver::{
             CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DevicePtrMut,
-            DeviceRepr, LaunchConfig, PushKernelArg, sys::CUevent_flags,
+            DeviceRepr, DeviceSlice, LaunchArgs, LaunchConfig, PushKernelArg, SyncOnDrop,
+            sys::{self, CUevent_flags},
         },
         nvrtc,
     };
@@ -484,6 +486,177 @@ mod imp {
     extern "C" __global__ void log_softmax_bwd_f16(const half* grad, const half* lsm_out, half* grad_input, unsigned int outer_size, unsigned int inner_size) { log_softmax_bwd_kernel(grad, lsm_out, grad_input, outer_size, inner_size); }
     extern "C" __global__ void log_softmax_bwd_bf16(const __nv_bfloat16* grad, const __nv_bfloat16* lsm_out, __nv_bfloat16* grad_input, unsigned int outer_size, unsigned int inner_size) { log_softmax_bwd_kernel(grad, lsm_out, grad_input, outer_size, inner_size); }
 
+    // Fused RMSNorm forward: dst[row,col] = src[row,col] * rsqrt(mean(src[row]^2) + eps) * w[col].
+    // One block per row, fp32 accumulation. When has_weight is 0 the scale is 1 and the
+    // weight pointer is ignored (callers pass a valid dummy pointer so launch args stay uniform).
+    template <typename T>
+    __global__ void rms_norm_fwd_kernel(const T* src, const T* weight, T* dst, unsigned int outer_size, unsigned int inner_size, float eps, unsigned int has_weight) {
+        unsigned int row = blockIdx.x;
+        if (row >= outer_size) return;
+        __shared__ float smem[REDUCE_THREADS];
+
+        // Pass 1: sum of squares.
+        float acc = 0.0f;
+        for (unsigned int col = threadIdx.x; col < inner_size; col += blockDim.x) {
+            float v = to_float(src[row * inner_size + col]);
+            acc += v * v;
+        }
+        smem[threadIdx.x] = acc;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+            if (threadIdx.x < stride) smem[threadIdx.x] += smem[threadIdx.x + stride];
+            __syncthreads();
+        }
+        if (threadIdx.x < 32) smem[threadIdx.x] = warp_reduce_sum(smem[threadIdx.x]);
+        __syncthreads();
+        float inv = rsqrtf(smem[0] / (float)inner_size + eps);
+
+        // Pass 2: normalize and scale.
+        for (unsigned int col = threadIdx.x; col < inner_size; col += blockDim.x) {
+            float v = to_float(src[row * inner_size + col]) * inv;
+            if (has_weight) v *= to_float(weight[col]);
+            dst[row * inner_size + col] = from_float<T>(v);
+        }
+    }
+
+    extern "C" __global__ void rms_norm_fwd_f32(const float* src, const float* weight, float* dst, unsigned int outer_size, unsigned int inner_size, float eps, unsigned int has_weight) { rms_norm_fwd_kernel(src, weight, dst, outer_size, inner_size, eps, has_weight); }
+    extern "C" __global__ void rms_norm_fwd_f16(const half* src, const half* weight, half* dst, unsigned int outer_size, unsigned int inner_size, float eps, unsigned int has_weight) { rms_norm_fwd_kernel(src, weight, dst, outer_size, inner_size, eps, has_weight); }
+    extern "C" __global__ void rms_norm_fwd_bf16(const __nv_bfloat16* src, const __nv_bfloat16* weight, __nv_bfloat16* dst, unsigned int outer_size, unsigned int inner_size, float eps, unsigned int has_weight) { rms_norm_fwd_kernel(src, weight, dst, outer_size, inner_size, eps, has_weight); }
+
+    // Fused RoPE forward over `[B, T, H, D]` rows: y1 = x1*cos - x2*sin,
+    // y2 = x1*sin + x2*cos, with cos/sin rows selected by token position.
+    // One block per (batch, token, head) row; all math in fp32.
+    template <typename T>
+    __global__ void rope_fwd_kernel(const T* x, const T* cos, const T* sin, T* dst, unsigned int outer_size, unsigned int head_dim, unsigned int n_heads, unsigned int t_len, unsigned int cos_t_len, unsigned int cos_base, unsigned int sin_base) {
+        unsigned int row = blockIdx.x;
+        if (row >= outer_size) return;
+        unsigned int half = head_dim / 2;
+        unsigned int t = (row / n_heads) % t_len;
+        unsigned int ct = t % cos_t_len;
+        for (unsigned int col = threadIdx.x; col < head_dim; col += blockDim.x) {
+            if (col < half) {
+                float x1 = to_float(x[row * head_dim + col]);
+                float x2 = to_float(x[row * head_dim + col + half]);
+                float c = to_float(cos[cos_base + ct * half + col]);
+                float s = to_float(sin[sin_base + ct * half + col]);
+                dst[row * head_dim + col] = from_float<T>(x1 * c - x2 * s);
+            } else {
+                unsigned int h = col - half;
+                float x1 = to_float(x[row * head_dim + h]);
+                float x2 = to_float(x[row * head_dim + col]);
+                float c = to_float(cos[cos_base + ct * half + h]);
+                float s = to_float(sin[sin_base + ct * half + h]);
+                dst[row * head_dim + col] = from_float<T>(x1 * s + x2 * c);
+            }
+        }
+    }
+
+    extern "C" __global__ void rope_fwd_f32(const float* x, const float* cos, const float* sin, float* dst, unsigned int outer_size, unsigned int head_dim, unsigned int n_heads, unsigned int t_len, unsigned int cos_t_len, unsigned int cos_base, unsigned int sin_base) { rope_fwd_kernel(x, cos, sin, dst, outer_size, head_dim, n_heads, t_len, cos_t_len, cos_base, sin_base); }
+    extern "C" __global__ void rope_fwd_f16(const half* x, const half* cos, const half* sin, half* dst, unsigned int outer_size, unsigned int head_dim, unsigned int n_heads, unsigned int t_len, unsigned int cos_t_len, unsigned int cos_base, unsigned int sin_base) { rope_fwd_kernel(x, cos, sin, dst, outer_size, head_dim, n_heads, t_len, cos_t_len, cos_base, sin_base); }
+    extern "C" __global__ void rope_fwd_bf16(const __nv_bfloat16* x, const __nv_bfloat16* cos, const __nv_bfloat16* sin, __nv_bfloat16* dst, unsigned int outer_size, unsigned int head_dim, unsigned int n_heads, unsigned int t_len, unsigned int cos_t_len, unsigned int cos_base, unsigned int sin_base) { rope_fwd_kernel(x, cos, sin, dst, outer_size, head_dim, n_heads, t_len, cos_t_len, cos_base, sin_base); }
+
+    // Fused SiLU forward: dst[i] = src[i] / (1 + exp(-src[i])), fp32 math.
+    template <typename T>
+    __global__ void silu_fwd_kernel(const T* src, T* dst, unsigned int size) {
+        unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+        if (i >= size) return;
+        float v = to_float(src[i]);
+        dst[i] = from_float<T>(v / (1.0f + expf(-v)));
+    }
+
+    extern "C" __global__ void silu_fwd_f32(const float* src, float* dst, unsigned int size) { silu_fwd_kernel(src, dst, size); }
+    extern "C" __global__ void silu_fwd_f16(const half* src, half* dst, unsigned int size) { silu_fwd_kernel(src, dst, size); }
+    extern "C" __global__ void silu_fwd_bf16(const __nv_bfloat16* src, __nv_bfloat16* dst, unsigned int size) { silu_fwd_kernel(src, dst, size); }
+
+    // Fused SiLU-gate product: dst[i] = silu(gate[i]) * up[i], fp32 math.
+    // Folds the SwiGLU gate multiply into the activation, dropping the
+    // intermediate and its launch.
+    template <typename T>
+    __global__ void silu_mul_fwd_kernel(const T* gate, const T* up, T* dst, unsigned int size) {
+        unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+        if (i >= size) return;
+        float g = to_float(gate[i]);
+        dst[i] = from_float<T>(g / (1.0f + expf(-g)) * to_float(up[i]));
+    }
+
+    extern "C" __global__ void silu_mul_fwd_f32(const float* gate, const float* up, float* dst, unsigned int size) { silu_mul_fwd_kernel(gate, up, dst, size); }
+    extern "C" __global__ void silu_mul_fwd_f16(const half* gate, const half* up, half* dst, unsigned int size) { silu_mul_fwd_kernel(gate, up, dst, size); }
+    extern "C" __global__ void silu_mul_fwd_bf16(const __nv_bfloat16* gate, const __nv_bfloat16* up, __nv_bfloat16* dst, unsigned int size) { silu_mul_fwd_kernel(gate, up, dst, size); }
+
+    // Fused scaled masked softmax: dst[row,col] = softmax(scores*scale + mask).
+    // One block per query row; the mask holds one row per query position.
+    // Scores are row-major [B, H, Tq, Tk]: the query position is row % t_len.
+    template <typename T>
+    __global__ void masked_softmax_fwd_kernel(const T* scores, const T* mask, T* dst, float scale, unsigned int outer_size, unsigned int inner_size, unsigned int t_len, unsigned int mask_t_len, unsigned int mask_base) {
+        unsigned int row = blockIdx.x;
+        if (row >= outer_size) return;
+        __shared__ float smem[REDUCE_THREADS];
+        unsigned int t = row % t_len;
+        unsigned int mt = t % mask_t_len;
+
+        // Pass 1: row max of scores*scale + mask.
+        float row_max = -1.0f / 0.0f;
+        for (unsigned int col = threadIdx.x; col < inner_size; col += blockDim.x) {
+            float v = to_float(scores[row * inner_size + col]) * scale + to_float(mask[mask_base + mt * inner_size + col]);
+            row_max = fmaxf(row_max, v);
+        }
+        smem[threadIdx.x] = row_max;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+            if (threadIdx.x < stride) smem[threadIdx.x] = fmaxf(smem[threadIdx.x], smem[threadIdx.x + stride]);
+            __syncthreads();
+        }
+        if (threadIdx.x < 32) smem[threadIdx.x] = warp_reduce_max(smem[threadIdx.x]);
+        __syncthreads();
+        row_max = smem[0];
+
+        // Pass 2: sum(exp(v - max)).
+        float acc = 0.0f;
+        for (unsigned int col = threadIdx.x; col < inner_size; col += blockDim.x) {
+            float v = to_float(scores[row * inner_size + col]) * scale + to_float(mask[mask_base + mt * inner_size + col]);
+            acc += expf(v - row_max);
+        }
+        smem[threadIdx.x] = acc;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+            if (threadIdx.x < stride) smem[threadIdx.x] += smem[threadIdx.x + stride];
+            __syncthreads();
+        }
+        if (threadIdx.x < 32) smem[threadIdx.x] = warp_reduce_sum(smem[threadIdx.x]);
+        __syncthreads();
+        float inv_sum = 1.0f / smem[0];
+
+        // Pass 3: write normalized probabilities.
+        for (unsigned int col = threadIdx.x; col < inner_size; col += blockDim.x) {
+            float v = to_float(scores[row * inner_size + col]) * scale + to_float(mask[mask_base + mt * inner_size + col]);
+            dst[row * inner_size + col] = from_float<T>(expf(v - row_max) * inv_sum);
+        }
+    }
+
+    extern "C" __global__ void masked_softmax_fwd_f32(const float* scores, const float* mask, float* dst, float scale, unsigned int outer_size, unsigned int inner_size, unsigned int t_len, unsigned int mask_t_len, unsigned int mask_base) { masked_softmax_fwd_kernel(scores, mask, dst, scale, outer_size, inner_size, t_len, mask_t_len, mask_base); }
+    extern "C" __global__ void masked_softmax_fwd_f16(const half* scores, const half* mask, half* dst, float scale, unsigned int outer_size, unsigned int inner_size, unsigned int t_len, unsigned int mask_t_len, unsigned int mask_base) { masked_softmax_fwd_kernel(scores, mask, dst, scale, outer_size, inner_size, t_len, mask_t_len, mask_base); }
+    extern "C" __global__ void masked_softmax_fwd_bf16(const __nv_bfloat16* scores, const __nv_bfloat16* mask, __nv_bfloat16* dst, float scale, unsigned int outer_size, unsigned int inner_size, unsigned int t_len, unsigned int mask_t_len, unsigned int mask_base) { masked_softmax_fwd_kernel(scores, mask, dst, scale, outer_size, inner_size, t_len, mask_t_len, mask_base); }
+
+    // Block copy with a strided source: `blocks` runs of `block_len` view-order
+    // elements, where destination run `n` starts at `dst_base + n * dst_stride`.
+    // Copies one `[B, H, T, D]` slice (e.g. a repeat broadcast view) into the
+    // rows `[off, off + T)` of a `[B, H, Cap, D]` buffer without compacting
+    // the source first.
+    template <typename T>
+    __global__ void copy_blocks_kernel(const T* src, T* dst, StridedMeta meta, unsigned int total, unsigned int block_len, unsigned int dst_base, unsigned int dst_stride) {
+        unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+        if (i >= total) return;
+        unsigned int b = i / block_len;
+        unsigned int j = i % block_len;
+        dst[dst_base + b * dst_stride + j] = src[compact_to_strided(b * block_len + j, &meta)];
+    }
+
+    extern "C" __global__ void copy_blocks_f32(const float* src, float* dst, StridedMeta meta, unsigned int total, unsigned int block_len, unsigned int dst_base, unsigned int dst_stride) { copy_blocks_kernel(src, dst, meta, total, block_len, dst_base, dst_stride); }
+    extern "C" __global__ void copy_blocks_f16(const half* src, half* dst, StridedMeta meta, unsigned int total, unsigned int block_len, unsigned int dst_base, unsigned int dst_stride) { copy_blocks_kernel(src, dst, meta, total, block_len, dst_base, dst_stride); }
+    extern "C" __global__ void copy_blocks_bf16(const __nv_bfloat16* src, __nv_bfloat16* dst, StridedMeta meta, unsigned int total, unsigned int block_len, unsigned int dst_base, unsigned int dst_stride) { copy_blocks_kernel(src, dst, meta, total, block_len, dst_base, dst_stride); }
+    extern "C" __global__ void copy_blocks_i64(const long long* src, long long* dst, StridedMeta meta, unsigned int total, unsigned int block_len, unsigned int dst_base, unsigned int dst_stride) { copy_blocks_kernel(src, dst, meta, total, block_len, dst_base, dst_stride); }
+
+
     template <typename T>
     __global__ void gather_kernel(const T* src, const index_t* indices, T* dst, unsigned int left_len, unsigned int src_dim, unsigned int dst_dim, unsigned int right_len) {
         unsigned int right = blockIdx.x * blockDim.x + threadIdx.x;
@@ -581,10 +754,193 @@ mod imp {
 
     #[derive(Clone, Debug)]
     pub enum CudaInner {
-        F16(CudaSlice<f16>),
-        BF16(CudaSlice<bf16>),
-        F32(CudaSlice<f32>),
-        I64(CudaSlice<i64>),
+        F16(Pooled<f16>),
+        BF16(Pooled<bf16>),
+        F32(Pooled<f32>),
+        I64(Pooled<i64>),
+    }
+
+    /// Cap on retained pooled memory: decoding repeats a few shapes, so a
+    /// small pool absorbs nearly every temporary while prefill one-offs
+    /// drain back to the driver.
+    const POOL_MAX_BYTES: usize = 256 << 20;
+    /// Cap per exact-size bucket, so a shape spike cannot pin unbounded blocks.
+    const POOL_MAX_BLOCKS_PER_BUCKET: usize = 32;
+
+    /// Stream-ordered device memory pool.
+    ///
+    /// Decode allocates thousands of same-shape temporaries per token while
+    /// the driver round trip costs ~1 us per alloc/free on the host thread,
+    /// which is wall-critical. Buckets key exact `(dtype, len)` pairs: every
+    /// decode temporary repeats every step, so hits are the norm and cold
+    /// shapes fall through to the driver. Deers runs one stream, so
+    /// last-in first-out reuse is ordering-safe by construction. Only
+    /// uninitialized temporaries pool: zeroed or transferred memory enters
+    /// freely (its content is irrelevant on checkout) but never checks out
+    /// anywhere except `alloc_uninit`. Set `DEERS_NO_POOL` to bypass the pool
+    /// when bisecting.
+    #[derive(Debug, Default)]
+    pub(crate) struct CudaPool {
+        f16: HashMap<usize, Vec<CudaSlice<f16>>>,
+        bf16: HashMap<usize, Vec<CudaSlice<bf16>>>,
+        f32: HashMap<usize, Vec<CudaSlice<f32>>>,
+        i64: HashMap<usize, Vec<CudaSlice<i64>>>,
+        buffered_bytes: usize,
+    }
+
+    static POOL: OnceLock<Mutex<CudaPool>> = OnceLock::new();
+
+    fn pool() -> &'static Mutex<CudaPool> {
+        POOL.get_or_init(|| Mutex::new(CudaPool::default()))
+    }
+
+    fn pool_enabled() -> bool {
+        static DISABLED: OnceLock<bool> = OnceLock::new();
+        !DISABLED.get_or_init(|| std::env::var("DEERS_NO_POOL").is_ok())
+    }
+
+    /// Pool bucket access per element type.
+    pub(crate) trait PoolBucket: DeviceRepr + Sized {
+        fn bucket(pool: &mut CudaPool) -> &mut HashMap<usize, Vec<CudaSlice<Self>>>;
+    }
+
+    macro_rules! pool_bucket {
+        ($t:ty, $field:ident) => {
+            impl PoolBucket for $t {
+                fn bucket(pool: &mut CudaPool) -> &mut HashMap<usize, Vec<CudaSlice<Self>>> {
+                    &mut pool.$field
+                }
+            }
+        };
+    }
+
+    pool_bucket!(f16, f16);
+    pool_bucket!(bf16, bf16);
+    pool_bucket!(f32, f32);
+    pool_bucket!(i64, i64);
+
+    fn pool_bytes<T>(len: usize) -> usize {
+        len * std::mem::size_of::<T>()
+    }
+
+    fn pool_checkout<T: PoolBucket>(len: usize) -> Option<CudaSlice<T>> {
+        if !pool_enabled() {
+            return None;
+        }
+        let mut guard = pool().lock().unwrap_or_else(|err| err.into_inner());
+        let stack = T::bucket(&mut guard).get_mut(&len)?;
+        let slice = stack.pop()?;
+        if stack.is_empty() {
+            T::bucket(&mut guard).remove(&len);
+        }
+        guard.buffered_bytes -= pool_bytes::<T>(len);
+        Some(slice)
+    }
+
+    fn pool_checkin<T: PoolBucket>(slice: CudaSlice<T>) {
+        if !pool_enabled() {
+            return;
+        }
+        let len = slice.len();
+        let mut guard = pool().lock().unwrap_or_else(|err| err.into_inner());
+        let waits_full = {
+            let stack = T::bucket(&mut guard).entry(len).or_default();
+            stack.len() >= POOL_MAX_BLOCKS_PER_BUCKET
+        };
+        if waits_full || guard.buffered_bytes + pool_bytes::<T>(len) > POOL_MAX_BYTES {
+            return;
+        }
+        guard.buffered_bytes += pool_bytes::<T>(len);
+        T::bucket(&mut guard).entry(len).or_default().push(slice);
+    }
+
+    /// Device slice with pool-aware drop: exact-size buckets in [`CudaPool`].
+    ///
+    /// Derefs to the slice, so kernels, views, and length queries work
+    /// unchanged; kernel launch args forward to the inner slice explicitly
+    /// below. Cloning deep-copies through the driver, exactly like the
+    /// wrapped slice.
+    #[derive(Debug)]
+    pub(crate) struct Pooled<T: PoolBucket> {
+        slice: Option<CudaSlice<T>>,
+    }
+
+    impl<T: PoolBucket> Pooled<T> {
+        fn fresh(slice: CudaSlice<T>) -> Self {
+            Self { slice: Some(slice) }
+        }
+    }
+
+    impl<T: PoolBucket> std::ops::Deref for Pooled<T> {
+        type Target = CudaSlice<T>;
+
+        fn deref(&self) -> &Self::Target {
+            self.slice.as_ref().expect("pooled slice taken")
+        }
+    }
+
+    impl<T: PoolBucket> std::ops::DerefMut for Pooled<T> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            self.slice.as_mut().expect("pooled slice taken")
+        }
+    }
+
+    impl<T: PoolBucket> Drop for Pooled<T> {
+        fn drop(&mut self) {
+            if let Some(slice) = self.slice.take() {
+                pool_checkin(slice);
+            }
+        }
+    }
+
+    impl<T: PoolBucket> Clone for Pooled<T> {
+        fn clone(&self) -> Self {
+            Self::fresh((**self).clone())
+        }
+    }
+
+    unsafe impl<'a, 'b: 'a, T: PoolBucket> PushKernelArg<&'b Pooled<T>> for LaunchArgs<'a> {
+        #[inline(always)]
+        fn arg(&mut self, arg: &'b Pooled<T>) -> &mut Self {
+            let inner: &CudaSlice<T> = arg;
+            self.arg(inner)
+        }
+    }
+
+    unsafe impl<'a, 'b: 'a, T: PoolBucket> PushKernelArg<&'b mut Pooled<T>> for LaunchArgs<'a> {
+        #[inline(always)]
+        fn arg(&mut self, arg: &'b mut Pooled<T>) -> &mut Self {
+            let inner: &mut CudaSlice<T> = arg;
+            self.arg(inner)
+        }
+    }
+
+    impl<T: PoolBucket> DeviceSlice<T> for Pooled<T> {
+        fn len(&self) -> usize {
+            (**self).len()
+        }
+
+        fn stream(&self) -> &Arc<CudaStream> {
+            (**self).stream()
+        }
+    }
+
+    impl<T: PoolBucket> DevicePtr<T> for Pooled<T> {
+        fn device_ptr<'a>(
+            &'a self,
+            stream: &'a CudaStream,
+        ) -> (sys::CUdeviceptr, SyncOnDrop<'a>) {
+            (**self).device_ptr(stream)
+        }
+    }
+
+    impl<T: PoolBucket> DevicePtrMut<T> for Pooled<T> {
+        fn device_ptr_mut<'a>(
+            &'a mut self,
+            stream: &'a CudaStream,
+        ) -> (sys::CUdeviceptr, SyncOnDrop<'a>) {
+            (**self).device_ptr_mut(stream)
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -773,13 +1129,17 @@ mod imp {
     /// # Safety
     ///
     /// The caller must ensure every element is written before it is read.
-    unsafe fn alloc_uninit<T: DeviceRepr>(
+    unsafe fn alloc_uninit<T: PoolBucket>(
         runtime: &CudaRuntime,
         len: usize,
-    ) -> Result<CudaSlice<T>> {
+    ) -> Result<Pooled<T>> {
         // SAFETY: the caller is responsible for writing every element before reading.
-        unsafe { runtime.stream.alloc::<T>(len) }
-            .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))
+        if let Some(slice) = pool_checkout::<T>(len) {
+            return Ok(Pooled::fresh(slice));
+        }
+        let slice = unsafe { runtime.stream.alloc::<T>(len) }
+            .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+        Ok(Pooled::fresh(slice))
     }
 
     impl CudaStorage {
@@ -792,7 +1152,7 @@ mod imp {
         /// # Safety
         ///
         /// The caller must write every element before reading.
-        fn uninit(size: usize, dtype: DType) -> Result<Self> {
+        pub(crate) fn uninit(size: usize, dtype: DType) -> Result<Self> {
             let runtime = runtime()?;
             let inner = match dtype {
                 DType::F16 => CudaInner::F16(unsafe { alloc_uninit::<f16>(&runtime, size) }?),
@@ -806,18 +1166,18 @@ mod imp {
         pub fn zeros(size: usize, dtype: DType) -> Self {
             let runtime = runtime().expect("cuda backend unavailable");
             let inner = match dtype {
-                DType::F16 => CudaInner::F16(
+                DType::F16 => CudaInner::F16(Pooled::fresh(
                     runtime.stream.alloc_zeros::<f16>(size).expect("cuda alloc failed"),
-                ),
-                DType::BF16 => CudaInner::BF16(
+                )),
+                DType::BF16 => CudaInner::BF16(Pooled::fresh(
                     runtime.stream.alloc_zeros::<bf16>(size).expect("cuda alloc failed"),
-                ),
-                DType::F32 => CudaInner::F32(
+                )),
+                DType::F32 => CudaInner::F32(Pooled::fresh(
                     runtime.stream.alloc_zeros::<f32>(size).expect("cuda alloc failed"),
-                ),
-                DType::I64 => CudaInner::I64(
+                )),
+                DType::I64 => CudaInner::I64(Pooled::fresh(
                     runtime.stream.alloc_zeros::<i64>(size).expect("cuda alloc failed"),
-                ),
+                )),
             };
             Self { inner, runtime }
         }
@@ -836,18 +1196,18 @@ mod imp {
         pub fn from_cpu_storage(inner: CpuStorage) -> Self {
             let runtime = runtime().expect("cuda backend unavailable");
             let inner = match inner {
-                CpuStorage::F16(data) => {
-                    CudaInner::F16(runtime.stream.clone_htod(&data).expect("cuda copy failed"))
-                }
-                CpuStorage::BF16(data) => {
-                    CudaInner::BF16(runtime.stream.clone_htod(&data).expect("cuda copy failed"))
-                }
-                CpuStorage::F32(data) => {
-                    CudaInner::F32(runtime.stream.clone_htod(&data).expect("cuda copy failed"))
-                }
-                CpuStorage::I64(data) => {
-                    CudaInner::I64(runtime.stream.clone_htod(&data).expect("cuda copy failed"))
-                }
+                CpuStorage::F16(data) => CudaInner::F16(Pooled::fresh(
+                    runtime.stream.clone_htod(&data).expect("cuda copy failed"),
+                )),
+                CpuStorage::BF16(data) => CudaInner::BF16(Pooled::fresh(
+                    runtime.stream.clone_htod(&data).expect("cuda copy failed"),
+                )),
+                CpuStorage::F32(data) => CudaInner::F32(Pooled::fresh(
+                    runtime.stream.clone_htod(&data).expect("cuda copy failed"),
+                )),
+                CpuStorage::I64(data) => CudaInner::I64(Pooled::fresh(
+                    runtime.stream.clone_htod(&data).expect("cuda copy failed"),
+                )),
             };
             Self { inner, runtime }
         }
@@ -921,19 +1281,19 @@ mod imp {
             let inner = match src {
                 CpuStorage::F16(data) => {
                     let staged = CpuStorage::borrow_or_compact(data, src, layout);
-                    CudaInner::F16(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?)
+                    CudaInner::F16(Pooled::fresh(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?))
                 }
                 CpuStorage::BF16(data) => {
                     let staged = CpuStorage::borrow_or_compact(data, src, layout);
-                    CudaInner::BF16(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?)
+                    CudaInner::BF16(Pooled::fresh(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?))
                 }
                 CpuStorage::F32(data) => {
                     let staged = CpuStorage::borrow_or_compact(data, src, layout);
-                    CudaInner::F32(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?)
+                    CudaInner::F32(Pooled::fresh(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?))
                 }
                 CpuStorage::I64(data) => {
                     let staged = CpuStorage::borrow_or_compact(data, src, layout);
-                    CudaInner::I64(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?)
+                    CudaInner::I64(Pooled::fresh(runtime.stream.clone_htod(&staged[..]).map_err(map_err)?))
                 }
             };
             Ok(Self { inner, runtime })
@@ -1023,14 +1383,14 @@ mod imp {
             }
         }
 
-        fn compact(&self, layout: &Layout) -> Result<Self> {
+        fn compact(&self, layout: &Layout) -> Result<std::borrow::Cow<'_, Self>> {
             if layout.is_compact() && layout.offset == 0 && layout.size() == self.len() {
-                return Ok(self.clone());
+                return Ok(std::borrow::Cow::Borrowed(self));
             }
             // copy_compact writes every element, so no zeroing needed.
             let mut out = Self::uninit(layout.size(), self.dtype())?;
             self.copy_compact(layout, &mut out)?;
-            Ok(out)
+            Ok(std::borrow::Cow::Owned(out))
         }
 
         fn launch_unary_f16(&self, kernel: &str, src: &CudaSlice<f16>) -> Result<Self> {
@@ -1131,11 +1491,11 @@ mod imp {
 
         /// Launches a `cast_<src>_<dst>` kernel over a compact source slice,
         /// wrapping the fresh device buffer in the matching [`CudaInner`] variant.
-        fn launch_cast<S: DeviceRepr, D: DeviceRepr>(
+        fn launch_cast<S: DeviceRepr, D: PoolBucket>(
             &self,
             kernel: &str,
             src: &CudaSlice<S>,
-            wrap: impl FnOnce(CudaSlice<D>) -> CudaInner,
+            wrap: impl FnOnce(Pooled<D>) -> CudaInner,
         ) -> Result<Self> {
             let out = unsafe { alloc_uninit::<D>(&self.runtime, src.len()) }?;
             let len = src.len() as u32;
@@ -1482,6 +1842,12 @@ mod imp {
             /// passed to cuBLAS without compacting — i.e., it is row-major contiguous or
             /// has only the last two dims transposed with contiguous batch dims.
             /// Uses the same convention as candle: the last two strides determine the op.
+            ///
+            /// Batch dims with length 1 never index, and a single indexing batch
+            /// dim may use any non-overlapping stride: strided-batched GEMM
+            /// takes it explicitly, so padded batches (KV-cache prefix views)
+            /// flow straight into the call. Multiple indexing batch dims still
+            /// require dense packing, exactly as before.
             fn try_gemm_params(
                 layout: &Layout,
                 rows: usize,
@@ -1492,20 +1858,34 @@ mod imp {
                 let shape = layout.shape();
                 let m1 = strides[ndim - 1] as usize; // last stride
                 let m2 = strides[ndim - 2] as usize; // second-to-last stride
-                // Batch dims must be contiguous.
-                let mut expected = rows * cols;
-                for i in (0..ndim.saturating_sub(2)).rev() {
-                    if strides[i] as usize != expected {
+                let indexing: Vec<usize> = (0..ndim.saturating_sub(2))
+                    .filter(|&i| shape[i] > 1)
+                    .collect();
+                let batch_stride = if indexing.len() > 1 {
+                    // Batch dims must be contiguous.
+                    let mut expected = rows * cols;
+                    for &i in indexing.iter().rev() {
+                        if strides[i] as usize != expected {
+                            return None;
+                        }
+                        expected *= shape[i];
+                    }
+                    (rows * cols) as i64
+                } else if let Some(&i) = indexing.first() {
+                    let stride = strides[i] as usize;
+                    if stride < rows * cols {
                         return None;
                     }
-                    expected *= shape[i];
-                }
+                    stride as i64
+                } else {
+                    (rows * cols) as i64
+                };
                 if (m1 == 1 || cols == 1) && (m2 == cols || rows == 1) {
                     // Row-major contiguous: CUBLAS_OP_N, leading_dim = cols
-                    Some((cublasOperation_t::CUBLAS_OP_N, cols as i32, (rows * cols) as i64))
+                    Some((cublasOperation_t::CUBLAS_OP_N, cols as i32, batch_stride))
                 } else if (m1 == rows || cols == 1) && (m2 == 1 || rows == 1) {
                     // Transposed contiguous: CUBLAS_OP_T, leading_dim = rows
-                    Some((cublasOperation_t::CUBLAS_OP_T, rows as i32, (rows * cols) as i64))
+                    Some((cublasOperation_t::CUBLAS_OP_T, rows as i32, batch_stride))
                 } else {
                     None
                 }
@@ -1519,19 +1899,20 @@ mod imp {
 
             // Try to use each operand directly (CUBLAS_OP_T for transposed layouts) to avoid
             // copying. Fall back to compact for layouts with non-standard strides.
-            let lhs_compact: Option<CudaStorage> = if try_gemm_params(layout, m, k).is_none() {
+            let lhs_compact: Option<std::borrow::Cow<'_, CudaStorage>> =
+                if try_gemm_params(layout, m, k).is_none() {
                 Some(self.compact(layout)?)
             } else {
                 None
             };
-            let rhs_compact: Option<CudaStorage> = if try_gemm_params(layout_other, k, n).is_none()
-            {
+            let rhs_compact: Option<std::borrow::Cow<'_, CudaStorage>> =
+                if try_gemm_params(layout_other, k, n).is_none() {
                 Some(other.compact(layout_other)?)
             } else {
                 None
             };
-            let lhs_storage: &CudaStorage = lhs_compact.as_ref().unwrap_or(self);
-            let rhs_storage: &CudaStorage = rhs_compact.as_ref().unwrap_or(other);
+            let lhs_storage: &CudaStorage = lhs_compact.as_deref().unwrap_or(self);
+            let rhs_storage: &CudaStorage = rhs_compact.as_deref().unwrap_or(other);
             // If we compacted, the result is always normal row-major (CUBLAS_OP_N, offset=0).
             let (transb, ldb, lhs_bs, lhs_offset) = if lhs_compact.is_some() {
                 (cublasOperation_t::CUBLAS_OP_N, k as i32, (m * k) as i64, 0usize)
@@ -1799,10 +2180,10 @@ mod imp {
             let right_len: usize = dst_shape[dim + 1..].iter().product();
             match (&src.inner, &indices.inner) {
                 (CudaInner::F16(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
+                    let raw = src.stream()
                         .alloc_zeros::<f16>(dst_shape.iter().product())
                         .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = Pooled::fresh(raw);
                     let left = left_len as u32;
                     let dst_dim_u32 = dst_dim as u32;
                     let index_len_u32 = index_len as u32;
@@ -1823,10 +2204,10 @@ mod imp {
                     Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
                 }
                 (CudaInner::BF16(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
+                    let raw = src.stream()
                         .alloc_zeros::<bf16>(dst_shape.iter().product())
                         .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = Pooled::fresh(raw);
                     let left = left_len as u32;
                     let dst_dim_u32 = dst_dim as u32;
                     let index_len_u32 = index_len as u32;
@@ -1847,10 +2228,10 @@ mod imp {
                     Ok(Self { inner: CudaInner::BF16(out), runtime: self.runtime.clone() })
                 }
                 (CudaInner::F32(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
+                    let raw = src.stream()
                         .alloc_zeros::<f32>(dst_shape.iter().product())
                         .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = Pooled::fresh(raw);
                     let left = left_len as u32;
                     let dst_dim_u32 = dst_dim as u32;
                     let index_len_u32 = index_len as u32;
@@ -1981,10 +2362,10 @@ mod imp {
             let right_len: usize = dst_shape[dim + 1..].iter().product();
             match (&src.inner, &indices.inner) {
                 (CudaInner::F16(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
+                    let raw = src.stream()
                         .alloc_zeros::<f16>(dst_shape.iter().product())
                         .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = Pooled::fresh(raw);
                     let left = left_len as u32;
                     let src_dim_u32 = src_dim as u32;
                     let dst_dim_u32 = dst_dim as u32;
@@ -2005,10 +2386,10 @@ mod imp {
                     Ok(Self { inner: CudaInner::F16(out), runtime: self.runtime.clone() })
                 }
                 (CudaInner::BF16(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
+                    let raw = src.stream()
                         .alloc_zeros::<bf16>(dst_shape.iter().product())
                         .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = Pooled::fresh(raw);
                     let left = left_len as u32;
                     let src_dim_u32 = src_dim as u32;
                     let dst_dim_u32 = dst_dim as u32;
@@ -2029,10 +2410,10 @@ mod imp {
                     Ok(Self { inner: CudaInner::BF16(out), runtime: self.runtime.clone() })
                 }
                 (CudaInner::F32(src), CudaInner::I64(indices)) => {
-                    let out = src
-                        .stream()
+                    let raw = src.stream()
                         .alloc_zeros::<f32>(dst_shape.iter().product())
                         .map_err(|err| Error::Cuda(format!("cuda alloc failed: {err}")))?;
+                    let out = Pooled::fresh(raw);
                     let left = left_len as u32;
                     let src_dim_u32 = src_dim as u32;
                     let dst_dim_u32 = dst_dim as u32;
@@ -2216,6 +2597,401 @@ mod imp {
             }
         }
 
+        /// Copies `blocks` contiguous `block_len`-element runs from compact `src`
+        /// into `self`, where destination run `n` starts at
+        /// `dst_base + n * dst_stride`.
+        ///
+        /// `src_layout.size()` must equal `blocks * block_len`. The source is
+        /// read in view order through its strides (repeat broadcast views
+        /// feed straight in), so callers pass any layout with no pre-compact.
+        fn copy_blocks_into(
+            &mut self,
+            src: &Self,
+            src_layout: &Layout,
+            blocks: usize,
+            block_len: usize,
+            dst_base: usize,
+            dst_stride: usize,
+        ) -> Result<()> {
+            assert_eq!(src_layout.size(), blocks * block_len);
+            let meta = strided_meta(src_layout);
+            let total = src_layout.size();
+            let args = [
+                total as u32,
+                block_len as u32,
+                dst_base as u32,
+                dst_stride as u32,
+            ];
+            // StridedMeta travels like the copy_compact kernel's own meta arg.
+            match (&src.inner, &mut self.inner) {
+                (CudaInner::F16(s), CudaInner::F16(d)) => {
+                    launch_1d!(
+                        &self.runtime, "copy_blocks_f16", total,
+                        s, d, &meta, &args[0], &args[1], &args[2], &args[3]
+                    );
+                    Ok(())
+                }
+                (CudaInner::BF16(s), CudaInner::BF16(d)) => {
+                    launch_1d!(
+                        &self.runtime, "copy_blocks_bf16", total,
+                        s, d, &meta, &args[0], &args[1], &args[2], &args[3]
+                    );
+                    Ok(())
+                }
+                (CudaInner::F32(s), CudaInner::F32(d)) => {
+                    launch_1d!(
+                        &self.runtime, "copy_blocks_f32", total,
+                        s, d, &meta, &args[0], &args[1], &args[2], &args[3]
+                    );
+                    Ok(())
+                }
+                (CudaInner::I64(s), CudaInner::I64(d)) => {
+                    launch_1d!(
+                        &self.runtime, "copy_blocks_i64", total,
+                        s, d, &meta, &args[0], &args[1], &args[2], &args[3]
+                    );
+                    Ok(())
+                }
+                _ => Err(Error::DTypeMismatch(
+                    "copy_blocks_into: dtype mismatch between source and destination".into(),
+                )),
+            }
+        }
+
+        /// Fused scaled masked softmax: `dst = softmax(scores*scale + mask)` rows.
+        ///
+        /// `outer_size * inner_size` must equal `layout.size()`. The mask holds
+        /// `mask_t_len` compact rows of `inner_size`, one per query position.
+        #[allow(clippy::too_many_arguments)]
+        fn masked_softmax_fwd(
+            &self,
+            layout: &Layout,
+            mask: &Self,
+            mask_layout: &Layout,
+            outer_size: usize,
+            inner_size: usize,
+            scale: f32,
+            t_len: usize,
+            mask_t_len: usize,
+        ) -> Result<Self> {
+            let scores = self.compact(layout)?;
+            assert!(mask_layout.has_compact_strides());
+            let dims = [
+                outer_size as u32,
+                inner_size as u32,
+                t_len as u32,
+                mask_t_len as u32,
+                mask_layout.offset as u32,
+            ];
+            match (&scores.inner, &mask.inner) {
+                (CudaInner::F16(s), CudaInner::F16(m)) => {
+                    let out =
+                        unsafe { alloc_uninit::<f16>(&scores.runtime, outer_size * inner_size) }?;
+                    launch_reduce!(
+                        &scores.runtime, "masked_softmax_fwd_f16", outer_size,
+                        s, m, &out, &scale,
+                        &dims[0], &dims[1], &dims[2], &dims[3], &dims[4]
+                    );
+                    Ok(Self { inner: CudaInner::F16(out), runtime: scores.runtime.clone() })
+                }
+                (CudaInner::BF16(s), CudaInner::BF16(m)) => {
+                    let out =
+                        unsafe { alloc_uninit::<bf16>(&scores.runtime, outer_size * inner_size) }?;
+                    launch_reduce!(
+                        &scores.runtime, "masked_softmax_fwd_bf16", outer_size,
+                        s, m, &out, &scale,
+                        &dims[0], &dims[1], &dims[2], &dims[3], &dims[4]
+                    );
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: scores.runtime.clone() })
+                }
+                (CudaInner::F32(s), CudaInner::F32(m)) => {
+                    let out =
+                        unsafe { alloc_uninit::<f32>(&scores.runtime, outer_size * inner_size) }?;
+                    launch_reduce!(
+                        &scores.runtime, "masked_softmax_fwd_f32", outer_size,
+                        s, m, &out, &scale,
+                        &dims[0], &dims[1], &dims[2], &dims[3], &dims[4]
+                    );
+                    Ok(Self { inner: CudaInner::F32(out), runtime: scores.runtime.clone() })
+                }
+                _ => Err(Error::DTypeMismatch(
+                    "masked_softmax_fwd: dtype mismatch between scores and mask".into(),
+                )),
+            }
+        }
+
+        ///
+        /// Both inputs share `layout.size()` elements, read in compact order.
+        fn silu_mul_fwd(&self, layout: &Layout, up: &Self, up_layout: &Layout) -> Result<Self> {
+            let gate = self.compact(layout)?;
+            let up_c = up.compact(up_layout)?;
+            let len = layout.size();
+            let len_u32 = len as u32;
+            match (&gate.inner, &up_c.inner) {
+                (CudaInner::F16(g), CudaInner::F16(u)) => {
+                    let out = unsafe { alloc_uninit::<f16>(&gate.runtime, len) }?;
+                    launch_1d!(&gate.runtime, "silu_mul_fwd_f16", len, g, u, &out, &len_u32);
+                    Ok(Self { inner: CudaInner::F16(out), runtime: gate.runtime.clone() })
+                }
+                (CudaInner::BF16(g), CudaInner::BF16(u)) => {
+                    let out = unsafe { alloc_uninit::<bf16>(&gate.runtime, len) }?;
+                    launch_1d!(&gate.runtime, "silu_mul_fwd_bf16", len, g, u, &out, &len_u32);
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: gate.runtime.clone() })
+                }
+                (CudaInner::F32(g), CudaInner::F32(u)) => {
+                    let out = unsafe { alloc_uninit::<f32>(&gate.runtime, len) }?;
+                    launch_1d!(&gate.runtime, "silu_mul_fwd_f32", len, g, u, &out, &len_u32);
+                    Ok(Self { inner: CudaInner::F32(out), runtime: gate.runtime.clone() })
+                }
+                _ => Err(Error::DTypeMismatch(
+                    "silu_mul_fwd: dtype mismatch between gate and up".into(),
+                )),
+            }
+        }
+
+        /// Fused SiLU forward: `dst[i] = src[i] / (1 + exp(-src[i]))`.
+        ///
+        /// `layout.size()` elements are read in compact order and written to a
+        /// fresh compact buffer.
+        fn silu_fwd(&self, layout: &Layout) -> Result<Self> {
+            let src = self.compact(layout)?;
+            let len = layout.size();
+            let len_u32 = len as u32;
+            match &src.inner {
+                CudaInner::F16(s) => {
+                    let out = unsafe { alloc_uninit::<f16>(&src.runtime, len) }?;
+                    launch_1d!(&src.runtime, "silu_fwd_f16", len, s, &out, &len_u32);
+                    Ok(Self { inner: CudaInner::F16(out), runtime: src.runtime.clone() })
+                }
+                CudaInner::BF16(s) => {
+                    let out = unsafe { alloc_uninit::<bf16>(&src.runtime, len) }?;
+                    launch_1d!(&src.runtime, "silu_fwd_bf16", len, s, &out, &len_u32);
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: src.runtime.clone() })
+                }
+                CudaInner::F32(s) => {
+                    let out = unsafe { alloc_uninit::<f32>(&src.runtime, len) }?;
+                    launch_1d!(&src.runtime, "silu_fwd_f32", len, s, &out, &len_u32);
+                    Ok(Self { inner: CudaInner::F32(out), runtime: src.runtime.clone() })
+                }
+                CudaInner::I64(_) => {
+                    Err(Error::NotImplemented("cuda silu_fwd for i64 is not implemented"))
+                }
+            }
+        }
+        /// `y2 = x1*sin + x2*cos`, with the cos/sin row selected per token.
+        ///
+        /// `outer_size * head_dim` must equal `layout.size()`. The input is
+        /// compacted; cos/sin are read in place through their view offset (the
+        /// rotary cache is narrowed per position, never copied), so they must
+        /// have compact strides.
+        #[allow(clippy::too_many_arguments)]
+        fn rope_fwd(
+            &self,
+            layout: &Layout,
+            cos: &Self,
+            cos_layout: &Layout,
+            sin: &Self,
+            sin_layout: &Layout,
+            outer_size: usize,
+            head_dim: usize,
+            n_heads: usize,
+            t_len: usize,
+            cos_t_len: usize,
+        ) -> Result<Self> {
+            let x = self.compact(layout)?;
+            // Narrowed views keep the parent strides on their length-1 dims
+            // (e.g. dim 0 of the `[1, T, 1, D/2]` rotary rows), so contiguity
+            // only constrains dims that actually index storage.
+            assert!(
+                cos_layout.has_compact_strides() && sin_layout.has_compact_strides(),
+                "rope cos/sin must have compact strides; pass the narrowed cache view"
+            );
+            assert_eq!(cos_layout.size(), cos_t_len * head_dim / 2);
+            assert_eq!(sin_layout.size(), cos_t_len * head_dim / 2);
+            let dims = [
+                outer_size as u32,
+                head_dim as u32,
+                n_heads as u32,
+                t_len as u32,
+                cos_t_len as u32,
+                cos_layout.offset as u32,
+                sin_layout.offset as u32,
+            ];
+            match (&x.inner, &cos.inner, &sin.inner) {
+                (CudaInner::F16(xs), CudaInner::F16(cc), CudaInner::F16(ss)) => {
+                    let out =
+                        unsafe { alloc_uninit::<f16>(&x.runtime, outer_size * head_dim) }?;
+                    launch_reduce!(
+                        &x.runtime, "rope_fwd_f16", outer_size,
+                        xs, cc, ss, &out,
+                        &dims[0], &dims[1], &dims[2], &dims[3], &dims[4], &dims[5], &dims[6]
+                    );
+                    Ok(Self { inner: CudaInner::F16(out), runtime: x.runtime.clone() })
+                }
+                (CudaInner::BF16(xs), CudaInner::BF16(cc), CudaInner::BF16(ss)) => {
+                    let out =
+                        unsafe { alloc_uninit::<bf16>(&x.runtime, outer_size * head_dim) }?;
+                    launch_reduce!(
+                        &x.runtime, "rope_fwd_bf16", outer_size,
+                        xs, cc, ss, &out,
+                        &dims[0], &dims[1], &dims[2], &dims[3], &dims[4], &dims[5], &dims[6]
+                    );
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: x.runtime.clone() })
+                }
+                (CudaInner::F32(xs), CudaInner::F32(cc), CudaInner::F32(ss)) => {
+                    let out =
+                        unsafe { alloc_uninit::<f32>(&x.runtime, outer_size * head_dim) }?;
+                    launch_reduce!(
+                        &x.runtime, "rope_fwd_f32", outer_size,
+                        xs, cc, ss, &out,
+                        &dims[0], &dims[1], &dims[2], &dims[3], &dims[4], &dims[5], &dims[6]
+                    );
+                    Ok(Self { inner: CudaInner::F32(out), runtime: x.runtime.clone() })
+                }
+                _ => Err(Error::DTypeMismatch(
+                    "rope_fwd: dtype mismatch between input, cos, and sin".into(),
+                )),
+            }
+        }
+        ///
+        /// `outer_size * inner_size` must equal `layout.size()`. The input is
+        /// compacted first; `weight` (if any) must hold `inner_size` elements of
+        /// the same dtype and is compacted too, so the kernel reads `w[col]`.
+        fn rms_norm_fwd(
+            &self,
+            layout: &Layout,
+            weight: Option<(&Self, &Layout)>,
+            outer_size: usize,
+            inner_size: usize,
+            eps: f32,
+        ) -> Result<Self> {
+            let src = self.compact(layout)?;
+            let weight_c = weight
+                .map(|(w, w_layout)| w.compact(w_layout))
+                .transpose()?;
+            match (&src.inner, weight_c.as_ref().map(|w| &w.inner)) {
+                (CudaInner::F16(s), None) => {
+                    let out =
+                        unsafe { alloc_uninit::<f16>(&src.runtime, outer_size * inner_size) }?;
+                    let (outer, inner, eps, has_weight) =
+                        (outer_size as u32, inner_size as u32, eps, 0u32);
+                    // No scale: the weight slot reuses the input pointer as a valid
+                    // dummy because the kernel never reads it when has_weight is 0.
+                    launch_reduce!(
+                        &src.runtime,
+                        "rms_norm_fwd_f16",
+                        outer_size,
+                        s,
+                        s,
+                        &out,
+                        &outer,
+                        &inner,
+                        &eps,
+                        &has_weight
+                    );
+                    Ok(Self { inner: CudaInner::F16(out), runtime: src.runtime.clone() })
+                }
+                (CudaInner::F16(s), Some(CudaInner::F16(w))) => {
+                    let out =
+                        unsafe { alloc_uninit::<f16>(&src.runtime, outer_size * inner_size) }?;
+                    let (outer, inner, eps, has_weight) =
+                        (outer_size as u32, inner_size as u32, eps, 1u32);
+                    launch_reduce!(
+                        &src.runtime,
+                        "rms_norm_fwd_f16",
+                        outer_size,
+                        s,
+                        w,
+                        &out,
+                        &outer,
+                        &inner,
+                        &eps,
+                        &has_weight
+                    );
+                    Ok(Self { inner: CudaInner::F16(out), runtime: src.runtime.clone() })
+                }
+                (CudaInner::BF16(s), None) => {
+                    let out =
+                        unsafe { alloc_uninit::<bf16>(&src.runtime, outer_size * inner_size) }?;
+                    let (outer, inner, eps, has_weight) =
+                        (outer_size as u32, inner_size as u32, eps, 0u32);
+                    launch_reduce!(
+                        &src.runtime,
+                        "rms_norm_fwd_bf16",
+                        outer_size,
+                        s,
+                        s,
+                        &out,
+                        &outer,
+                        &inner,
+                        &eps,
+                        &has_weight
+                    );
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: src.runtime.clone() })
+                }
+                (CudaInner::BF16(s), Some(CudaInner::BF16(w))) => {
+                    let out =
+                        unsafe { alloc_uninit::<bf16>(&src.runtime, outer_size * inner_size) }?;
+                    let (outer, inner, eps, has_weight) =
+                        (outer_size as u32, inner_size as u32, eps, 1u32);
+                    launch_reduce!(
+                        &src.runtime,
+                        "rms_norm_fwd_bf16",
+                        outer_size,
+                        s,
+                        w,
+                        &out,
+                        &outer,
+                        &inner,
+                        &eps,
+                        &has_weight
+                    );
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: src.runtime.clone() })
+                }
+                (CudaInner::F32(s), None) => {
+                    let out =
+                        unsafe { alloc_uninit::<f32>(&src.runtime, outer_size * inner_size) }?;
+                    let (outer, inner, eps, has_weight) =
+                        (outer_size as u32, inner_size as u32, eps, 0u32);
+                    launch_reduce!(
+                        &src.runtime,
+                        "rms_norm_fwd_f32",
+                        outer_size,
+                        s,
+                        s,
+                        &out,
+                        &outer,
+                        &inner,
+                        &eps,
+                        &has_weight
+                    );
+                    Ok(Self { inner: CudaInner::F32(out), runtime: src.runtime.clone() })
+                }
+                (CudaInner::F32(s), Some(CudaInner::F32(w))) => {
+                    let out =
+                        unsafe { alloc_uninit::<f32>(&src.runtime, outer_size * inner_size) }?;
+                    let (outer, inner, eps, has_weight) =
+                        (outer_size as u32, inner_size as u32, eps, 1u32);
+                    launch_reduce!(
+                        &src.runtime,
+                        "rms_norm_fwd_f32",
+                        outer_size,
+                        s,
+                        w,
+                        &out,
+                        &outer,
+                        &inner,
+                        &eps,
+                        &has_weight
+                    );
+                    Ok(Self { inner: CudaInner::F32(out), runtime: src.runtime.clone() })
+                }
+                _ => Err(Error::DTypeMismatch(
+                    "rms_norm_fwd: dtype mismatch between input and weight".into(),
+                )),
+            }
+        }
+
         fn dtype(&self) -> DType {
             match &self.inner {
                 CudaInner::F16(_) => DType::F16,
@@ -2230,7 +3006,7 @@ mod imp {
             // each, and the copy itself stays on-device via the copy_compact kernel.
             let compact = self.compact(layout)?;
             if compact.dtype() == dtype {
-                return Ok(compact);
+                return Ok(compact.into_owned());
             }
             match (&compact.inner, dtype) {
                 (CudaInner::F16(src), DType::F32) => {
@@ -2375,6 +3151,10 @@ mod imp {
             panic!("CUDA backend is only available on Linux with the `cuda` feature enabled")
         }
 
+        pub(crate) fn uninit(_size: usize, _dtype: DType) -> Result<Self> {
+            panic!("CUDA backend is only available on Linux with the `cuda` feature enabled")
+        }
+
         pub fn from_cpu_storage(_inner: CpuStorage) -> Self {
             panic!("CUDA backend is only available on Linux with the `cuda` feature enabled")
         }
@@ -2461,6 +3241,62 @@ mod imp {
             _: usize,
             _: usize,
         ) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn rms_norm_fwd(
+            &self,
+            _: &Layout,
+            _: Option<(&Self, &Layout)>,
+            _: usize,
+            _: usize,
+            _: f32,
+        ) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        #[allow(clippy::too_many_arguments)]
+        fn rope_fwd(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+        ) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn silu_fwd(&self, _: &Layout) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn silu_mul_fwd(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn masked_softmax_fwd(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: usize,
+            _: usize,
+            _: f32,
+            _: usize,
+            _: usize,
+        ) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn copy_blocks_into(
+            &mut self,
+            _: &Self,
+            _: &Layout,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+        ) -> Result<()> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }
         fn dtype(&self) -> DType {

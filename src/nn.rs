@@ -360,6 +360,12 @@ impl RMSNorm {
 
 impl Module for RMSNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        // Decode is launch-bound on this chain, so CUDA runs one fused kernel
+        // while every other device keeps the primitive decomposition.
+        if x.device() == Device::Cuda {
+            let weight = self.weight.as_ref().map(|w| (**w).clone());
+            return Ok(x.fused_rms_norm(weight.as_ref(), self.eps));
+        }
         let last_axis = x.layout().ndim() - 1;
         let mean_sq = (x * x).mean(vec![last_axis], true);
         let inv_norm = (mean_sq + self.eps).scalar_powf(-0.5);
@@ -520,9 +526,9 @@ impl SwiGLU {
     /// The core stays fixed rank. Only the wrapper below folds leading dims,
     /// and that fold is rank-polymorphic through the ellipsis form.
     fn forward_flat(&self, x_flat: &Tensor) -> Result<Tensor> {
-        let gate = self.gate_proj.forward(x_flat)?.silu();
+        let gate = self.gate_proj.forward(x_flat)?;
         let up = self.up_proj.forward(x_flat)?;
-        self.down_proj.forward(&(&gate * &up))
+        self.down_proj.forward(&gate.silu_mul(&up))
     }
 }
 
