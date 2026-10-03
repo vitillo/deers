@@ -360,14 +360,11 @@ impl RMSNorm {
 
 impl Module for RMSNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let last_axis = x.layout().ndim() - 1;
-        let mean_sq = (x * x).mean(vec![last_axis], true);
-        let inv_norm = (mean_sq + self.eps).scalar_powf(-0.5);
-        let normed = x * &inv_norm;
-        match &self.weight {
-            Some(weight) => Ok(&normed * &**weight),
-            None => Ok(normed),
-        }
+        // One fused kernel per row on CPU and CUDA: decode is launch-bound
+        // on this chain, so neither keeps the primitive decomposition. MPS
+        // has no Metal kernel yet and fails loudly until one lands.
+        let weight = self.weight.as_ref().map(|w| (**w).clone());
+        Ok(x.fused_rms_norm(weight.as_ref(), self.eps))
     }
 
     fn parameters(&self) -> Vec<Parameter> {
