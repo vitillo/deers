@@ -717,3 +717,57 @@ fn fused_rms_norm_forward_and_backward_match_unfused() {
         assert_close(&actual_plain, &expected_plain, &format!("{label} weightless fwd"));
     }
 }
+
+/// Primitive RoPE decomposition, mirroring the pre-fusion `apply_rotary_emb`.
+fn unfused_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
+    let half = x.layout().shape()[3] / 2;
+    let x1 = x.narrow(3, 0, half);
+    let x2 = x.narrow(3, half, half);
+    let y1 = &x1 * cos - &x2 * sin;
+    let y2 = &x1 * sin + &x2 * cos;
+    Tensor::cat(&[y1, y2], 3)
+}
+
+#[test]
+fn fused_rope_forward_and_backward_match_unfused() {
+    // Arrange: a small exact case plus the decode-shaped Qwen3 case
+    // (one token, 16 heads, head width 128).
+    if !require_cuda() {
+        return;
+    }
+    for (b, t, h, d) in [(1usize, 3, 4, 16), (1, 1, 16, 128)] {
+        let half = d / 2;
+        let values: Vec<f32> =
+            (0..b * t * h * d).map(|i| ((i * 53) % 89) as f32 / 44.0 - 1.0).collect();
+        let table: Vec<f32> =
+            (0..t * half).map(|i| ((i * 29) % 61) as f32 / 61.0).collect();
+        let mk = |vals: &[f32], shape: Vec<usize>, device: deers::Device| {
+            Tensor::from_vec(
+                vals.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+                shape,
+                device,
+            )
+        };
+        let x_cpu = mk(&values, vec![b, t, h, d], Device::Cpu).attach();
+        let x_cuda = mk(&values, vec![b, t, h, d], Device::Cuda).attach();
+        let cos_cpu = mk(&table, vec![1, t, 1, half], Device::Cpu);
+        let sin_cpu = mk(&table, vec![1, t, 1, half], Device::Cpu);
+        let cos_cuda = mk(&table, vec![1, t, 1, half], Device::Cuda);
+        let sin_cuda = mk(&table, vec![1, t, 1, half], Device::Cuda);
+
+        // Act
+        let expected_fwd = to_f32(&unfused_rope(&x_cpu, &cos_cpu, &sin_cpu));
+        let actual_fwd = to_f32(&x_cuda.fused_rope(&cos_cuda, &sin_cuda));
+        let cpu_loss =
+            unfused_rope(&x_cpu, &cos_cpu, &sin_cpu).sum(vec![0, 1, 2, 3], true);
+        let cuda_loss =
+            x_cuda.fused_rope(&cos_cuda, &sin_cuda).sum(vec![0, 1, 2, 3], true);
+        let expected_grad = to_f32(&cpu_loss.backward().unwrap().get(x_cpu.id()).unwrap());
+        let actual_grad = to_f32(&cuda_loss.backward().unwrap().get(x_cuda.id()).unwrap());
+
+        // Assert
+        let label = format!("fused rope [{b}, {t}, {h}, {d}]");
+        assert_close(&actual_fwd, &expected_fwd, &format!("{label} fwd"));
+        assert_close(&actual_grad, &expected_grad, &format!("{label} bwd"));
+    }
+}
