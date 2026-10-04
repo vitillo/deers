@@ -1,4 +1,4 @@
-use deers::models::gpt::{
+use deers::models::gpt2::{
     GPT, GPTConfig, GptMlpKind, GptNormKind, RopeScaling, precompute_rotary_embeddings,
     precompute_rotary_embeddings_scaled,
 };

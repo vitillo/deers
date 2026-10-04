@@ -1,4 +1,4 @@
-use deers::models::gpt::{CausalSelfAttention, KvCache, precompute_rotary_embeddings};
+use deers::models::gpt2::{CausalSelfAttention, KvCache, precompute_rotary_embeddings};
 use deers::nn::{ParamStore, Parameter};
 use deers::{DType, Device, Tensor};
 

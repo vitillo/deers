@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use deers::loss;
-use deers::models::gpt::{self, GPTConfig, GptMlpKind, GptNormKind};
+use deers::models::gpt2::{self, GPTConfig, GptMlpKind, GptNormKind};
 use deers::nn::{ParamStore, Parameter};
 use deers::optim::AdamWConfig;
 use deers::{Device, Tensor};
@@ -16,7 +16,7 @@ fn tiny_config() -> GPTConfig {
         mlp_hidden_dim: 8,
         rms_norm_eps: 1e-5,
         rope_base: 10_000.0,
-        rope_scaling: gpt::RopeScaling::None,
+        rope_scaling: gpt2::RopeScaling::None,
         norm: GptNormKind::RmsNorm,
         mlp: GptMlpKind::ReluSquared,
         tie_embeddings: false,
@@ -35,7 +35,7 @@ fn named(store: &ParamStore) -> BTreeMap<String, Parameter> {
     store.named_parameters().into_iter().collect()
 }
 
-fn forward_loss(model: &gpt::GPT, batch_size: usize, seq_len: usize) -> Tensor {
+fn forward_loss(model: &gpt2::GPT, batch_size: usize, seq_len: usize) -> Tensor {
     let idx = Tensor::from_vec(token_ids(), (batch_size, seq_len), Device::Cpu);
     let targets = Tensor::from_vec(targets(), (batch_size * seq_len,), Device::Cpu);
     let logits = model.forward(&idx).unwrap();
@@ -83,7 +83,7 @@ fn test_default_config_preserves_checkpoint_names() {
     let config = tiny_config();
 
     // Act
-    let _model = gpt::GPT::new(config, store.root());
+    let _model = gpt2::GPT::new(config, store.root());
     let names: Vec<String> = store.named_parameters().into_iter().map(|(name, _)| name).collect();
 
     // Assert: the historical ten tensors, no norm weights, no duplicate head.
@@ -109,7 +109,7 @@ fn test_affine_rmsnorm_registers_scales_and_trains() {
     // Arrange
     let store = ParamStore::new();
     let config = GPTConfig { norm: GptNormKind::AffineRmsNorm, ..tiny_config() };
-    let model = gpt::GPT::new(config, store.root());
+    let model = gpt2::GPT::new(config, store.root());
     let params = named(&store);
 
     // Act
@@ -130,7 +130,7 @@ fn test_layernorm_registers_weight_and_bias_and_trains() {
     // Arrange
     let store = ParamStore::new();
     let config = GPTConfig { norm: GptNormKind::LayerNorm, ..tiny_config() };
-    let model = gpt::GPT::new(config, store.root());
+    let model = gpt2::GPT::new(config, store.root());
     let params = named(&store);
 
     // Act
@@ -161,11 +161,11 @@ fn test_gelu_mlp_differs_from_relu_squared_and_trains() {
     // every activation vector component-equal, which the final RMSNorm
     // erases, hiding the activation change.
     let relu_store = ParamStore::new();
-    let relu_model = gpt::GPT::new(tiny_config(), relu_store.root());
+    let relu_model = gpt2::GPT::new(tiny_config(), relu_store.root());
     fill_pattern(&relu_store);
     let gelu_store = ParamStore::new();
     let gelu_config = GPTConfig { mlp: GptMlpKind::Gelu, ..tiny_config() };
-    let gelu_model = gpt::GPT::new(gelu_config, gelu_store.root());
+    let gelu_model = gpt2::GPT::new(gelu_config, gelu_store.root());
     fill_pattern(&gelu_store);
 
     // Act
@@ -196,7 +196,7 @@ fn test_tied_embeddings_share_one_parameter_identity() {
     let config = GPTConfig { tie_embeddings: true, ..tiny_config() };
 
     // Act
-    let model = gpt::GPT::new(config, store.root());
+    let model = gpt2::GPT::new(config, store.root());
     let params = named(&store);
 
     // Assert: both checkpoint names exist behind a single tensor id, listed once.
@@ -215,7 +215,7 @@ fn test_tied_embeddings_backward_flows_through_both_paths() {
     // Arrange
     let store = ParamStore::new();
     let config = GPTConfig { tie_embeddings: true, ..tiny_config() };
-    let model = gpt::GPT::new(config, store.root());
+    let model = gpt2::GPT::new(config, store.root());
     let params = named(&store);
 
     // Act
@@ -232,7 +232,7 @@ fn test_tied_embeddings_optimizer_step_keeps_weights_in_sync() {
     // Arrange
     let store = ParamStore::new();
     let config = GPTConfig { tie_embeddings: true, ..tiny_config() };
-    let model = gpt::GPT::new(config, store.root());
+    let model = gpt2::GPT::new(config, store.root());
     fill_constant(&store, 0.05);
     let before = named(&store)["wte.weight"].to_vec::<f32>().unwrap();
 
@@ -265,7 +265,7 @@ fn test_tied_embeddings_start_with_small_logit_scale() {
     let config = GPTConfig { tie_embeddings: true, vocab_size: 64, n_embd: 32, ..tiny_config() };
 
     // Act
-    gpt::GPT::new(config, store.root());
+    gpt2::GPT::new(config, store.root());
     let std = weight_std(&named(&store)["wte.weight"]);
 
     // Assert: the shared weight uses a GPT-2 style small init, not N(0, 1).
@@ -279,7 +279,7 @@ fn test_untied_embeddings_keep_standard_normal_init() {
     let config = GPTConfig { vocab_size: 64, n_embd: 32, ..tiny_config() };
 
     // Act
-    gpt::GPT::new(config, store.root());
+    gpt2::GPT::new(config, store.root());
     let std = weight_std(&named(&store)["wte.weight"]);
 
     // Assert

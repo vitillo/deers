@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use deers::checkpoint;
 use deers::dataset::TokenBinDataset;
-use deers::models::gpt::{GPT, GPTConfig, GptMlpKind, GptNormKind, RopeScaling};
+use deers::models::gpt2::{GPT, GPTConfig, GptMlpKind, GptNormKind, RopeScaling};
 use deers::nn::{ParamStore, Parameter};
 use deers::optim::{
     AdamW, AdamWConfig, AdamWParamGroup, LrSchedule, WarmupWarmdown, clip_grad_norm,
