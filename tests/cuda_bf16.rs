@@ -667,8 +667,7 @@ fn fused_rms_norm_forward_and_backward_match_unfused() {
     for (outer, inner) in [(3usize, 300usize), (2, 128)] {
         let values: Vec<f32> =
             (0..outer * inner).map(|i| ((i * 37) % 101) as f32 / 50.0 - 1.0).collect();
-        let weights: Vec<f32> =
-            (0..inner).map(|i| 0.5 + ((i * 13) % 7) as f32 * 0.1).collect();
+        let weights: Vec<f32> = (0..inner).map(|i| 0.5 + ((i * 13) % 7) as f32 * 0.1).collect();
         let x_cpu = Tensor::from_vec(
             values.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
             vec![outer, inner],
@@ -717,3 +716,197 @@ fn fused_rms_norm_forward_and_backward_match_unfused() {
         assert_close(&actual_plain, &expected_plain, &format!("{label} weightless fwd"));
     }
 }
+
+/// Primitive RoPE decomposition, mirroring the pre-fusion `apply_rotary_emb`.
+fn unfused_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
+    let half = x.layout().shape()[3] / 2;
+    let x1 = x.narrow(3, 0, half);
+    let x2 = x.narrow(3, half, half);
+    let y1 = &x1 * cos - &x2 * sin;
+    let y2 = &x1 * sin + &x2 * cos;
+    Tensor::cat(&[y1, y2], 3)
+}
+
+#[test]
+fn fused_rope_forward_and_backward_match_unfused() {
+    // Arrange: a small exact case plus the decode-shaped Qwen3 case
+    // (one token, 16 heads, head width 128).
+    if !require_cuda() {
+        return;
+    }
+    for (b, t, h, d) in [(1usize, 3, 4, 16), (1, 1, 16, 128)] {
+        let half = d / 2;
+        let values: Vec<f32> =
+            (0..b * t * h * d).map(|i| ((i * 53) % 89) as f32 / 44.0 - 1.0).collect();
+        let table: Vec<f32> = (0..t * half).map(|i| ((i * 29) % 61) as f32 / 61.0).collect();
+        let mk = |vals: &[f32], shape: Vec<usize>, device: deers::Device| {
+            Tensor::from_vec(
+                vals.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+                shape,
+                device,
+            )
+        };
+        // A bigger rotary cache to narrow nonzero-offset rows from.
+        let mk_big = |vals: &[f32], t: usize, half: usize, device: deers::Device| {
+            let mut big = vec![0.0f32; 3 * half];
+            big.extend_from_slice(vals);
+            big.extend(vec![0.0f32; 2 * half]);
+            mk(&big, vec![1, t + 5, 1, half], device)
+        };
+        let x_cpu = mk(&values, vec![b, t, h, d], Device::Cpu).attach();
+        let x_cuda = mk(&values, vec![b, t, h, d], Device::Cuda).attach();
+        let cos_cpu = mk(&table, vec![1, t, 1, half], Device::Cpu);
+        let sin_cpu = mk(&table, vec![1, t, 1, half], Device::Cpu);
+        let cos_cuda = mk(&table, vec![1, t, 1, half], Device::Cuda);
+        let sin_cuda = mk(&table, vec![1, t, 1, half], Device::Cuda);
+
+        // Act
+        let expected_fwd = to_f32(&unfused_rope(&x_cpu, &cos_cpu, &sin_cpu));
+        let actual_fwd = to_f32(&x_cuda.fused_rope(&cos_cuda, &sin_cuda));
+        // Narrowed cache rows (nonzero view offset) must read in place.
+        let big_cpu = mk_big(&table, t, half, Device::Cpu);
+        let big_cuda = mk_big(&table, t, half, Device::Cuda);
+        let ncos_cpu = big_cpu.narrow(1, 3, t);
+        let nsin_cpu = big_cpu.narrow(1, 3, t);
+        let ncos_cuda = big_cuda.narrow(1, 3, t);
+        let nsin_cuda = big_cuda.narrow(1, 3, t);
+        let actual_narrow = to_f32(&x_cuda.fused_rope(&ncos_cuda, &nsin_cuda));
+        let expected_narrow = to_f32(&unfused_rope(&x_cpu, &ncos_cpu, &nsin_cpu));
+        let cpu_loss = unfused_rope(&x_cpu, &cos_cpu, &sin_cpu).sum(vec![0, 1, 2, 3], true);
+        let cuda_loss = x_cuda.fused_rope(&cos_cuda, &sin_cuda).sum(vec![0, 1, 2, 3], true);
+        let expected_grad = to_f32(&cpu_loss.backward().unwrap().get(x_cpu.id()).unwrap());
+        let actual_grad = to_f32(&cuda_loss.backward().unwrap().get(x_cuda.id()).unwrap());
+
+        // Assert
+        let label = format!("fused rope [{b}, {t}, {h}, {d}]");
+        assert_close(&actual_fwd, &expected_fwd, &format!("{label} fwd"));
+        assert_close(&actual_narrow, &expected_narrow, &format!("{label} narrowed fwd"));
+        assert_close(&actual_grad, &expected_grad, &format!("{label} bwd"));
+    }
+}
+
+#[test]
+fn fused_silu_forward_and_backward_match_unfused() {
+    // Arrange
+    if !require_cuda() {
+        return;
+    }
+    for (rows, cols) in [(2usize, 1000usize), (1, 3072)] {
+        let values: Vec<f32> =
+            (0..rows * cols).map(|i| ((i * 41) % 97) as f32 / 24.0 - 2.0).collect();
+        let mk = |device: deers::Device| {
+            Tensor::from_vec(
+                values.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+                vec![rows, cols],
+                device,
+            )
+            .attach()
+        };
+        let cpu = mk(Device::Cpu);
+        let cuda = mk(Device::Cuda);
+
+        // Act: fused on CUDA against neg/exp/add/div/mul on CPU.
+        let expected_fwd = to_f32(&(&cpu * &cpu.sigmoid()));
+        let actual_fwd = to_f32(&cuda.silu());
+        let cpu_loss = (&cpu * &cpu.sigmoid()).sum(vec![0, 1], true);
+        let cuda_loss = cuda.silu().sum(vec![0, 1], true);
+        let expected_grad = to_f32(&cpu_loss.backward().unwrap().get(cpu.id()).unwrap());
+        let actual_grad = to_f32(&cuda_loss.backward().unwrap().get(cuda.id()).unwrap());
+
+        // Assert
+        let label = format!("fused silu [{rows}, {cols}]");
+        assert_close(&actual_fwd, &expected_fwd, &format!("{label} fwd"));
+        assert_close(&actual_grad, &expected_grad, &format!("{label} bwd"));
+    }
+}
+
+#[test]
+fn fused_silu_mul_forward_and_backward_match_unfused() {
+    // Arrange
+    if !require_cuda() {
+        return;
+    }
+    for (rows, cols) in [(2usize, 1000usize), (1, 3072)] {
+        let gvals: Vec<f32> =
+            (0..rows * cols).map(|i| ((i * 41) % 97) as f32 / 97.0 * 3.0 - 1.5).collect();
+        let uvals: Vec<f32> =
+            (0..rows * cols).map(|i| ((i * 17) % 83) as f32 / 83.0 * 2.0 - 1.0).collect();
+        let mk = |vals: &[f32], device: deers::Device| {
+            Tensor::from_vec(
+                vals.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+                vec![rows, cols],
+                device,
+            )
+            .attach()
+        };
+        let (g_cpu, u_cpu) = (mk(&gvals, Device::Cpu), mk(&uvals, Device::Cpu));
+        let (g_cuda, u_cuda) = (mk(&gvals, Device::Cuda), mk(&uvals, Device::Cuda));
+
+        // Act: fused on CUDA against silu-then-multiply on CPU.
+        let expected_fwd = to_f32(&(&g_cpu.silu() * &u_cpu));
+        let actual_fwd = to_f32(&g_cuda.silu_mul(&u_cuda));
+        let cpu_loss = (&g_cpu.silu() * &u_cpu).sum(vec![0, 1], true);
+        let cuda_loss = g_cuda.silu_mul(&u_cuda).sum(vec![0, 1], true);
+        let expected_gg = to_f32(&cpu_loss.backward().unwrap().get(g_cpu.id()).unwrap());
+        let actual_gg = to_f32(&cuda_loss.backward().unwrap().get(g_cuda.id()).unwrap());
+        let expected_gu = to_f32(&cpu_loss.backward().unwrap().get(u_cpu.id()).unwrap());
+        let actual_gu = to_f32(&cuda_loss.backward().unwrap().get(u_cuda.id()).unwrap());
+
+        // Assert
+        let label = format!("fused silu_mul [{rows}, {cols}]");
+        assert_close(&actual_fwd, &expected_fwd, &format!("{label} fwd"));
+        assert_close(&actual_gg, &expected_gg, &format!("{label} bwd gate"));
+        assert_close(&actual_gu, &expected_gu, &format!("{label} bwd up"));
+    }
+}
+
+#[test]
+fn fused_masked_softmax_forward_and_backward_match_unfused() {
+    // Arrange: a small multi-query case plus the decode-shaped case
+    // (16 heads, one query, 513 keys).
+    if !require_cuda() {
+        return;
+    }
+    for (b, h, tq, tk, tm) in [(1usize, 2, 3, 130, 3), (1, 16, 1, 513, 1)] {
+        let svals: Vec<f32> =
+            (0..b * h * tq * tk).map(|i| ((i * 31) % 79) as f32 / 79.0 * 4.0 - 2.0).collect();
+        // Row-dependent triangle: row r allows keys 0..=r plus a dense
+        // tail, so a wrong mask-row mapping cannot hide behind uniformity.
+        let mvals: Vec<f32> = (0..tm * tk)
+            .map(|i| {
+                let (r, c) = (i / tk, i % tk);
+                if c > r && c % 3 == 0 { f32::NEG_INFINITY } else { 0.0 }
+            })
+            .collect();
+        let mk = |vals: &[f32], shape: Vec<usize>, device: deers::Device| {
+            Tensor::from_vec(
+                vals.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+                shape,
+                device,
+            )
+            .attach()
+        };
+        let s_cpu = mk(&svals, vec![b, h, tq, tk], Device::Cpu);
+        let m_cpu = mk(&mvals, vec![1, 1, tm, tk], Device::Cpu);
+        let s_cuda = mk(&svals, vec![b, h, tq, tk], Device::Cuda);
+        let m_cuda = mk(&mvals, vec![1, 1, tm, tk], Device::Cuda);
+        let scale = 0.08838834764831845f64;
+
+        // Act
+        let expected_fwd = to_f32(&((&s_cpu * scale) + &m_cpu).softmax(3));
+        let actual_fwd = to_f32(&s_cuda.scaled_masked_softmax(&m_cuda, scale, 3));
+        let cpu_loss = ((&s_cpu * scale) + &m_cpu).softmax(3).sum(vec![0, 1, 2, 3], true);
+        let cuda_loss = s_cuda.scaled_masked_softmax(&m_cuda, scale, 3).sum(vec![0, 1, 2, 3], true);
+        let expected_grad = to_f32(&cpu_loss.backward().unwrap().get(s_cpu.id()).unwrap());
+        let actual_grad = to_f32(&cuda_loss.backward().unwrap().get(s_cuda.id()).unwrap());
+        let expected_gm = to_f32(&cpu_loss.backward().unwrap().get(m_cpu.id()).unwrap());
+        let actual_gm = to_f32(&cuda_loss.backward().unwrap().get(m_cuda.id()).unwrap());
+
+        // Assert
+        let label = format!("fused masked_softmax [{b}, {h}, {tq}, {tk}]");
+        assert_close(&actual_fwd, &expected_fwd, &format!("{label} fwd"));
+        assert_close(&actual_grad, &expected_grad, &format!("{label} bwd"));
+        assert_close(&actual_gm, &expected_gm, &format!("{label} bwd mask"));
+    }
+}
+

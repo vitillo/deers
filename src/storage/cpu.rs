@@ -256,6 +256,27 @@ fn rms_norm_rows<T: Copy, O>(
         .collect()
 }
 
+/// Writes `blocks` contiguous `block_len`-element runs from `vals` into `dst`,
+/// where run `n` starts at `dst_base + n * dst_stride`.
+fn write_blocks<T: Copy>(
+    dst: &mut [T],
+    vals: &[f32],
+    blocks: usize,
+    block_len: usize,
+    dst_base: usize,
+    dst_stride: usize,
+    cast: impl Fn(f32) -> T + Copy,
+) {
+    assert_eq!(vals.len(), blocks * block_len);
+    for (n, run) in vals.chunks_exact(block_len).enumerate() {
+        let start = dst_base + n * dst_stride;
+        assert!(start + block_len <= dst.len(), "copy_blocks_into writes past the buffer");
+        for (slot, &v) in dst[start..].iter_mut().zip(run) {
+            *slot = cast(v);
+        }
+    }
+}
+
 impl BackendStorage for CpuStorage {
     fn ewise_powf(&self, e: f64, l: &Layout) -> Result<Self> {
         if l.is_compact() {
@@ -1310,6 +1331,317 @@ impl BackendStorage for CpuStorage {
             CpuStorage::I64(_) => Err(crate::error::Error::DTypeMismatch(
                 "rms_norm_fwd: i64 is not supported, use a float dtype".into(),
             )),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rope_fwd(
+        &self,
+        layout: &Layout,
+        cos: &Self,
+        cos_layout: &Layout,
+        sin: &Self,
+        sin_layout: &Layout,
+        outer_size: usize,
+        head_dim: usize,
+        n_heads: usize,
+        t_len: usize,
+        cos_t_len: usize,
+    ) -> crate::error::Result<Self> {
+        assert!(layout.is_compact());
+        assert_eq!(layout.size(), outer_size * head_dim);
+        assert!(head_dim.is_multiple_of(2));
+        let half = head_dim / 2;
+        match (self, cos, sin) {
+            (CpuStorage::F32(_), CpuStorage::F32(_), CpuStorage::F32(_))
+            | (CpuStorage::F16(_), CpuStorage::F16(_), CpuStorage::F16(_))
+            | (CpuStorage::BF16(_), CpuStorage::BF16(_), CpuStorage::BF16(_)) => {}
+            _ => {
+                return Err(crate::error::Error::DTypeMismatch(
+                    "rope_fwd: dtype mismatch between input, cos, and sin".into(),
+                ));
+            }
+        }
+        let read_row = |storage: &CpuStorage,
+                         layout: &Layout,
+                         expect_len: usize|
+         -> crate::error::Result<Vec<f32>> {
+            // Linear span reads need compact strides up to length-1 dims,
+            // which narrowed rotary rows keep from their parent cache.
+            assert!(layout.has_compact_strides());
+            let row: Vec<f32> = match storage {
+                CpuStorage::F32(data) => data[layout.offset..].iter().take(expect_len).copied().collect(),
+                CpuStorage::F16(data) => {
+                    data[layout.offset..].iter().take(expect_len).map(|v| v.to_f32()).collect()
+                }
+                CpuStorage::BF16(data) => {
+                    data[layout.offset..].iter().take(expect_len).map(|v| v.to_f32()).collect()
+                }
+                CpuStorage::I64(_) => {
+                    return Err(crate::error::Error::DTypeMismatch(
+                        "rope_fwd: i64 is not supported, use a float dtype".into(),
+                    ));
+                }
+            };
+            assert_eq!(row.len(), expect_len);
+            Ok(row)
+        };
+        let x = read_row(self, layout, outer_size * head_dim)?;
+        let cos = read_row(cos, cos_layout, cos_t_len * half)?;
+        let sin = read_row(sin, sin_layout, cos_t_len * half)?;
+        let out: Vec<f32> = (0..outer_size)
+            .flat_map(|row| {
+                let t = (row / n_heads) % t_len % cos_t_len;
+                (0..head_dim)
+                    .map(|col| {
+                        if col < half {
+                            let (x1, x2) = (x[row * head_dim + col], x[row * head_dim + col + half]);
+                            let (c, s) = (cos[t * half + col], sin[t * half + col]);
+                            x1 * c - x2 * s
+                        } else {
+                            let h = col - half;
+                            let (x1, x2) = (x[row * head_dim + h], x[row * head_dim + col]);
+                            let (c, s) = (cos[t * half + h], sin[t * half + h]);
+                            x1 * s + x2 * c
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        match self {
+            CpuStorage::F32(_) => Ok(CpuStorage::F32(out)),
+            CpuStorage::F16(_) => {
+                use half::f16;
+                Ok(CpuStorage::F16(out.iter().map(|&v| f16::from_f32(v)).collect()))
+            }
+            CpuStorage::BF16(_) => {
+                Ok(CpuStorage::BF16(out.iter().map(|&v| bf16::from_f32(v)).collect()))
+            }
+            CpuStorage::I64(_) => Err(crate::error::Error::DTypeMismatch(
+                "rope_fwd: i64 is not supported, use a float dtype".into(),
+            )),
+        }
+    }
+
+    fn silu_fwd(&self, layout: &Layout) -> crate::error::Result<Self> {
+        assert!(layout.is_compact());
+        let data: Vec<f32> = match self {
+            CpuStorage::F32(data) => data[layout.offset..].to_vec(),
+            CpuStorage::F16(data) => data[layout.offset..].iter().map(|v| v.to_f32()).collect(),
+            CpuStorage::BF16(data) => data[layout.offset..].iter().map(|v| v.to_f32()).collect(),
+            CpuStorage::I64(_) => {
+                return Err(crate::error::Error::DTypeMismatch(
+                    "silu_fwd: i64 is not supported, use a float dtype".into(),
+                ));
+            }
+        };
+        assert_eq!(data.len(), layout.size());
+        let out: Vec<f32> = data.iter().map(|&v| v / (1.0 + (-v).exp())).collect();
+        match self {
+            CpuStorage::F32(_) => Ok(CpuStorage::F32(out)),
+            CpuStorage::F16(_) => {
+                use half::f16;
+                Ok(CpuStorage::F16(out.iter().map(|&v| f16::from_f32(v)).collect()))
+            }
+            CpuStorage::BF16(_) => {
+                Ok(CpuStorage::BF16(out.iter().map(|&v| bf16::from_f32(v)).collect()))
+            }
+            CpuStorage::I64(_) => Err(crate::error::Error::DTypeMismatch(
+                "silu_fwd: i64 is not supported, use a float dtype".into(),
+            )),
+        }
+    }
+
+    fn silu_mul_fwd(
+        &self,
+        layout: &Layout,
+        up: &Self,
+        up_layout: &Layout,
+    ) -> crate::error::Result<Self> {
+        assert!(layout.is_compact());
+        assert!(up_layout.is_compact());
+        assert_eq!(layout.size(), up_layout.size());
+        let gate: Vec<f32> = match self {
+            CpuStorage::F32(data) => data[layout.offset..].to_vec(),
+            CpuStorage::F16(data) => data[layout.offset..].iter().map(|v| v.to_f32()).collect(),
+            CpuStorage::BF16(data) => data[layout.offset..].iter().map(|v| v.to_f32()).collect(),
+            CpuStorage::I64(_) => {
+                return Err(crate::error::Error::DTypeMismatch(
+                    "silu_mul_fwd: i64 is not supported, use a float dtype".into(),
+                ));
+            }
+        };
+        let up_vals: Vec<f32> = match up {
+            CpuStorage::F32(data) => data[up_layout.offset..].to_vec(),
+            CpuStorage::F16(data) => {
+                data[up_layout.offset..].iter().map(|v| v.to_f32()).collect()
+            }
+            CpuStorage::BF16(data) => {
+                data[up_layout.offset..].iter().map(|v| v.to_f32()).collect()
+            }
+            CpuStorage::I64(_) => {
+                return Err(crate::error::Error::DTypeMismatch(
+                    "silu_mul_fwd: i64 is not supported, use a float dtype".into(),
+                ));
+            }
+        };
+        assert_eq!(gate.len(), layout.size());
+        assert_eq!(up_vals.len(), layout.size());
+        let out: Vec<f32> = gate
+            .iter()
+            .zip(up_vals.iter())
+            .map(|(&g, &u)| g / (1.0 + (-g).exp()) * u)
+            .collect();
+        match (self, up) {
+            (CpuStorage::F32(_), CpuStorage::F32(_)) => Ok(CpuStorage::F32(out)),
+            (CpuStorage::F16(_), CpuStorage::F16(_)) => {
+                use half::f16;
+                Ok(CpuStorage::F16(out.iter().map(|&v| f16::from_f32(v)).collect()))
+            }
+            (CpuStorage::BF16(_), CpuStorage::BF16(_)) => Ok(CpuStorage::BF16(
+                out.iter().map(|&v| bf16::from_f32(v)).collect(),
+            )),
+            _ => Err(crate::error::Error::DTypeMismatch(
+                "silu_mul_fwd: dtype mismatch between gate and up".into(),
+            )),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn masked_softmax_fwd(
+        &self,
+        layout: &Layout,
+        mask: &Self,
+        mask_layout: &Layout,
+        outer_size: usize,
+        inner_size: usize,
+        scale: f32,
+        t_len: usize,
+        mask_t_len: usize,
+    ) -> crate::error::Result<Self> {
+        assert!(layout.is_compact());
+        assert_eq!(layout.size(), outer_size * inner_size);
+        // The op compacts the mask first, so one linear row read suffices.
+        assert!(mask_layout.is_compact());
+        let scores: Vec<f32> = match self {
+            CpuStorage::F32(data) => data[layout.offset..].to_vec(),
+            CpuStorage::F16(data) => data[layout.offset..].iter().map(|v| v.to_f32()).collect(),
+            CpuStorage::BF16(data) => data[layout.offset..].iter().map(|v| v.to_f32()).collect(),
+            CpuStorage::I64(_) => {
+                return Err(crate::error::Error::DTypeMismatch(
+                    "masked_softmax_fwd: i64 is not supported, use a float dtype".into(),
+                ));
+            }
+        };
+        let mask_row: Vec<f32> = match mask {
+            CpuStorage::F32(data) => data[mask_layout.offset..].to_vec(),
+            CpuStorage::F16(data) => {
+                data[mask_layout.offset..].iter().map(|v| v.to_f32()).collect()
+            }
+            CpuStorage::BF16(data) => {
+                data[mask_layout.offset..].iter().map(|v| v.to_f32()).collect()
+            }
+            CpuStorage::I64(_) => {
+                return Err(crate::error::Error::DTypeMismatch(
+                    "masked_softmax_fwd: i64 is not supported, use a float dtype".into(),
+                ));
+            }
+        };
+        assert_eq!(scores.len(), outer_size * inner_size);
+        let mask_rows: Vec<f32> =
+            mask_row.into_iter().take(mask_t_len * inner_size).collect();
+        assert_eq!(mask_rows.len(), mask_t_len * inner_size);
+        let out: Vec<f32> = (0..outer_size)
+            .flat_map(|row| {
+                let start = row * inner_size;
+                let slice = &scores[start..start + inner_size];
+                let t = row % t_len % mask_t_len;
+                let mrow = &mask_rows[t * inner_size..(t + 1) * inner_size];
+                let max = slice
+                    .iter()
+                    .zip(mrow.iter())
+                    .map(|(&x, &m)| x * scale + m)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let sum: f32 = slice
+                    .iter()
+                    .zip(mrow.iter())
+                    .map(|(&x, &m)| (x * scale + m - max).exp())
+                    .sum();
+                slice
+                    .iter()
+                    .zip(mrow.iter())
+                    .map(|(&x, &m)| (x * scale + m - max).exp() / sum)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        match self {
+            CpuStorage::F32(_) => Ok(CpuStorage::F32(out)),
+            CpuStorage::F16(_) => {
+                use half::f16;
+                Ok(CpuStorage::F16(out.iter().map(|&v| f16::from_f32(v)).collect()))
+            }
+            CpuStorage::BF16(_) => Ok(CpuStorage::BF16(
+                out.iter().map(|&v| bf16::from_f32(v)).collect(),
+            )),
+            CpuStorage::I64(_) => Err(crate::error::Error::DTypeMismatch(
+                "masked_softmax_fwd: i64 is not supported, use a float dtype".into(),
+            )),
+        }
+    }
+
+
+    fn copy_blocks_into(
+        &mut self,
+        src: &Self,
+        src_layout: &Layout,
+        blocks: usize,
+        block_len: usize,
+        dst_base: usize,
+        dst_stride: usize,
+    ) -> crate::error::Result<()> {
+        assert_eq!(src_layout.size(), blocks * block_len);
+        let kinds_match = matches!(
+            (&self, &src),
+            (CpuStorage::F32(_), CpuStorage::F32(_))
+                | (CpuStorage::F16(_), CpuStorage::F16(_))
+                | (CpuStorage::BF16(_), CpuStorage::BF16(_))
+                | (CpuStorage::I64(_), CpuStorage::I64(_))
+        );
+        if !kinds_match {
+            return Err(crate::error::Error::DTypeMismatch(
+                "copy_blocks_into: dtype mismatch between source and destination".into(),
+            ));
+        }
+        // Read the source in view order first: the destination borrow below
+        // must not overlap the source read when both alias one buffer.
+        let vals: Vec<f32> = match src {
+            CpuStorage::F32(_) => src.iter::<f32>(src_layout).copied().collect(),
+            CpuStorage::F16(_) => src.iter::<f16>(src_layout).map(|v| v.to_f32()).collect(),
+            CpuStorage::BF16(_) => src.iter::<bf16>(src_layout).map(|v| v.to_f32()).collect(),
+            CpuStorage::I64(_) => src.iter::<i64>(src_layout).map(|&v| v as f32).collect(),
+        };
+        match self {
+            CpuStorage::F32(dst) => {
+                write_blocks(dst, &vals, blocks, block_len, dst_base, dst_stride, |v| v);
+                Ok(())
+            }
+            CpuStorage::F16(dst) => {
+                use half::f16;
+                write_blocks(dst, &vals, blocks, block_len, dst_base, dst_stride, |v| {
+                    f16::from_f32(v)
+                });
+                Ok(())
+            }
+            CpuStorage::BF16(dst) => {
+                write_blocks(dst, &vals, blocks, block_len, dst_base, dst_stride, |v| {
+                    bf16::from_f32(v)
+                });
+                Ok(())
+            }
+            CpuStorage::I64(dst) => {
+                write_blocks(dst, &vals, blocks, block_len, dst_base, dst_stride, |v| v as i64);
+                Ok(())
+            }
         }
     }
 }

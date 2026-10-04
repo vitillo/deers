@@ -2011,6 +2011,100 @@ mod imp {
             Err(crate::error::Error::NotImplemented("mps rms_norm_fwd is not implemented"))
         }
 
+        #[allow(clippy::too_many_arguments)]
+        fn rope_fwd(
+            &self,
+            layout: &Layout,
+            cos: &Self,
+            cos_layout: &Layout,
+            sin: &Self,
+            sin_layout: &Layout,
+            outer_size: usize,
+            head_dim: usize,
+            n_heads: usize,
+            t_len: usize,
+            cos_t_len: usize,
+        ) -> Result<Self> {
+            // No Metal RoPE kernel yet: round-trip through the CPU fallback
+            // exactly like the fused log-softmax path.
+            let inner = self.as_cpu_storage().rope_fwd(
+                layout,
+                &cos.as_cpu_storage(),
+                cos_layout,
+                &sin.as_cpu_storage(),
+                sin_layout,
+                outer_size,
+                head_dim,
+                n_heads,
+                t_len,
+                cos_t_len,
+            )?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
+        fn silu_fwd(&self, layout: &Layout) -> Result<Self> {
+            // No Metal SiLU kernel yet: round-trip through the CPU fallback.
+            let inner = self.as_cpu_storage().silu_fwd(layout)?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
+        fn silu_mul_fwd(&self, layout: &Layout, up: &Self, up_layout: &Layout) -> Result<Self> {
+            // No Metal SiLU-gate kernel yet: round-trip through the CPU fallback.
+            let inner =
+                self.as_cpu_storage().silu_mul_fwd(layout, &up.as_cpu_storage(), up_layout)?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
+        fn masked_softmax_fwd(
+            &self,
+            layout: &Layout,
+            mask: &Self,
+            mask_layout: &Layout,
+            outer_size: usize,
+            inner_size: usize,
+            scale: f32,
+            t_len: usize,
+            mask_t_len: usize,
+        ) -> Result<Self> {
+            // No Metal masked-softmax kernel yet: round-trip through the CPU fallback.
+            let inner = self.as_cpu_storage().masked_softmax_fwd(
+                layout,
+                &mask.as_cpu_storage(),
+                mask_layout,
+                outer_size,
+                inner_size,
+                scale,
+                t_len,
+                mask_t_len,
+            )?;
+            Ok(Self::from_cpu_storage(inner))
+        }
+
+
+        fn copy_blocks_into(
+            &mut self,
+            src: &Self,
+            src_layout: &Layout,
+            blocks: usize,
+            block_len: usize,
+            dst_base: usize,
+            dst_stride: usize,
+        ) -> Result<()> {
+            // No Metal block-copy yet: round-trip through the CPU fallback.
+            // Same per-step complexity as today's reallocating cat on MPS.
+            let mut cpu_dst = self.as_cpu_storage();
+            cpu_dst.copy_blocks_into(
+                &src.as_cpu_storage(),
+                src_layout,
+                blocks,
+                block_len,
+                dst_base,
+                dst_stride,
+            )?;
+            *self = Self::from_cpu_storage(cpu_dst);
+            Ok(())
+        }
+
         fn dtype(&self) -> DType {
             match &self.inner {
                 MpsInner::Accelerated { dtype, .. } => *dtype,
@@ -2393,6 +2487,52 @@ mod imp {
             _: usize,
             _: f32,
         ) -> Result<Self> {
+            Self::unavailable()
+        }
+        #[allow(clippy::too_many_arguments)]
+        fn rope_fwd(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+        ) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn silu_fwd(&self, _: &Layout) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn silu_mul_fwd(&self, _: &Layout, _: &Self, _: &Layout) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn masked_softmax_fwd(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: usize,
+            _: usize,
+            _: f32,
+            _: usize,
+            _: usize,
+        ) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn copy_blocks_into(
+            &mut self,
+            _: &Self,
+            _: &Layout,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+        ) -> Result<()> {
             Self::unavailable()
         }
         fn dtype(&self) -> DType {

@@ -10,6 +10,7 @@
 use half::{bf16, f16};
 
 use crate::error::Result;
+use crate::ops::TensorOp;
 use crate::nn::{
     Embedding, LayerNorm, Linear, Module, ParamBuilder, Parameter, RMSNorm, SwiGLU, functional,
 };
@@ -186,6 +187,11 @@ pub fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
 
     // Hugging Face `rotate_half` direction, matching candle's `rotary_emb`:
     // y1 = x1*cos - x2*sin, y2 = x1*sin + x2*cos.
+    // Decode is launch-bound on this chain, so CUDA runs one fused kernel
+    // while every other device keeps the primitive decomposition.
+    if x.device() == Device::Cuda {
+        return x.fused_rope(cos, sin);
+    }
     let x1 = x.narrow(3, 0, half_dim);
     let x2 = x.narrow(3, half_dim, half_dim);
     let y1 = &x1 * cos - &x2 * sin;
@@ -216,15 +222,31 @@ const QK_NORM_EPS: f64 = 1e-6;
 /// rotated correctly with no re-rotation. Repeating up front keeps decode
 /// a plain append plus attention, at the price of a cache `group_size`
 /// wider than the key/value heads.
+///
+/// Buffers are preallocated in whole blocks and each append writes its slice
+/// in place, so the hot path is one offset copy with no realloc: the
+/// whole-cache compact, the double allocation, and the two device memcpys of
+/// the reallocating concatenate disappear. Growth concatenates once per block
+/// instead of once per token. The published views always cover exactly the
+/// cached prefix, and every append stays a tracked op, so gradients through
+/// prefills and decodes match full recomputation exactly.
 #[derive(Debug, Default)]
 pub struct KvCache {
     kv: Option<(Tensor, Tensor)>,
+    buf: Option<(Tensor, Tensor)>,
+    cap: usize,
 }
+
+/// Capacity block for the preallocated cache buffers.
+///
+/// The reallocating concatenate runs at most once per block instead of once
+/// per token, so its whole-cache copy amortizes to about one row per step.
+const KV_BLOCK: usize = 512;
 
 impl KvCache {
     /// Creates an empty cache. Fill it with `CausalSelfAttention::prefill`.
     pub fn new() -> Self {
-        Self { kv: None }
+        Self { kv: None, buf: None, cap: 0 }
     }
 
     /// Returns true while no tokens are cached yet.
@@ -251,27 +273,77 @@ impl KvCache {
     ///
     /// Batch, heads, head width, dtype, and device must match the stored
     /// cache, so a stray tensor fails loudly instead of scoring garbage.
+    /// The slice writes into the preallocated buffer in place; only a block
+    /// boundary pays the reallocating concatenate, once per 512 rows.
     fn append(&mut self, k: Tensor, v: Tensor) {
         assert_eq!(k.layout().shape(), v.layout().shape(), "cache keys and values must match");
         let shape = k.layout().shape();
         assert_eq!(shape.ndim(), 4, "cache entries must be shaped [B, H, T, D]");
-        match &self.kv {
-            None => {
-                self.kv = Some((k, v));
-            }
-            Some((prev_k, prev_v)) => {
-                assert_eq!(shape[0], prev_k.layout().shape()[0], "cache batch mismatch");
-                assert_eq!(shape[1], prev_k.layout().shape()[1], "cache head mismatch");
-                assert_eq!(shape[3], prev_k.layout().shape()[3], "cache head width mismatch");
-                assert_eq!(k.dtype(), prev_k.dtype(), "cache dtype mismatch");
-                assert_eq!(k.device(), prev_k.device(), "cache device mismatch");
-                assert_eq!(v.dtype(), prev_v.dtype(), "cache dtype mismatch");
-                assert_eq!(v.device(), prev_v.device(), "cache device mismatch");
-                let full_k = Tensor::cat(&[prev_k.clone(), k], 2);
-                let full_v = Tensor::cat(&[prev_v.clone(), v], 2);
-                self.kv = Some((full_k, full_v));
-            }
+        let (batch, heads, t_new, head_dim) = (shape[0], shape[1], shape[2], shape[3]);
+        let len = self.len();
+        if len + t_new > self.cap {
+            self.grow(batch, heads, head_dim, len + t_new, k.dtype(), k.device());
         }
+        let (buf_k, buf_v) = self.buf.as_ref().expect("grow must install holders");
+        assert_eq!(shape[0], buf_k.layout().shape()[0], "cache batch mismatch");
+        assert_eq!(shape[1], buf_k.layout().shape()[1], "cache head mismatch");
+        assert_eq!(shape[3], buf_k.layout().shape()[3], "cache head width mismatch");
+        assert_eq!(k.dtype(), buf_k.dtype(), "cache dtype mismatch");
+        assert_eq!(k.device(), buf_k.device(), "cache device mismatch");
+        assert_eq!(v.dtype(), buf_k.dtype(), "cache dtype mismatch");
+        assert_eq!(v.device(), buf_k.device(), "cache device mismatch");
+        let prev = self.kv.clone();
+        let prev_k = prev.as_ref().map(|(k, _)| k.clone());
+        let prev_v = prev.as_ref().map(|(_, v)| v.clone());
+        let full_k = crate::ops::CacheAppend::new(buf_k.clone(), prev_k, k, len)
+            .unwrap()
+            .forward()
+            .unwrap();
+        let full_v = crate::ops::CacheAppend::new(buf_v.clone(), prev_v, v, len)
+            .unwrap()
+            .forward()
+            .unwrap();
+        self.kv = Some((full_k, full_v));
+    }
+
+    /// Grows the holders to cover `need` rows, preserving the cached prefix.
+    ///
+    /// The prefix concatenates once with zero padding out to the new block
+    /// capacity, so the tracked graph — and every gradient through it — keeps
+    /// the exact reallocating semantics on the rare growth path.
+    fn grow(
+        &mut self,
+        batch: usize,
+        heads: usize,
+        head_dim: usize,
+        need: usize,
+        dtype: DType,
+        device: Device,
+    ) {
+        let len = self.len();
+        let cap = need.div_ceil(KV_BLOCK) * KV_BLOCK;
+        let (buf_k, buf_v) = match &self.kv {
+            None => (
+                Tensor::zeros(vec![batch, heads, cap, head_dim], dtype, device),
+                Tensor::zeros(vec![batch, heads, cap, head_dim], dtype, device),
+            ),
+            Some((prev_k, prev_v)) => {
+                // Dim-2 cat returns a transposed view, so compact the holders
+                // back to plain row-major for the block writes below.
+                let pad_shape = vec![batch, heads, cap - len, head_dim];
+                (
+                    Tensor::cat(
+                        &[prev_k.clone(), Tensor::zeros(pad_shape.clone(), dtype, device)],
+                        2,
+                    )
+                    .compact(),
+                    Tensor::cat(&[prev_v.clone(), Tensor::zeros(pad_shape, dtype, device)], 2)
+                        .compact(),
+                )
+            }
+        };
+        self.buf = Some((buf_k, buf_v));
+        self.cap = cap;
     }
 }
 
@@ -391,6 +463,9 @@ impl CausalSelfAttention {
         let k = self.k_norm.forward(&k)?;
 
         // RoPE rotates each head independently, so one rotation serves the whole query group.
+        // Repeat on fresh projections (kilobytes), never on cache views
+        // (megabytes): the append reads any strides, and attention needs the
+        // grouped width to match.
         let q = apply_rotary_emb(&q, cos, sin).rearrange("b t h d -> b h t d", &[]);
         let k = apply_rotary_emb(&k, cos, sin);
         let k = if self.group_size == 1 {
@@ -419,9 +494,12 @@ impl CausalSelfAttention {
         seq_len: usize,
     ) -> Result<Tensor> {
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let scores = Tensor::einsum("b h t d, b h s d -> b h t s", q, k) * scale;
-        let attn = (&scores + &mask).softmax(3);
-        let y_flat = attn.matmul(v).rearrange("b h t d -> (b t) (h d)", &[]);
+        let scores = Tensor::einsum("b h t d, b h s d -> b h t s", q, k);
+        // One fused kernel on CUDA (scale, mask-add, softmax); the primitive
+        // chain everywhere else.
+        let attn = scores.scaled_masked_softmax(&mask, scale, 3);
+        let y = attn.matmul(&v);
+        let y_flat = y.rearrange("b h t d -> (b t) (h d)", &[]);
 
         let out = self.out_proj.forward(&y_flat)?;
         Ok(out.rearrange("(b t) c -> b t c", &[("b", batch_size), ("t", seq_len)]))
