@@ -14,7 +14,9 @@ use crate::backprop::GradientStore;
 use crate::error::{Error, Result};
 use crate::layout::{Layout, Shape};
 use crate::profiler;
-use crate::storage::{self, BackendStorage, MpsStorage, ReduceMax, ReduceSum, Storage};
+use crate::storage::{
+    self, BackendStorage, FlashAttnMask, MpsStorage, ReduceMax, ReduceSum, Storage,
+};
 use crate::tensor::Tensor;
 
 fn allocated_bytes(elements: usize, dtype: crate::DType) -> usize {
@@ -1356,6 +1358,208 @@ impl TensorOp for FusedLogSoftmax {
 
     fn dependencies(&self) -> Vec<&Tensor> {
         vec![&self.arg]
+    }
+}
+
+/// Which positions fused flash attention scores.
+///
+/// The variants mirror candle's fused-attention mask shapes: no mask, causal,
+/// causal with an offset for decoding, and an explicit additive bias tensor.
+/// `Mask` holds an additive `[B', H', Tq, Sk]` bias (`B'`/`H'` each 1 or the
+/// matching size); masked positions typically hold `-inf`.
+#[derive(Clone, Debug)]
+pub enum FlashMask {
+    /// Score every key for every query.
+    None,
+    /// Score key `j` for query `i` only when `j + n_queries <= i + n_keys`.
+    /// For square prefill inputs this is the usual `j <= i` causal rule.
+    Causal,
+    /// Score key `j` for query `i` only when `j <= i + offset`.
+    CausalWithOffset(usize),
+    /// Add this bias to the scores before softmax.
+    Mask(Tensor),
+}
+
+/// Fused flash attention over `[B, H, T, D]` queries, keys, and values.
+///
+/// The forward runs one fused kernel per backend (CPU, CUDA; MPS fails loudly)
+/// with online softmax, so the `Tq x Sk` score matrix is never materialized.
+/// The backward replays the primitive decomposition (`scores -> softmax ->
+/// matmul`) from the saved inputs purely to compute gradients: training-time
+/// only, where the temporary scores are acceptable and exactness matters more
+/// than fusion. Only the forward is fused.
+#[derive(Debug)]
+pub struct FlashAttention {
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    scale: f64,
+    mask: FlashMask,
+}
+
+impl FlashAttention {
+    pub fn new(q: Tensor, k: Tensor, v: Tensor, scale: f64, mask: FlashMask) -> Result<Self> {
+        Ok(Self { q, k, v, scale, mask })
+    }
+
+    /// Rebuilds the additive `[B, H, Tq, Sk]` bias for `mask` on `device`.
+    ///
+    /// Used only by the backward replay. `None` and causal variants rebuild the
+    /// same rule the fused kernel applies; `Mask` reuses the stored tensor.
+    fn replay_bias(
+        mask: &FlashMask,
+        queries: usize,
+        keys: usize,
+        dtype: crate::DType,
+        device: crate::Device,
+    ) -> Tensor {
+        match mask {
+            FlashMask::None => Tensor::zeros(vec![1, 1, queries, keys], dtype, device),
+            FlashMask::Mask(bias) => bias.clone(),
+            FlashMask::Causal | FlashMask::CausalWithOffset(_) => {
+                let offset = match mask {
+                    FlashMask::CausalWithOffset(offset) => *offset,
+                    _ => 0,
+                };
+                // Trailing-aligned causal bound: key j allowed for query i iff
+                // j <= i + offset + (keys - queries).
+                let shift = offset + keys.saturating_sub(queries);
+                let build = |neg: f32, zero: f32| -> Vec<f32> {
+                    (0..queries)
+                        .flat_map(|i| {
+                            (0..keys).map(move |j| if j > i + shift { neg } else { zero })
+                        })
+                        .collect()
+                };
+                let shape = vec![1, 1, queries, keys];
+                match dtype {
+                    crate::DType::F32 => Tensor::from_vec(
+                        build(f32::NEG_INFINITY, 0.0),
+                        shape,
+                        device,
+                    ),
+                    crate::DType::F16 => Tensor::from_vec(
+                        build(f32::NEG_INFINITY, 0.0)
+                            .iter()
+                            .map(|&v| f16::from_f32(v))
+                            .collect::<Vec<_>>(),
+                        shape,
+                        device,
+                    ),
+                    crate::DType::BF16 => Tensor::from_vec(
+                        build(f32::NEG_INFINITY, 0.0)
+                            .iter()
+                            .map(|&v| bf16::from_f32(v))
+                            .collect::<Vec<_>>(),
+                        shape,
+                        device,
+                    ),
+                    crate::DType::I64 => panic!("flash attention needs a float dtype"),
+                }
+            }
+        }
+    }
+}
+
+impl TensorOp for FlashAttention {
+    fn forward(self) -> Result<Tensor> {
+        let _profile = profile_like("flash_attention", &self.q);
+        let shape: Vec<usize> = self.q.layout().shape().iter().copied().collect();
+        assert_eq!(shape.len(), 4, "flash attention expects [B, H, T, D] inputs");
+        for (name, t) in [("k", &self.k), ("v", &self.v)] {
+            let other: Vec<usize> = t.layout().shape().iter().copied().collect();
+            assert_eq!(
+                (other[0], other[1], other[3]),
+                (shape[0], shape[1], shape[3]),
+                "flash attention {name} batch/heads/width must match q"
+            );
+        }
+        assert_eq!(self.q.dtype(), self.k.dtype(), "flash attention q/k dtype mismatch");
+        assert_eq!(self.q.dtype(), self.v.dtype(), "flash attention q/v dtype mismatch");
+        assert_eq!(self.q.device(), self.k.device(), "flash attention q/k device mismatch");
+        assert_eq!(self.q.device(), self.v.device(), "flash attention q/v device mismatch");
+        assert_ne!(self.q.dtype(), crate::DType::I64, "flash attention needs a float dtype");
+        if matches!(self.q.device(), crate::Device::Mps) {
+            return Err(Error::NotImplemented("mps flash_attn_fwd is not implemented"));
+        }
+        // Compact once so every fused kernel reads contiguous `[B, H, T, D]` rows.
+        let q = self.q.compact();
+        let k = self.k.compact();
+        let v = self.v.compact();
+        let mask_compact = match &self.mask {
+            FlashMask::Mask(bias) => Some(bias.compact()),
+            _ => None,
+        };
+        let mask_guard = mask_compact.as_ref().map(|t| t.storage());
+        let mask_layout = mask_compact.as_ref().map(|t| t.layout().clone());
+        let mask_storage: Option<&Storage> = mask_guard.as_deref();
+        let mask = match mask_storage {
+            Some(storage) => FlashAttnMask::Additive(
+                storage,
+                mask_layout.as_ref().expect("mask layout travels with its storage"),
+            ),
+            None => match &self.mask {
+                FlashMask::None => FlashAttnMask::None,
+                FlashMask::Causal => FlashAttnMask::Causal,
+                FlashMask::CausalWithOffset(offset) => FlashAttnMask::CausalWithOffset(*offset),
+                FlashMask::Mask(_) => unreachable!("mask compacted above"),
+            },
+        };
+        let out_storage = q.storage().flash_attn_fwd(
+            q.layout(),
+            &k.storage(),
+            k.layout(),
+            &v.storage(),
+            v.layout(),
+            self.scale,
+            mask,
+        )?;
+        // Output covers the query rows: `[B, H, Tq, D]`.
+        let out_shape: crate::layout::Shape = shape.into();
+        let output = Tensor::new(
+            Arc::new(RwLock::new(out_storage)),
+            crate::layout::Layout::from(out_shape),
+            false,
+            None,
+        );
+        Ok(Tensor::new(
+            output.storage_clone(),
+            output.layout().clone(),
+            false,
+            Some(Box::new(self)),
+        ))
+    }
+
+    fn backward(&self, grads: &mut GradientStore, out_grad: &Tensor) -> Result<()> {
+        // Replay the materialized decomposition from the saved inputs: with
+        // P = softmax(scale * Q @ K^T + bias), O = P @ V, the gradients are
+        // dV = P^T @ dO, dP = dO @ V^T, dS = P * (dP - rowsum(dP * P)),
+        // dQ = (dS @ K) * scale, dK = (dS^T @ Q) * scale.
+        let shape: Vec<usize> = self.q.layout().shape().iter().copied().collect();
+        let queries = shape[2];
+        let keys = self.k.layout().shape()[2];
+        let bias = Self::replay_bias(&self.mask, queries, keys, self.q.dtype(), self.q.device());
+        let scores = self.q.matmul(&self.k.transpose(None)) * self.scale + &bias;
+        let probs = scores.softmax(3);
+        let grad_c = out_grad.compact();
+        let dv = probs.transpose(None).matmul(&grad_c);
+        let dp = grad_c.matmul(&self.v.transpose(None));
+        let row_sum = (&dp * &probs).sum(vec![3], true);
+        let correction = row_sum.broadcast(scores.layout().shape().clone());
+        let ds = &probs * &(&dp - &correction);
+        let dq = ds.matmul(&self.k) * self.scale;
+        let dk = ds.transpose(None).matmul(&self.q) * self.scale;
+        grads.accumulate(&self.q, dq);
+        grads.accumulate(&self.k, dk);
+        grads.accumulate(&self.v, dv);
+        Ok(())
+    }
+
+    fn dependencies(&self) -> Vec<&Tensor> {
+        match &self.mask {
+            FlashMask::Mask(bias) => vec![&self.q, &self.k, &self.v, bias],
+            _ => vec![&self.q, &self.k, &self.v],
+        }
     }
 }
 

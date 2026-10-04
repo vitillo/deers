@@ -6,7 +6,7 @@ use crate::{
     dtype::{DType, WithDType},
     error::{Error, Result},
     layout::Layout,
-    storage::{BackendStorage, BinaryOp, CpuStorage, ReduceOp, UnaryOp},
+    storage::{BackendStorage, BinaryOp, CpuStorage, FlashAttnMask, ReduceOp, UnaryOp},
 };
 
 const MAX_DIMS: usize = 8;
@@ -520,6 +520,81 @@ mod imp {
     extern "C" __global__ void rms_norm_fwd_f32(const float* src, const float* weight, float* dst, unsigned int outer_size, unsigned int inner_size, float eps, unsigned int has_weight) { rms_norm_fwd_kernel(src, weight, dst, outer_size, inner_size, eps, has_weight); }
     extern "C" __global__ void rms_norm_fwd_f16(const half* src, const half* weight, half* dst, unsigned int outer_size, unsigned int inner_size, float eps, unsigned int has_weight) { rms_norm_fwd_kernel(src, weight, dst, outer_size, inner_size, eps, has_weight); }
     extern "C" __global__ void rms_norm_fwd_bf16(const __nv_bfloat16* src, const __nv_bfloat16* weight, __nv_bfloat16* dst, unsigned int outer_size, unsigned int inner_size, float eps, unsigned int has_weight) { rms_norm_fwd_kernel(src, weight, dst, outer_size, inner_size, eps, has_weight); }
+
+    // Fused flash-attention forward: one thread per (batch, head, query) row runs
+    // online softmax over its allowed keys, dotting the query against keys and
+    // folding values in flight. mode: 0 scores everything, 1 is trailing-aligned
+    // causal (key j allowed for query i iff j + tq <= i + sk), 2 is causal with
+    // offset (j <= i + offset), 3 adds the mask tensor. The mask pointer is only
+    // read in mode 3 (callers pass a valid dummy pointer otherwise so launch args
+    // stay uniform). Scores are recomputed per pass but never stored.
+    template <typename T>
+    __device__ __forceinline__ bool flash_allowed(unsigned int mode, unsigned int i, unsigned int j, unsigned int tq, unsigned int sk, unsigned int offset) {
+        if (mode == 1) return (j + tq <= i + sk);
+        if (mode == 2) return (j <= i + offset);
+        return true;
+    }
+
+    template <typename T>
+    __device__ __forceinline__ float flash_score(const T* q_row, const T* k_base, unsigned int j, unsigned int d, float scale, const T* mask, unsigned int mask_idx, unsigned int use_mask) {
+        float s = 0.0f;
+        for (unsigned int t = 0; t < d; ++t)
+            s += to_float(q_row[t]) * to_float(k_base[j * d + t]);
+        s *= scale;
+        if (use_mask) s += to_float(mask[mask_idx]);
+        return s;
+    }
+
+    template <typename T>
+    __global__ void flash_attn_fwd_kernel(
+        const T* q, const T* k, const T* v, const T* mask, T* out,
+        unsigned int b, unsigned int h, unsigned int tq, unsigned int sk, unsigned int d,
+        float scale, unsigned int mode, unsigned int offset, unsigned int mask_b, unsigned int mask_h) {
+        unsigned int row = blockIdx.x * blockDim.x + threadIdx.x;
+        unsigned int rows = b * h * tq;
+        if (row >= rows) return;
+        unsigned int i = row % tq;
+        unsigned int hh = (row / tq) % h;
+        unsigned int bb = row / (tq * h);
+        const T* q_row = q + row * d;
+        const T* k_base = k + ((bb * h + hh) * sk) * d;
+        const T* v_base = v + ((bb * h + hh) * sk) * d;
+        // Mask row base with batch/head broadcasting (mask_b/mask_h are 1 or full).
+        unsigned int mb = mask_b == 1 ? 0 : bb;
+        unsigned int mh = mask_h == 1 ? 0 : hh;
+        unsigned int mask_base = (mb * mask_h + mh) * tq * sk + i * sk;
+        unsigned int use_mask = (mode == 3) ? 1 : 0;
+
+        // Pass 1: row maximum over allowed keys.
+        float row_max = -1.0f / 0.0f;
+        for (unsigned int j = 0; j < sk; ++j) {
+            if (!flash_allowed<T>(mode, i, j, tq, sk, offset)) continue;
+            float s = flash_score(q_row, k_base, j, d, scale, mask, mask_base + j, use_mask);
+            if (s > row_max) row_max = s;
+        }
+
+        // Pass 2: exp-sum plus unnormalized output.
+        float row_sum = 0.0f;
+        T* o_row = out + row * d;
+        for (unsigned int t = 0; t < d; ++t) o_row[t] = zero_value<T>();
+        for (unsigned int j = 0; j < sk; ++j) {
+            if (!flash_allowed<T>(mode, i, j, tq, sk, offset)) continue;
+            float w = expf(flash_score(q_row, k_base, j, d, scale, mask, mask_base + j, use_mask) - row_max);
+            row_sum += w;
+            const T* v_row = v_base + j * d;
+            for (unsigned int t = 0; t < d; ++t)
+                o_row[t] = from_float<T>(to_float(o_row[t]) + w * to_float(v_row[t]));
+        }
+
+        // Pass 3: normalize.
+        float inv = 1.0f / row_sum;
+        for (unsigned int t = 0; t < d; ++t)
+            o_row[t] = from_float<T>(to_float(o_row[t]) * inv);
+    }
+
+    extern "C" __global__ void flash_attn_fwd_f32(const float* q, const float* k, const float* v, const float* mask, float* out, unsigned int b, unsigned int h, unsigned int tq, unsigned int sk, unsigned int d, float scale, unsigned int mode, unsigned int offset, unsigned int mask_b, unsigned int mask_h) { flash_attn_fwd_kernel(q, k, v, mask, out, b, h, tq, sk, d, scale, mode, offset, mask_b, mask_h); }
+    extern "C" __global__ void flash_attn_fwd_f16(const half* q, const half* k, const half* v, const half* mask, half* out, unsigned int b, unsigned int h, unsigned int tq, unsigned int sk, unsigned int d, float scale, unsigned int mode, unsigned int offset, unsigned int mask_b, unsigned int mask_h) { flash_attn_fwd_kernel(q, k, v, mask, out, b, h, tq, sk, d, scale, mode, offset, mask_b, mask_h); }
+    extern "C" __global__ void flash_attn_fwd_bf16(const __nv_bfloat16* q, const __nv_bfloat16* k, const __nv_bfloat16* v, const __nv_bfloat16* mask, __nv_bfloat16* out, unsigned int b, unsigned int h, unsigned int tq, unsigned int sk, unsigned int d, float scale, unsigned int mode, unsigned int offset, unsigned int mask_b, unsigned int mask_h) { flash_attn_fwd_kernel(q, k, v, mask, out, b, h, tq, sk, d, scale, mode, offset, mask_b, mask_h); }
 
     template <typename T>
     __global__ void gather_kernel(const T* src, const index_t* indices, T* dst, unsigned int left_len, unsigned int src_dim, unsigned int dst_dim, unsigned int right_len) {
@@ -2253,6 +2328,144 @@ mod imp {
             }
         }
 
+        /// Single-kernel fused flash attention over compact `[B, H, T, D]` inputs.
+        ///
+        /// One thread per (batch, head, query) row runs online softmax in f32,
+        /// dotting the query against keys and folding values in flight. `mode` 0
+        /// scores everything, 1 is trailing-aligned causal, 2 is causal with
+        /// `offset`, and 3 adds the explicit mask (1-or-full batch/heads).
+        fn flash_attn_fwd(
+            &self,
+            q_layout: &Layout,
+            k: &Self,
+            k_layout: &Layout,
+            v: &Self,
+            v_layout: &Layout,
+            scale: f64,
+            mask: FlashAttnMask<'_>,
+        ) -> Result<Self> {
+            for layout in [q_layout, k_layout, v_layout] {
+                assert!(layout.is_compact(), "flash_attn_fwd needs compact inputs");
+                assert_eq!(layout.ndim(), 4, "flash_attn_fwd expects [B, H, T, D] inputs");
+            }
+            let shape = |layout: &Layout| -> Vec<usize> {
+                layout.shape().iter().copied().collect()
+            };
+            let qs = shape(q_layout);
+            let ks = shape(k_layout);
+            let vs = shape(v_layout);
+            assert_eq!((qs[0], qs[1], qs[3]), (ks[0], ks[1], ks[3]), "flash q/k mismatch");
+            assert_eq!((qs[0], qs[1], qs[3]), (vs[0], vs[1], vs[3]), "flash q/v mismatch");
+            assert_eq!(vs[2], ks[2], "flash k/v length mismatch");
+            let (b, h, tq, sk, d) =
+                (qs[0] as u32, qs[1] as u32, qs[2] as u32, ks[2] as u32, qs[3] as u32);
+            let (mode, offset) = match mask {
+                FlashAttnMask::None => (0, 0),
+                FlashAttnMask::Causal => {
+                    assert!(qs[2] <= ks[2], "causal flash needs keys >= queries");
+                    (1, 0)
+                }
+                FlashAttnMask::CausalWithOffset(offset) => (2, offset as u32),
+                FlashAttnMask::Additive(..) => (3, 0),
+            };
+            let q = self.compact(q_layout)?;
+            let k = k.compact(k_layout)?;
+            let v = v.compact(v_layout)?;
+            // Explicit mask, compacted; other modes pass the output buffer as an
+            // unread dummy pointer so launch args stay uniform.
+            let mut mask_compact: Option<Self> = None;
+            let (mut mask_b, mut mask_h) = (1u32, 1u32);
+            if let FlashAttnMask::Additive(storage, layout) = mask {
+                assert!(layout.is_compact(), "flash mask must be compact");
+                let ms = shape(layout);
+                assert_eq!(ms.len(), 4, "flash mask must be [B, H, Tq, Sk]");
+                assert!(ms[0] == qs[0] || ms[0] == 1, "flash mask batch mismatch");
+                assert!(ms[1] == qs[1] || ms[1] == 1, "flash mask head mismatch");
+                assert_eq!((ms[2], ms[3]), (qs[2], ks[2]), "flash mask shape mismatch");
+                let crate::storage::Storage::Cuda(inner) = storage else {
+                    return Err(Error::DeviceMismatch { op: "flash_attn_fwd" });
+                };
+                mask_compact = Some(inner.compact(layout)?);
+                mask_b = ms[0] as u32;
+                mask_h = ms[1] as u32;
+            }
+            let scale = scale as f32;
+            let rows = b * h * tq;
+            let grid = rows.div_ceil(256);
+            macro_rules! launch_flash {
+                ($rt:expr, $kernel:expr, $q:expr, $k:expr, $v:expr, $m:expr, $out:expr) => {{
+                    let func = $rt.load_function($kernel)?;
+                    let mut builder = $rt.stream.launch_builder(&func);
+                    builder.arg($q);
+                    builder.arg($k);
+                    builder.arg($v);
+                    builder.arg($m);
+                    builder.arg($out);
+                    builder.arg(&b);
+                    builder.arg(&h);
+                    builder.arg(&tq);
+                    builder.arg(&sk);
+                    builder.arg(&d);
+                    builder.arg(&scale);
+                    builder.arg(&mode);
+                    builder.arg(&offset);
+                    builder.arg(&mask_b);
+                    builder.arg(&mask_h);
+                    let cfg = LaunchConfig {
+                        grid_dim: (grid, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    };
+                    maybe_profile_launch($rt, || {
+                        unsafe { builder.launch(cfg) }.map_err(|err| {
+                            Error::Cuda(format!("kernel launch failed for {}: {err}", $kernel))
+                        })?;
+                        Ok(())
+                    })?;
+                }};
+            }
+            let out_len = rows as usize * d as usize;
+            match (&q.inner, &k.inner, &v.inner) {
+                (CudaInner::F32(qs), CudaInner::F32(ks), CudaInner::F32(vs)) => {
+                    let out = unsafe { alloc_uninit::<f32>(&q.runtime, out_len) }?;
+                    let ms = match &mask_compact {
+                        Some(m) => match &m.inner {
+                            CudaInner::F32(m) => m,
+                            _ => return Err(Error::DeviceMismatch { op: "flash_attn_fwd" }),
+                        },
+                        None => &out,
+                    };
+                    launch_flash!(&q.runtime, "flash_attn_fwd_f32", qs, ks, vs, ms, &out);
+                    Ok(Self { inner: CudaInner::F32(out), runtime: q.runtime.clone() })
+                }
+                (CudaInner::F16(qs), CudaInner::F16(ks), CudaInner::F16(vs)) => {
+                    let out = unsafe { alloc_uninit::<f16>(&q.runtime, out_len) }?;
+                    let ms = match &mask_compact {
+                        Some(m) => match &m.inner {
+                            CudaInner::F16(m) => m,
+                            _ => return Err(Error::DeviceMismatch { op: "flash_attn_fwd" }),
+                        },
+                        None => &out,
+                    };
+                    launch_flash!(&q.runtime, "flash_attn_fwd_f16", qs, ks, vs, ms, &out);
+                    Ok(Self { inner: CudaInner::F16(out), runtime: q.runtime.clone() })
+                }
+                (CudaInner::BF16(qs), CudaInner::BF16(ks), CudaInner::BF16(vs)) => {
+                    let out = unsafe { alloc_uninit::<bf16>(&q.runtime, out_len) }?;
+                    let ms = match &mask_compact {
+                        Some(m) => match &m.inner {
+                            CudaInner::BF16(m) => m,
+                            _ => return Err(Error::DeviceMismatch { op: "flash_attn_fwd" }),
+                        },
+                        None => &out,
+                    };
+                    launch_flash!(&q.runtime, "flash_attn_fwd_bf16", qs, ks, vs, ms, &out);
+                    Ok(Self { inner: CudaInner::BF16(out), runtime: q.runtime.clone() })
+                }
+                _ => Err(Error::DTypeMismatch("flash_attn_fwd: dtype mismatch".into())),
+            }
+        }
+
         /// Fused RMSNorm forward: `dst = src * rsqrt(mean(src^2) + eps) * w` per row.
         ///
         /// `outer_size * inner_size` must equal `layout.size()`. The input is
@@ -2637,6 +2850,18 @@ mod imp {
             _: &Layout,
             _: usize,
             _: usize,
+        ) -> Result<Self> {
+            Err(Error::NotImplemented("cuda backend is unavailable"))
+        }
+        fn flash_attn_fwd(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: f64,
+            _: FlashAttnMask<'_>,
         ) -> Result<Self> {
             Err(Error::NotImplemented("cuda backend is unavailable"))
         }

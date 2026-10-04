@@ -11,7 +11,7 @@ use crate::{
     dtype::{DType, WithDType},
     error::Result,
     layout::Layout,
-    storage::{BackendStorage, BinaryOp, CpuStorage, ReduceOp, UnaryOp},
+    storage::{BackendStorage, BinaryOp, CpuStorage, FlashAttnMask, ReduceOp, UnaryOp},
 };
 
 // Metadata structs passed to Metal kernels via set_bytes.
@@ -2011,6 +2011,21 @@ mod imp {
             Err(crate::error::Error::NotImplemented("mps rms_norm_fwd is not implemented"))
         }
 
+        fn flash_attn_fwd(
+            &self,
+            _q_layout: &Layout,
+            _k: &Self,
+            _k_layout: &Layout,
+            _v: &Self,
+            _v_layout: &Layout,
+            _scale: f64,
+            _mask: FlashAttnMask<'_>,
+        ) -> Result<Self> {
+            // No Metal flash-attention kernel yet: fail loudly instead of
+            // silently staging through the CPU, so the gap stays visible.
+            Err(crate::error::Error::NotImplemented("mps flash_attn_fwd is not implemented"))
+        }
+
         fn dtype(&self) -> DType {
             match &self.inner {
                 MpsInner::Accelerated { dtype, .. } => *dtype,
@@ -2392,6 +2407,18 @@ mod imp {
             _: usize,
             _: usize,
             _: f32,
+        ) -> Result<Self> {
+            Self::unavailable()
+        }
+        fn flash_attn_fwd(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: f64,
+            _: FlashAttnMask<'_>,
         ) -> Result<Self> {
             Self::unavailable()
         }

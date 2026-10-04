@@ -1,4 +1,5 @@
 use deers::models::gpt::{CausalSelfAttention, KvCache, precompute_rotary_embeddings};
+use deers::nn::functional::{FlashMask, causal_mask, flash_attention};
 use deers::nn::ParamStore;
 use deers::{DType, Device, Tensor};
 
@@ -216,6 +217,60 @@ fn flash_prefill_gradients_match_materialized() {
         let stitched: Vec<f32> = stitched_grads.get(param.id()).unwrap().to_vec().unwrap();
         let worst = max_abs_diff(&stitched, &full);
         assert!(worst < 1e-5, "gradient drifted: worst {worst}");
+    }
+}
+
+/// Builds an additive bias with `-inf` where `allowed(i, j)` is false, else 0.
+fn manual_bias(
+    tq: usize,
+    sk: usize,
+    allowed: &impl Fn(usize, usize) -> bool,
+    device: Device,
+) -> Tensor {
+    let data: Vec<f32> = (0..tq)
+        .flat_map(|i| (0..sk).map(move |j| if allowed(i, j) { 0.0 } else { f32::NEG_INFINITY }))
+        .collect();
+    Tensor::from_vec(data, vec![1, 1, tq, sk], device)
+}
+
+/// Scores one mask mode through the fused kernel and the materialized path.
+fn check_mask_mode(mask: FlashMask, bias: Tensor, tq: usize, sk: usize, device: Device) {
+    // Arrange
+    let (batch, heads, head_dim) = (1, 2, 8);
+    let q_data = det_vec(batch * heads * tq * head_dim);
+    let kv_data = det_vec(batch * heads * sk * head_dim);
+    let q = Tensor::from_vec(q_data, vec![batch, heads, tq, head_dim], device);
+    let k = Tensor::from_vec(kv_data.clone(), vec![batch, heads, sk, head_dim], device);
+    let v = Tensor::from_vec(kv_data, vec![batch, heads, sk, head_dim], device);
+    let scale = 1.0 / (head_dim as f64).sqrt();
+
+    // Act
+    let fused: Vec<f32> = flash_attention(&q, &k, &v, scale, mask).unwrap().to_vec().unwrap();
+    let scores = q.matmul(&k.transpose(None)) * scale + &bias;
+    let expected: Vec<f32> = scores.softmax(3).matmul(&v).to_vec().unwrap();
+
+    // Assert
+    let worst = max_abs_diff(&fused, &expected);
+    assert!(worst < 1e-5, "mask mode drifted on {device:?}: worst {worst}");
+}
+
+#[test]
+fn flash_mask_modes_match_materialized() {
+    // Arrange: every mask shape the fused kernel accepts, each against the
+    // same-bias materialized reference.
+    for device in devices() {
+        if device == Device::Mps {
+            continue;
+        }
+        // Act + Assert
+        let zeros = Tensor::zeros(vec![1, 1, 64, 64], DType::F32, device);
+        check_mask_mode(FlashMask::None, zeros, 64, 64, device);
+        let causal = causal_mask(1, 64, 0, DType::F32, device);
+        check_mask_mode(FlashMask::Causal, causal, 64, 64, device);
+        let offset = manual_bias(64, 64, &|i, j| j <= i + 16, device);
+        check_mask_mode(FlashMask::CausalWithOffset(16), offset, 64, 64, device);
+        let band = manual_bias(48, 64, &|i, j| j <= i + 16 && j + 16 >= i, device);
+        check_mask_mode(FlashMask::Mask(band.clone()), band, 48, 64, device);
     }
 }
 
