@@ -446,8 +446,8 @@ impl CausalSelfAttention {
         seq_len: usize,
     ) -> Result<Tensor> {
         let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let y_flat = functional::flash_attention(q, k, v, scale)?
-            .rearrange("b h t d -> (b t) (h d)", &[]);
+        let y_flat =
+            functional::flash_attention(q, k, v, scale)?.rearrange("b h t d -> (b t) (h d)", &[]);
 
         let out = self.out_proj.forward(&y_flat)?;
         Ok(out.rearrange("(b t) c -> b t c", &[("b", batch_size), ("t", seq_len)]))
