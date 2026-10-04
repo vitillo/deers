@@ -1237,6 +1237,10 @@ impl TensorOp for FusedRope {
         let n_heads = shape[2];
         let t_len = shape[1];
         let cos_t_len = self.cos.layout().shape()[1];
+        assert!(
+            cos_t_len == 1 || cos_t_len == t_len,
+            "RoPE cache must match sequence length"
+        );
         let x_c = self.x.compact();
         // Cos/sin stay uncompacted: the kernel reads the narrowed cache rows
         // through their view offset, saving two tiny compacts per rope.
@@ -1411,6 +1415,10 @@ impl TensorOp for FusedMaskedSoftmax {
         assert_eq!(mask_shape[3], inner_size, "mask width must match scores");
         assert_eq!(self.scores.dtype(), self.mask.dtype(), "scores/mask dtype mismatch");
         let mask_t_len = mask_shape[2];
+        assert!(
+            mask_t_len == 1 || mask_t_len == t_len,
+            "mask length must match scores or broadcast"
+        );
         let scores_c = self.scores.compact();
         let mask_c = self.mask.compact();
         let out_storage = {
