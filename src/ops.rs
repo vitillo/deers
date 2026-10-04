@@ -1215,6 +1215,17 @@ impl TensorOp for FusedRope {
             self.sin.layout().shape(),
             "RoPE cos/sin shapes must match"
         );
+        assert_eq!(self.cos.layout().shape().ndim(), 4, "RoPE cos/sin must be 4D");
+        assert_eq!(
+            self.cos.layout().shape()[0],
+            1,
+            "RoPE cache batch dimension must be 1"
+        );
+        assert_eq!(
+            self.cos.layout().shape()[2],
+            1,
+            "RoPE cache head dimension must be 1"
+        );
         assert_eq!(
             self.cos.layout().shape()[3],
             half_dim,
@@ -1226,6 +1237,7 @@ impl TensorOp for FusedRope {
         let n_heads = shape[2];
         let t_len = shape[1];
         let cos_t_len = self.cos.layout().shape()[1];
+        assert_eq!(cos_t_len, t_len, "RoPE cache must match sequence length");
         let x_c = self.x.compact();
         let cos_c = self.cos.compact();
         let sin_c = self.sin.compact();

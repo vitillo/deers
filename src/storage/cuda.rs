@@ -530,20 +530,19 @@ mod imp {
         if (row >= outer_size) return;
         unsigned int half = head_dim / 2;
         unsigned int t = (row / n_heads) % t_len;
-        unsigned int ct = t % cos_t_len;
         for (unsigned int col = threadIdx.x; col < head_dim; col += blockDim.x) {
             if (col < half) {
                 float x1 = to_float(x[row * head_dim + col]);
                 float x2 = to_float(x[row * head_dim + col + half]);
-                float c = to_float(cos[ct * half + col]);
-                float s = to_float(sin[ct * half + col]);
+                float c = to_float(cos[t * half + col]);
+                float s = to_float(sin[t * half + col]);
                 dst[row * head_dim + col] = from_float<T>(x1 * c - x2 * s);
             } else {
                 unsigned int h = col - half;
                 float x1 = to_float(x[row * head_dim + h]);
                 float x2 = to_float(x[row * head_dim + col]);
-                float c = to_float(cos[ct * half + h]);
-                float s = to_float(sin[ct * half + h]);
+                float c = to_float(cos[t * half + h]);
+                float s = to_float(sin[t * half + h]);
                 dst[row * head_dim + col] = from_float<T>(x1 * s + x2 * c);
             }
         }
@@ -2444,6 +2443,7 @@ mod imp {
             t_len: usize,
             cos_t_len: usize,
         ) -> Result<Self> {
+            assert_eq!(t_len, cos_t_len, "rope_fwd: cos/sin length must match input");
             let x = self.compact(layout)?;
             let cos_c = cos.compact(cos_layout)?;
             let sin_c = sin.compact(sin_layout)?;

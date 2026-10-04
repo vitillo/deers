@@ -1330,6 +1330,7 @@ impl BackendStorage for CpuStorage {
         assert!(layout.is_compact());
         assert_eq!(layout.size(), outer_size * head_dim);
         assert!(head_dim.is_multiple_of(2));
+        assert_eq!(t_len, cos_t_len, "rope_fwd: cos/sin length must match input");
         let half = head_dim / 2;
         match (self, cos, sin) {
             (CpuStorage::F32(_), CpuStorage::F32(_), CpuStorage::F32(_))
@@ -1347,12 +1348,12 @@ impl BackendStorage for CpuStorage {
          -> crate::error::Result<Vec<f32>> {
             assert!(layout.is_compact());
             let row: Vec<f32> = match storage {
-                CpuStorage::F32(data) => data[layout.offset..].to_vec(),
+                CpuStorage::F32(data) => data[layout.offset..layout.offset + expect_len].to_vec(),
                 CpuStorage::F16(data) => {
-                    data[layout.offset..].iter().map(|v| v.to_f32()).collect()
+                    data[layout.offset..layout.offset + expect_len].iter().map(|v| v.to_f32()).collect()
                 }
                 CpuStorage::BF16(data) => {
-                    data[layout.offset..].iter().map(|v| v.to_f32()).collect()
+                    data[layout.offset..layout.offset + expect_len].iter().map(|v| v.to_f32()).collect()
                 }
                 CpuStorage::I64(_) => {
                     return Err(crate::error::Error::DTypeMismatch(
@@ -1368,7 +1369,7 @@ impl BackendStorage for CpuStorage {
         let sin = read_row(sin, sin_layout, cos_t_len * half)?;
         let out: Vec<f32> = (0..outer_size)
             .flat_map(|row| {
-                let t = (row / n_heads) % t_len % cos_t_len;
+                let t = (row / n_heads) % t_len;
                 (0..head_dim)
                     .map(|col| {
                         if col < half {
