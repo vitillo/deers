@@ -308,6 +308,79 @@ fn argmax_row(logits: &Tensor, pos: usize) -> u32 {
     best as u32
 }
 
+fn argmax_float_row(logits: &Tensor, pos: usize) -> u32 {
+    // First index wins ties, matching the sampler's greedy choice.
+    let row: Vec<f32> = match logits.dtype() {
+        DType::F32 => logits.narrow(1, pos, 1).to_vec().unwrap(),
+        DType::BF16 => logits
+            .narrow(1, pos, 1)
+            .to_vec::<half::bf16>()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_f32())
+            .collect(),
+        other => panic!("test helper needs float logits, got {other}"),
+    };
+    let mut best = 0;
+    for (i, &value) in row.iter().enumerate().skip(1) {
+        if value > row[best] {
+            best = i;
+        }
+    }
+    best as u32
+}
+
+#[test]
+fn qwen3_bf16_greedy_generate_matches_manual_decode() {
+    // Arrange: constant weights converted to the checkpoint dtype, greedy sampling.
+    let (mut model, _) = constant_model(0.02);
+    model.to_dtype(DType::BF16).unwrap();
+    let prompt = vec![1u32, 2, 3];
+    let config = SamplingConfig { temperature: 0.0, ..SamplingConfig::new() };
+
+    // Act
+    let generated = model.generate(&prompt, 3, &config).unwrap();
+    let mut caches: Vec<KvCache> = (0..model.n_layers()).map(|_| KvCache::new()).collect();
+    let idx = Tensor::from_vec(vec![1i64, 2, 3], (1, 3), Device::Cpu);
+    let mut manual = Vec::new();
+    let mut next = no_grad(|| {
+        let logits = model.prefill(&idx, &mut caches).unwrap();
+        argmax_float_row(&logits, 2)
+    });
+    for step in 0..3 {
+        manual.push(next);
+        let token = Tensor::from_vec(vec![next as i64], (1, 1), Device::Cpu);
+        next = no_grad(|| {
+            let logits = model.decode(&token, 3 + step, &mut caches).unwrap();
+            argmax_float_row(&logits, 0)
+        });
+    }
+
+    // Assert: the BF16 sampler path returns exactly the three decoded ids.
+    assert_eq!(generated, manual);
+    assert_eq!(generated.len(), 3);
+}
+
+#[test]
+fn qwen3_generate_runs_on_accelerator_when_available() {
+    // Arrange: a small constant model moved off CPU.
+    let Some(device) = [Device::Cuda, Device::Mps].into_iter().find(|d| d.is_available()) else {
+        return;
+    };
+    let (mut model, _) = constant_model(0.02);
+    model.to_device(device).unwrap();
+    let prompt = vec![1u32, 2, 3];
+    let config = SamplingConfig { temperature: 0.0, ..SamplingConfig::new() };
+
+    // Act
+    let generated = model.generate(&prompt, 3, &config).unwrap();
+
+    // Assert: three in-vocabulary ids from the on-device loop.
+    assert_eq!(model.device(), device);
+    assert_eq!(generated.len(), 3);
+    assert!(generated.iter().all(|&id| id < 64));
+}
+
 fn constant_model_with_context(fill: f32, sequence_len: usize) -> Qwen3 {
     let mut config = small_config();
     config.sequence_len = sequence_len;
