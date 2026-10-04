@@ -409,6 +409,10 @@ impl CausalSelfAttention {
     }
 
     /// Attends queries over keys and values under `mask`, returning `[B, T, C]`.
+    ///
+    /// Materialized form: builds the full `T x S` score matrix before softmax.
+    /// `forward` (training) and `decode` (one query row) keep this path; `prefill`
+    /// uses the tiled [`attend_flash`](Self::attend_flash) form instead.
     fn attend(
         &self,
         q: &Tensor,
@@ -422,6 +426,28 @@ impl CausalSelfAttention {
         let scores = Tensor::einsum("b h t d, b h s d -> b h t s", q, k) * scale;
         let attn = (&scores + &mask).softmax(3);
         let y_flat = attn.matmul(v).rearrange("b h t d -> (b t) (h d)", &[]);
+
+        let out = self.out_proj.forward(&y_flat)?;
+        Ok(out.rearrange("(b t) c -> b t c", &[("b", batch_size), ("t", seq_len)]))
+    }
+
+    /// Attends the whole prompt without materializing the score matrix.
+    ///
+    /// Fused flash form of [`attend`](Self::attend): block-tiled online softmax
+    /// with implicit causal masking, returning the same `[B, T, C]` output. Only
+    /// the prefill path uses it, where `T` queries make the `T x T` matrix the
+    /// memory bottleneck; decode keeps the materialized path for its single row.
+    fn attend_flash(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        batch_size: usize,
+        seq_len: usize,
+    ) -> Result<Tensor> {
+        let scale = 1.0 / (self.head_dim as f64).sqrt();
+        let y_flat = functional::flash_attention(q, k, v, scale)?
+            .rearrange("b h t d -> (b t) (h d)", &[]);
 
         let out = self.out_proj.forward(&y_flat)?;
         Ok(out.rearrange("(b t) c -> b t c", &[("b", batch_size), ("t", seq_len)]))
@@ -447,8 +473,7 @@ impl CausalSelfAttention {
     ) -> Result<Tensor> {
         assert!(cache.is_empty(), "prefill expects an empty cache; decode appends to it");
         let (q, k, v, batch_size, seq_len) = self.project_qkv(x, cos, sin)?;
-        let mask = functional::causal_mask(batch_size, seq_len, 0, x.dtype(), x.device());
-        let out = self.attend(&q, &k, &v, mask, batch_size, seq_len)?;
+        let out = self.attend_flash(&q, &k, &v, batch_size, seq_len)?;
         cache.append(k, v);
         Ok(out)
     }
