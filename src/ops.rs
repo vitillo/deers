@@ -1549,6 +1549,22 @@ impl TensorOp for FlashAttention {
         grads.accumulate(&self.q, dq);
         grads.accumulate(&self.k, dk);
         grads.accumulate(&self.v, dv);
+        if let FlashMask::Mask(bias) = &self.mask {
+            let ds_shape: Vec<usize> = ds.layout().shape().iter().copied().collect();
+            let bias_shape: Vec<usize> = bias.layout().shape().iter().copied().collect();
+            let prefix = ds_shape.len().saturating_sub(bias_shape.len());
+            let padded: Vec<usize> =
+                std::iter::repeat_n(1, prefix).chain(bias_shape.iter().copied()).collect();
+            let axes: Vec<usize> = padded
+                .into_iter()
+                .zip(ds_shape.iter().copied())
+                .enumerate()
+                .filter(|(_, (o, n))| o != n)
+                .map(|(i, _)| i)
+                .collect();
+            let bias_grad = ds.sum(axes, false).reshape(bias.layout().shape().clone());
+            grads.accumulate(bias, bias_grad);
+        }
         Ok(())
     }
 
