@@ -1417,13 +1417,10 @@ impl FlashAttention {
             FlashMask::None => Tensor::zeros(vec![1, 1, queries, keys], dtype, device),
             FlashMask::Mask(bias) => bias.clone(),
             FlashMask::Causal | FlashMask::CausalWithOffset(_) => {
-                let offset = match mask {
+                let shift = match mask {
                     FlashMask::CausalWithOffset(offset) => *offset,
-                    _ => 0,
+                    _ => keys.saturating_sub(queries),
                 };
-                // Trailing-aligned causal bound: key j allowed for query i iff
-                // j <= i + offset + (keys - queries).
-                let shift = offset + keys.saturating_sub(queries);
                 let build = |neg: f32, zero: f32| -> Vec<f32> {
                     (0..queries)
                         .flat_map(|i| {
