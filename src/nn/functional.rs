@@ -3,7 +3,13 @@
 
 use half::{bf16, f16};
 
-use crate::{DType, Device, Tensor};
+use crate::{
+    DType, Device, Tensor,
+    error::Result,
+    ops::{FlashAttention, TensorOp},
+};
+
+pub use crate::ops::FlashMask;
 
 /// Applies inverted dropout: each element is zeroed with probability `p` and
 /// survivors are scaled by `1 / (1 - p)`.
@@ -120,4 +126,31 @@ pub fn causal_mask(
         }
         DType::I64 => panic!("causal_mask requires a floating-point dtype"),
     }
+}
+
+/// Block-tiled causal attention with running softmax statistics (flash form).
+///
+/// Computes the same result as materialized `softmax(scale * Q @ K^T + bias) @ V`
+/// over the prompt, but each backend runs one fused kernel with online softmax
+/// and never builds the `Tq x Sk` score matrix. `mask` selects the scored
+/// positions: [`FlashMask::None`], [`FlashMask::Causal`],
+/// [`FlashMask::CausalWithOffset`], or an explicit [`FlashMask::Mask`] bias.
+///
+/// Inputs are post-RoPE, post-repeat `[B, H, T, D]` tensors sharing one float
+/// dtype and device. CPU and CUDA compute on-device; MPS fails loudly instead
+/// of silently staging through the CPU. Only the forward is fused: the backward
+/// replays the primitive decomposition from the saved inputs, so gradients flow
+/// exactly like the materialized path. Shape mismatches panic: they are caller
+/// bugs, not runtime failures.
+///
+/// This mirrors the fused, tiled architecture candle uses for the same
+/// operation, reimplemented here from the online-softmax equations.
+pub fn flash_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f64,
+    mask: FlashMask,
+) -> Result<Tensor> {
+    FlashAttention::new(q.clone(), k.clone(), v.clone(), scale, mask)?.forward()
 }

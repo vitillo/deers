@@ -27,6 +27,24 @@ pub(crate) fn synchronize_all() {
     cuda::synchronize();
 }
 
+/// Which positions a fused flash-attention kernel scores.
+///
+/// The variants mirror candle's fused-attention mask shapes: no mask, causal,
+/// causal with an offset for decoding, and an explicit additive bias tensor.
+#[derive(Clone, Copy, Debug)]
+pub enum FlashAttnMask<'a> {
+    /// Score every key for every query.
+    None,
+    /// Score key `j` for query `i` only when `j + n_queries <= i + n_keys`.
+    /// For square prefill inputs this is the usual `j <= i` causal rule.
+    Causal,
+    /// Score key `j` for query `i` only when `j <= i + offset`.
+    CausalWithOffset(usize),
+    /// Add this `[B', H', Tq, Sk]` bias (`B'`/`H'` each 1 or the matching size).
+    /// Masked positions typically hold `-inf`, matching the materialized path.
+    Additive(&'a Storage, &'a Layout),
+}
+
 /// An element-wise kernel shared by storage backends.
 ///
 /// Backends implement the storage traversal; the op only defines the scalar
@@ -317,6 +335,21 @@ pub trait BackendStorage: Sized {
         outer_size: usize,
         inner_size: usize,
     ) -> Result<Self>;
+    /// Fused flash-attention forward over compact `[B, H, T, D]` inputs.
+    ///
+    /// Scores `q @ k^T * scale` under `mask` with online softmax and returns the
+    /// compact `[B, H, Tq, D]` output, never materializing the `Tq x Sk` scores.
+    /// All three inputs share one float dtype; layouts must be compact.
+    fn flash_attn_fwd(
+        &self,
+        q_layout: &Layout,
+        k: &Self,
+        k_layout: &Layout,
+        v: &Self,
+        v_layout: &Layout,
+        scale: f64,
+        mask: FlashAttnMask<'_>,
+    ) -> Result<Self>;
     /// Fused RMSNorm forward: `dst = src * rsqrt(mean(src^2) + eps) * w` per row.
     ///
     /// `outer_size * inner_size` must equal `layout.size()`. The fused kernel
@@ -489,6 +522,30 @@ impl BackendStorage for Storage {
                 grad.log_softmax_bwd(grad_layout, lsm, lsm_layout, outer_size, inner_size)?,
             )),
             _ => Err(Error::DeviceMismatch { op: "log_softmax_bwd" }),
+        }
+    }
+
+    fn flash_attn_fwd(
+        &self,
+        q_layout: &Layout,
+        k: &Self,
+        k_layout: &Layout,
+        v: &Self,
+        v_layout: &Layout,
+        scale: f64,
+        mask: FlashAttnMask<'_>,
+    ) -> Result<Self> {
+        match (self, k, v) {
+            (Storage::Cpu(q), Storage::Cpu(k), Storage::Cpu(v)) => {
+                Ok(Self::Cpu(q.flash_attn_fwd(q_layout, k, k_layout, v, v_layout, scale, mask)?))
+            }
+            (Storage::Cuda(q), Storage::Cuda(k), Storage::Cuda(v)) => {
+                Ok(Self::Cuda(q.flash_attn_fwd(q_layout, k, k_layout, v, v_layout, scale, mask)?))
+            }
+            (Storage::Mps(q), Storage::Mps(k), Storage::Mps(v)) => {
+                Ok(Self::Mps(q.flash_attn_fwd(q_layout, k, k_layout, v, v_layout, scale, mask)?))
+            }
+            _ => Err(Error::DeviceMismatch { op: "flash_attn_fwd" }),
         }
     }
 
