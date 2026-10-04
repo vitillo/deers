@@ -94,9 +94,8 @@ fn flash_prefill_matches_materialized_at_512() {
 
 #[test]
 fn flash_prefill_matches_materialized_at_2048() {
-    // Arrange: 2048 prompt tokens, thirty-two query blocks; the materialized
+    // Arrange: 2048 prompt tokens, sixteen query blocks; the materialized
     // baseline builds a 2048x2048 score matrix per head while flash never does.
-    // (Sixteen query blocks of tiled attention.)
     for device in devices() {
         if device == Device::Mps {
             continue;
