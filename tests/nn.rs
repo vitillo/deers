@@ -496,3 +496,102 @@ fn test_causal_mask_mps() {
         vec![0.0, f32::NEG_INFINITY, f32::NEG_INFINITY, 0.0, 0.0, f32::NEG_INFINITY, 0.0, 0.0, 0.0,]
     );
 }
+
+#[test]
+fn test_causal_mask_cache_reuses_equal_masks() {
+    // Arrange: one forward shape and one prefill-with-offset shape.
+    // Act: request each mask twice; the second request reuses the cached tensor.
+    let first = nn::functional::causal_mask(2, 3, 0, DType::F32, Device::Cpu);
+    let second = nn::functional::causal_mask(2, 3, 0, DType::F32, Device::Cpu);
+    let offset_first = nn::functional::causal_mask(1, 2, 3, DType::F32, Device::Cpu);
+    let offset_second = nn::functional::causal_mask(1, 2, 3, DType::F32, Device::Cpu);
+
+    // Assert: reused masks equal the known-fresh values element for element.
+    assert_eq!(first.layout().shape, vec![2, 1, 3, 3].into());
+    assert_eq!(first, second);
+    assert_eq!(
+        first.to_vec::<f32>().unwrap(),
+        vec![
+            0.0,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            0.0,
+            f32::NEG_INFINITY,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            0.0,
+            f32::NEG_INFINITY,
+            0.0,
+            0.0,
+            0.0,
+        ]
+    );
+    assert_eq!(offset_first.layout().shape, vec![1, 1, 2, 5].into());
+    assert_eq!(offset_first, offset_second);
+    assert_eq!(
+        offset_first.to_vec::<f32>().unwrap(),
+        vec![0.0, 0.0, 0.0, 0.0, f32::NEG_INFINITY, 0.0, 0.0, 0.0, 0.0, 0.0,]
+    );
+}
+
+#[test]
+fn test_causal_mask_cache_separates_dtypes() {
+    // Arrange: the same shape in each floating-point dtype.
+    // Act: request each twice; same-dtype pairs must match, dtypes must not mix.
+    let f16_first = nn::functional::causal_mask(1, 2, 0, DType::F16, Device::Cpu);
+    let f16_second = nn::functional::causal_mask(1, 2, 0, DType::F16, Device::Cpu);
+    let f32_first = nn::functional::causal_mask(1, 2, 0, DType::F32, Device::Cpu);
+    let f32_second = nn::functional::causal_mask(1, 2, 0, DType::F32, Device::Cpu);
+    let bf16_first = nn::functional::causal_mask(1, 2, 0, DType::BF16, Device::Cpu);
+    let bf16_second = nn::functional::causal_mask(1, 2, 0, DType::BF16, Device::Cpu);
+
+    // Assert: reuse is per dtype, and each entry keeps its own dtype.
+    assert_eq!(f16_first, f16_second);
+    assert_eq!(f32_first, f32_second);
+    assert_eq!(bf16_first, bf16_second);
+    assert_eq!(f16_first.dtype(), DType::F16);
+    assert_eq!(f32_first.dtype(), DType::F32);
+    assert_eq!(bf16_first.dtype(), DType::BF16);
+}
+
+#[test]
+fn test_causal_mask_decode_stays_tiny() {
+    // Arrange: single-query decode masks at a near and a far offset.
+    // Act: request both, plus a batched decode mask.
+    let near = nn::functional::causal_mask(1, 1, 1024, DType::F32, Device::Cpu);
+    let far = nn::functional::causal_mask(1, 1, 4096, DType::F32, Device::Cpu);
+    let batched = nn::functional::causal_mask(2, 1, 1024, DType::F32, Device::Cpu);
+
+    // Assert: every decode mask is one zero per batch, shared across offsets.
+    assert_eq!(near.layout().shape, vec![1, 1, 1, 1].into());
+    assert_eq!(far.layout().shape, vec![1, 1, 1, 1].into());
+    assert_eq!(near.to_vec::<f32>().unwrap(), vec![0.0]);
+    assert_eq!(near, far);
+    assert_eq!(batched.layout().shape, vec![2, 1, 1, 1].into());
+    assert_eq!(batched.to_vec::<f32>().unwrap(), vec![0.0, 0.0]);
+
+    // Assert: adding the tiny mask leaves wide logits unchanged, exactly
+    // like the fresh all-zeros row it replaces.
+    let scores = Tensor::from_vec(vec![0.5f32; 2 * 1025], vec![1, 2, 1, 1025], Device::Cpu);
+    let masked = &scores + &near;
+    assert_eq!(masked.to_vec::<f32>().unwrap(), scores.to_vec::<f32>().unwrap());
+}
+
+#[test]
+fn test_causal_mask_cache_is_bounded() {
+    // Arrange: far more distinct prefill shapes than the cache can hold.
+    // Act: request one mask per shape.
+    let inserts = 4 * nn::functional::CAUSAL_MASK_CACHE_CAP;
+    for i in 0..inserts {
+        nn::functional::causal_mask(1, 2 + (i % 8), i, DType::F32, Device::Cpu);
+    }
+
+    // Assert: the cache evicted instead of growing with the shape count.
+    assert!(nn::functional::causal_mask_cache_len() <= nn::functional::CAUSAL_MASK_CACHE_CAP);
+}
