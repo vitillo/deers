@@ -2011,6 +2011,26 @@ mod imp {
             Err(crate::error::Error::NotImplemented("mps rms_norm_fwd is not implemented"))
         }
 
+        #[allow(clippy::too_many_arguments)]
+        fn rope_fwd(
+            &self,
+            _layout: &Layout,
+            _cos: &Self,
+            _cos_layout: &Layout,
+            _sin: &Self,
+            _sin_layout: &Layout,
+            _outer_size: usize,
+            _head_dim: usize,
+            _n_heads: usize,
+            _t_len: usize,
+            _cos_t_len: usize,
+        ) -> Result<Self> {
+            // No Metal RoPE kernel yet: fail loudly instead of silently
+            // staging through the CPU, so the gap is visible until a native
+            // kernel lands.
+            Err(crate::error::Error::NotImplemented("mps rope_fwd is not implemented"))
+        }
+
         fn dtype(&self) -> DType {
             match &self.inner {
                 MpsInner::Accelerated { dtype, .. } => *dtype,
@@ -2392,6 +2412,22 @@ mod imp {
             _: usize,
             _: usize,
             _: f32,
+        ) -> Result<Self> {
+            Self::unavailable()
+        }
+        #[allow(clippy::too_many_arguments)]
+        fn rope_fwd(
+            &self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: &Self,
+            _: &Layout,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
         ) -> Result<Self> {
             Self::unavailable()
         }

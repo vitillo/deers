@@ -186,11 +186,10 @@ pub fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Tensor {
 
     // Hugging Face `rotate_half` direction, matching candle's `rotary_emb`:
     // y1 = x1*cos - x2*sin, y2 = x1*sin + x2*cos.
-    let x1 = x.narrow(3, 0, half_dim);
-    let x2 = x.narrow(3, half_dim, half_dim);
-    let y1 = &x1 * cos - &x2 * sin;
-    let y2 = &x1 * sin + &x2 * cos;
-    Tensor::cat(&[y1, y2], 3)
+    // One fused kernel per head-row on CPU and CUDA: decode is launch-bound
+    // on this chain, so neither keeps the primitive decomposition. MPS has
+    // no Metal kernel yet and fails loudly until one lands.
+    x.fused_rope(cos, sin)
 }
 
 /// Epsilon for QK-Norm. Matches the Qwen3 default `rms_norm_eps`, which Qwen3

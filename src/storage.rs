@@ -330,6 +330,25 @@ pub trait BackendStorage: Sized {
         inner_size: usize,
         eps: f32,
     ) -> Result<Self>;
+    /// Fused RoPE forward over `[B, T, H, D]` rows: `y1 = x1*cos - x2*sin`,
+    /// `y2 = x1*sin + x2*cos`, with the cos/sin row selected per token.
+    ///
+    /// `outer_size * head_dim` must equal `layout.size()`. Cos/sin hold
+    /// `cos_t_len` rows of `head_dim / 2` in the same dtype as the input.
+    #[allow(clippy::too_many_arguments)]
+    fn rope_fwd(
+        &self,
+        layout: &Layout,
+        cos: &Self,
+        cos_layout: &Layout,
+        sin: &Self,
+        sin_layout: &Layout,
+        outer_size: usize,
+        head_dim: usize,
+        n_heads: usize,
+        t_len: usize,
+        cos_t_len: usize,
+    ) -> Result<Self>;
     /// Converts `layout` to `dtype` without leaving the device.
     ///
     /// The cast reads strided source elements and writes a compact output buffer:
@@ -538,6 +557,37 @@ impl BackendStorage for Storage {
                 )?))
             }
             _ => Err(Error::DeviceMismatch { op: "rms_norm_fwd" }),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rope_fwd(
+        &self,
+        layout: &Layout,
+        cos: &Self,
+        cos_layout: &Layout,
+        sin: &Self,
+        sin_layout: &Layout,
+        outer_size: usize,
+        head_dim: usize,
+        n_heads: usize,
+        t_len: usize,
+        cos_t_len: usize,
+    ) -> Result<Self> {
+        match (self, cos, sin) {
+            (Storage::Cpu(x), Storage::Cpu(c), Storage::Cpu(s)) => Ok(Self::Cpu(x.rope_fwd(
+                layout, c, cos_layout, s, sin_layout,
+                outer_size, head_dim, n_heads, t_len, cos_t_len,
+            )?)),
+            (Storage::Cuda(x), Storage::Cuda(c), Storage::Cuda(s)) => Ok(Self::Cuda(x.rope_fwd(
+                layout, c, cos_layout, s, sin_layout,
+                outer_size, head_dim, n_heads, t_len, cos_t_len,
+            )?)),
+            (Storage::Mps(x), Storage::Mps(c), Storage::Mps(s)) => Ok(Self::Mps(x.rope_fwd(
+                layout, c, cos_layout, s, sin_layout,
+                outer_size, head_dim, n_heads, t_len, cos_t_len,
+            )?)),
+            _ => Err(Error::DeviceMismatch { op: "rope_fwd" }),
         }
     }
 
