@@ -1257,9 +1257,7 @@ impl BackendStorage for CpuStorage {
             assert!(layout.is_compact(), "flash_attn_fwd needs compact inputs");
             assert_eq!(layout.ndim(), 4, "flash_attn_fwd expects [B, H, T, D] inputs");
         }
-        let shape = |layout: &Layout| -> Vec<usize> {
-            layout.shape().iter().copied().collect()
-        };
+        let shape = |layout: &Layout| -> Vec<usize> { layout.shape().iter().copied().collect() };
         let qs = shape(q_layout);
         let ks = shape(k_layout);
         let vs = shape(v_layout);
@@ -1274,14 +1272,8 @@ impl BackendStorage for CpuStorage {
                 assert!(layout.is_compact(), "flash mask must be compact");
                 let ms = shape(layout);
                 assert_eq!(ms.len(), 4, "flash mask must be [B, H, Tq, Sk]");
-                assert!(
-                    ms[0] == batch || ms[0] == 1,
-                    "flash mask batch must be 1 or {batch}"
-                );
-                assert!(
-                    ms[1] == heads || ms[1] == 1,
-                    "flash mask heads must be 1 or {heads}"
-                );
+                assert!(ms[0] == batch || ms[0] == 1, "flash mask batch must be 1 or {batch}");
+                assert!(ms[1] == heads || ms[1] == 1, "flash mask heads must be 1 or {heads}");
                 assert_eq!((ms[2], ms[3]), (queries, keys), "flash mask shape mismatch");
                 let values = match storage {
                     Storage::Cpu(s) => cpu_to_f32(s)?,
@@ -1298,10 +1290,7 @@ impl BackendStorage for CpuStorage {
         let mode = match mask {
             FlashAttnMask::None => 0,
             FlashAttnMask::Causal => {
-                assert!(
-                    queries <= keys,
-                    "causal flash needs at least as many keys as queries"
-                );
+                assert!(queries <= keys, "causal flash needs at least as many keys as queries");
                 1
             }
             FlashAttnMask::CausalWithOffset(_) => 2,
@@ -1316,8 +1305,18 @@ impl BackendStorage for CpuStorage {
         let kf = cpu_to_f32(k)?;
         let vf = cpu_to_f32(v)?;
         let out = flash_attn_f32(
-            &qf, &kf, &vf, bias.as_ref(), batch, heads, queries, keys, head_dim,
-            scale as f32, mode, offset,
+            &qf,
+            &kf,
+            &vf,
+            bias.as_ref(),
+            batch,
+            heads,
+            queries,
+            keys,
+            head_dim,
+            scale as f32,
+            mode,
+            offset,
         );
         cpu_from_f32(out, self.dtype())
     }
@@ -1419,9 +1418,7 @@ fn cpu_from_f32(data: Vec<f32>, dtype: DType) -> crate::error::Result<CpuStorage
     match dtype {
         DType::F32 => Ok(CpuStorage::F32(data)),
         DType::F16 => Ok(CpuStorage::F16(data.iter().map(|&v| f16::from_f32(v)).collect())),
-        DType::BF16 => {
-            Ok(CpuStorage::BF16(data.iter().map(|&v| bf16::from_f32(v)).collect()))
-        }
+        DType::BF16 => Ok(CpuStorage::BF16(data.iter().map(|&v| bf16::from_f32(v)).collect())),
         DType::I64 => Err(crate::error::Error::DTypeMismatch(
             "flash_attn_fwd: i64 is not supported, use a float dtype".into(),
         )),

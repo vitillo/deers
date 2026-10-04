@@ -1,6 +1,6 @@
 use deers::models::gpt::{CausalSelfAttention, KvCache, precompute_rotary_embeddings};
-use deers::nn::functional::{FlashMask, causal_mask, flash_attention};
 use deers::nn::ParamStore;
+use deers::nn::functional::{FlashMask, causal_mask, flash_attention};
 use deers::{DType, Device, Tensor};
 
 fn devices() -> Vec<Device> {

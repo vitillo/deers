@@ -2348,9 +2348,8 @@ mod imp {
                 assert!(layout.is_compact(), "flash_attn_fwd needs compact inputs");
                 assert_eq!(layout.ndim(), 4, "flash_attn_fwd expects [B, H, T, D] inputs");
             }
-            let shape = |layout: &Layout| -> Vec<usize> {
-                layout.shape().iter().copied().collect()
-            };
+            let shape =
+                |layout: &Layout| -> Vec<usize> { layout.shape().iter().copied().collect() };
             let qs = shape(q_layout);
             let ks = shape(k_layout);
             let vs = shape(v_layout);

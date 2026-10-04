@@ -1430,11 +1430,9 @@ impl FlashAttention {
                 };
                 let shape = vec![1, 1, queries, keys];
                 match dtype {
-                    crate::DType::F32 => Tensor::from_vec(
-                        build(f32::NEG_INFINITY, 0.0),
-                        shape,
-                        device,
-                    ),
+                    crate::DType::F32 => {
+                        Tensor::from_vec(build(f32::NEG_INFINITY, 0.0), shape, device)
+                    }
                     crate::DType::F16 => Tensor::from_vec(
                         build(f32::NEG_INFINITY, 0.0)
                             .iter()

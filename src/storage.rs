@@ -536,15 +536,15 @@ impl BackendStorage for Storage {
         mask: FlashAttnMask<'_>,
     ) -> Result<Self> {
         match (self, k, v) {
-            (Storage::Cpu(q), Storage::Cpu(k), Storage::Cpu(v)) => Ok(Self::Cpu(
-                q.flash_attn_fwd(q_layout, k, k_layout, v, v_layout, scale, mask)?,
-            )),
-            (Storage::Cuda(q), Storage::Cuda(k), Storage::Cuda(v)) => Ok(Self::Cuda(
-                q.flash_attn_fwd(q_layout, k, k_layout, v, v_layout, scale, mask)?,
-            )),
-            (Storage::Mps(q), Storage::Mps(k), Storage::Mps(v)) => Ok(Self::Mps(
-                q.flash_attn_fwd(q_layout, k, k_layout, v, v_layout, scale, mask)?,
-            )),
+            (Storage::Cpu(q), Storage::Cpu(k), Storage::Cpu(v)) => {
+                Ok(Self::Cpu(q.flash_attn_fwd(q_layout, k, k_layout, v, v_layout, scale, mask)?))
+            }
+            (Storage::Cuda(q), Storage::Cuda(k), Storage::Cuda(v)) => {
+                Ok(Self::Cuda(q.flash_attn_fwd(q_layout, k, k_layout, v, v_layout, scale, mask)?))
+            }
+            (Storage::Mps(q), Storage::Mps(k), Storage::Mps(v)) => {
+                Ok(Self::Mps(q.flash_attn_fwd(q_layout, k, k_layout, v, v_layout, scale, mask)?))
+            }
             _ => Err(Error::DeviceMismatch { op: "flash_attn_fwd" }),
         }
     }

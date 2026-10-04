@@ -154,4 +154,3 @@ pub fn flash_attention(
 ) -> Result<Tensor> {
     FlashAttention::new(q.clone(), k.clone(), v.clone(), scale, mask)?.forward()
 }
-
