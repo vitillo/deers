@@ -44,11 +44,9 @@ mod imp {
     /// they run on tiny index tensors where wide blocks gain nothing.
     const GATHER_TILE: usize = 128;
 
-    /// Runs a device operation to completion on the runtime's stream, timing
-    /// it with CUDA events for the active profiler scope. This restores the
-    /// per-op device attribution the old backend had; every kernel launch in
-    /// this file goes through here. Event failures fall back to an untimed
-    /// launch instead of failing the operation.
+    /// Waits for a host readback. When profiling is active, CUDA events
+    /// attribute its device time to the current operation. Event failures
+    /// fall back to an untimed readback.
     trait SyncProfiled: DeviceOp {
         fn sync_profiled(
             self,
@@ -87,26 +85,32 @@ mod imp {
 
     impl<T: DeviceOp> SyncProfiled for T {}
 
-    /// Submits a device operation on the runtime's stream without waiting for
-    /// completion. This matches the pre-cuTile execution model (async launch,
-    /// coarse syncs) and is sound under one invariant: every kernel, copy,
-    /// and cuBLAS call in this file shares `rt.stream`, so work executes in
-    /// submission order; the pool frees buffers stream-ordered, so dropped
-    /// intermediates cannot be recycled under queued work. Downloads and
-    /// explicit `synchronize` calls wait for completion; uploads do not.
-    /// When the profiler is active this falls back to the syncing path so
-    /// device times stay exact; profiling runs are never timed.
+    /// Submits work on the shared stream without waiting, including during
+    /// profiling. All kernels, copies, and cuBLAS calls share this stream;
+    /// cudarc frees dropped intermediates in submission order. Downloads and
+    /// explicit `synchronize` calls still wait for completion.
     trait AsyncProfiled: DeviceOp {
         fn async_profiled(
             self,
             rt: &Runtime,
         ) -> std::result::Result<<Self as DeviceOp>::Output, cuda_async::error::DeviceError>
         {
-            if crate::profiler::is_active() {
-                return SyncProfiled::sync_profiled(self, rt);
+            let sample = crate::profiler::current_scope_id().and_then(|scope| {
+                let (Ok(start), Ok(end)) = (rt.device.new_event(), rt.device.new_event()) else {
+                    return None;
+                };
+                start.record(&rt.stream).ok()?;
+                Some((scope, start, end))
+            });
+            // SAFETY: single-stream submission and stream-ordered frees keep all
+            // buffers alive until the queued work completes.
+            let out = unsafe { self.async_on(&rt.stream) }?;
+            if let Some((scope, start, end)) = sample
+                && end.record(&rt.stream).is_ok()
+            {
+                crate::profiler::queue_cuda_timing(scope, start, end);
             }
-            // SAFETY: single-stream invariant documented above.
-            unsafe { self.async_on(&rt.stream) }
+            Ok(out)
         }
     }
 
@@ -3152,20 +3156,12 @@ mod imp {
         if events.as_ref().is_some_and(|(_, end)| end.record(&rt.stream).is_err()) {
             events = None;
         }
-        // The pool frees buffers stream-ordered, so dropping them after a
-        // launch error or below is safe. Sync only for profiler attribution;
-        // the timed path stays async on the shared stream.
-        if events.is_some() {
-            let sync = unsafe { rt.stream.synchronize() };
-            launch.map_err(|e| err(&e))?;
-            sync.map_err(|e| err(&e))?;
-        } else {
-            launch.map_err(|e| err(&e))?;
-        }
-        if let (Some(id), Some((start, end))) = (scope, events)
-            && let Ok(ms) = start.elapsed_time(&end)
-        {
-            crate::profiler::record_device_time(id, (ms * 1_000_000.0).round() as u64);
+        // Dropped buffers remain valid for queued cuBLAS work until the
+        // stream-ordered free. Collect event times after the profiler's final
+        // stream synchronization, without waiting here.
+        launch.map_err(|e| err(&e))?;
+        if let (Some(id), Some((start, end))) = (scope, events) {
+            crate::profiler::queue_cuda_timing(id, start, end);
         }
         Ok(Arc::new(output))
     }
