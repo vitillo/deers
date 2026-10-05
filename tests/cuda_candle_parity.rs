@@ -1,4 +1,4 @@
-#![cfg(all(feature = "cuda", target_os = "linux"))]
+#![cfg(all(feature = "cuda-parity", target_os = "linux"))]
 
 use std::path::PathBuf;
 
