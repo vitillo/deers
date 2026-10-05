@@ -136,6 +136,14 @@ cargo test --features cuda
 
 The cuTile CUDA backend requires CUDA 13.3, a supported NVIDIA GPU, and `tileiras` from the CUDA toolkit. It was tested on an RTX 5080.
 
+To compare BF16 CUDA output with Candle using the Qwen3-0.6B checkpoint, run:
+
+```sh
+QWEN3_06B_DIR=/path/to/qwen3-0.6B cargo test --release --features cuda-parity --test cuda_candle_parity
+```
+
+The checkpoint test skips when `QWEN3_06B_DIR` is unset. The other Candle parity tests still run.
+
 ## License
 
 MIT
