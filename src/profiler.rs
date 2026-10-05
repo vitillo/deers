@@ -8,6 +8,8 @@ use std::time::Instant;
 
 use crate::storage;
 use crate::tensor::Tensor;
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+use cuda_core::Event;
 
 thread_local! {
     static ACTIVE_PROFILER: RefCell<Option<Rc<ProfilerSession>>> = const { RefCell::new(None) };
@@ -183,12 +185,14 @@ impl Profiler {
         Self { session, active: true }
     }
 
-    /// Synchronizes all backends, stops recording, and returns the collected [`Profile`].
+    /// Synchronizes all backends, collects deferred CUDA timings, and returns the [`Profile`].
     ///
     /// Panics if this profiler is no longer the active session on this thread.
     pub fn finish(mut self) -> Profile {
         self.active = false;
         storage::synchronize_all();
+        #[cfg(all(feature = "cuda", target_os = "linux"))]
+        self.session.collect_cuda_timings();
         ACTIVE_SCOPE_STACK.with(|stack| {
             assert!(stack.borrow().is_empty(), "profiler scope stack was left unbalanced");
         });
@@ -242,6 +246,15 @@ struct ProfilerInner {
     stats: Vec<EventStat>,
     keys: Vec<EventKey>,
     index_by_key: HashMap<EventKey, usize>,
+    #[cfg(all(feature = "cuda", target_os = "linux"))]
+    pending_cuda: Vec<PendingCudaTiming>,
+}
+
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+struct PendingCudaTiming {
+    event_id: usize,
+    start: Event,
+    end: Event,
 }
 
 struct ProfilerSession {
@@ -286,6 +299,16 @@ impl ProfilerSession {
     #[allow(dead_code)]
     fn record_device_time(&self, event_id: usize, elapsed_ns: u64) {
         self.inner.borrow_mut().stats[event_id].device_time_ns += elapsed_ns;
+    }
+
+    #[cfg(all(feature = "cuda", target_os = "linux"))]
+    fn collect_cuda_timings(&self) {
+        let pending = std::mem::take(&mut self.inner.borrow_mut().pending_cuda);
+        for sample in pending {
+            if let Ok(ms) = sample.start.elapsed_time(&sample.end) {
+                self.record_device_time(sample.event_id, (ms * 1_000_000.0).round() as u64);
+            }
+        }
     }
 
     fn snapshot(&self) -> Profile {
@@ -362,6 +385,19 @@ pub(crate) fn record_device_time(event_id: usize, elapsed_ns: u64) {
     ACTIVE_PROFILER.with(|slot| {
         if let Some(session) = slot.borrow().as_ref() {
             session.record_device_time(event_id, elapsed_ns);
+        }
+    });
+}
+
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+pub(crate) fn queue_cuda_timing(event_id: usize, start: Event, end: Event) {
+    ACTIVE_PROFILER.with(|slot| {
+        if let Some(session) = slot.borrow().as_ref() {
+            session.inner.borrow_mut().pending_cuda.push(PendingCudaTiming {
+                event_id,
+                start,
+                end,
+            });
         }
     });
 }
