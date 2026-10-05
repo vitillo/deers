@@ -120,6 +120,36 @@ fn bf16_add_matches_cpu() {
 }
 
 #[test]
+fn bf16_broadcast_add_matches_cpu_and_preserves_mask_gradient() {
+    // Arrange
+    if !require_cuda() {
+        return;
+    }
+    let shape = vec![2, 3, 4, 33];
+    let scores: Vec<bf16> =
+        (0..2 * 3 * 4 * 33).map(|i| bf16::from_f32((i % 31) as f32 / 2.0)).collect();
+    let mask: Vec<bf16> =
+        (0..4 * 33).map(|i| bf16::from_f32(if i % 3 == 0 { -2.0 } else { 0.5 })).collect();
+    let cpu = Tensor::from_vec(scores.clone(), shape.clone(), Device::Cpu);
+    let cuda = Tensor::from_vec(scores, shape.clone(), Device::Cuda);
+    let cpu_mask = Tensor::from_vec(mask.clone(), vec![1, 1, 4, 33], Device::Cpu).attach();
+    let cuda_mask = Tensor::from_vec(mask, vec![1, 1, 4, 33], Device::Cuda).attach();
+
+    // Act
+    let cpu_out = &cpu + &cpu_mask.broadcast(shape.clone());
+    let cuda_out = &cuda + &cuda_mask.broadcast(shape);
+    let cpu_grad =
+        cpu_out.sum(vec![0, 1, 2, 3], false).backward().unwrap().get(cpu_mask.id()).unwrap();
+    let cuda_grad =
+        cuda_out.sum(vec![0, 1, 2, 3], false).backward().unwrap().get(cuda_mask.id()).unwrap();
+
+    // Assert
+    assert_eq!(to_f32(&cuda_out), to_f32(&cpu_out));
+    assert_eq!(to_f32(&cuda_grad), to_f32(&cpu_grad));
+    assert!(to_f32(&cuda_grad).iter().all(|&v| v == 6.0));
+}
+
+#[test]
 fn bf16_sub_and_div_match_cpu() {
     // Arrange
     if !require_cuda() {
@@ -358,13 +388,75 @@ fn bf16_matmul_transposed_matches_cpu() {
     let rhs = bf16_cuda(vec![1.0, 0.0, 0.0, 1.0], (2, 2));
     let cpu_lhs = bf16_cpu(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3));
 
-    // Act: transposed lhs forces the CUBLAS_OP_T path without compacting.
+    // Act
     let actual = to_f32(&lhs.transpose(None).matmul(&rhs));
     let expected =
         to_f32(&cpu_lhs.transpose(None).matmul(&bf16_cpu(vec![1.0, 0.0, 0.0, 1.0], (2, 2))));
 
     // Assert
     assert_close(&actual, &expected, "bf16 transposed matmul on cuda");
+}
+
+#[test]
+fn bf16_batched_matmul_with_offset_and_transpose_matches_cpu() {
+    // Arrange
+    if !require_cuda() {
+        return;
+    }
+    let lhs_values = vec![
+        1.0, 0.0, 0.0, 1.0, 1.0, 1.0, // batch 0, excluded by narrow
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, // batch 1
+        2.0, 0.0, 1.0, 0.0, 3.0, 1.0, // batch 2
+    ];
+    let rhs_values = vec![1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 2.0, 1.0, 0.0, 1.0, 3.0, 1.0];
+    let cuda_lhs = Tensor::from_vec(
+        lhs_values.iter().copied().map(bf16::from_f32).collect::<Vec<_>>(),
+        (3, 2, 3),
+        Device::Cuda,
+    );
+    let cuda_rhs = Tensor::from_vec(
+        rhs_values.iter().copied().map(bf16::from_f32).collect::<Vec<_>>(),
+        (2, 2, 3),
+        Device::Cuda,
+    );
+    let cpu_lhs = Tensor::from_vec(
+        lhs_values.into_iter().map(bf16::from_f32).collect::<Vec<_>>(),
+        (3, 2, 3),
+        Device::Cpu,
+    );
+    let cpu_rhs = Tensor::from_vec(
+        rhs_values.into_iter().map(bf16::from_f32).collect::<Vec<_>>(),
+        (2, 2, 3),
+        Device::Cpu,
+    );
+
+    // Act
+    let actual = to_f32(&cuda_lhs.narrow(0, 1, 2).matmul(&cuda_rhs.transpose(None)));
+    let expected = to_f32(&cpu_lhs.narrow(0, 1, 2).matmul(&cpu_rhs.transpose(None)));
+
+    // Assert
+    assert_close(&actual, &expected, "bf16 batched offset/transpose matmul on cuda");
+}
+
+#[test]
+fn bf16_batched_matmul_with_strided_rows_matches_cpu() {
+    // Arrange
+    if !require_cuda() {
+        return;
+    }
+    let lhs_values: Vec<_> = (0..24).map(|i| bf16::from_f32(i as f32 / 4.0)).collect();
+    let rhs_values: Vec<_> = (0..16).map(|i| bf16::from_f32((i % 5) as f32 / 4.0)).collect();
+    let cuda_lhs = Tensor::from_vec(lhs_values.clone(), (2, 3, 4), Device::Cuda);
+    let cuda_rhs = Tensor::from_vec(rhs_values.clone(), (2, 4, 2), Device::Cuda);
+    let cpu_lhs = Tensor::from_vec(lhs_values, (2, 3, 4), Device::Cpu);
+    let cpu_rhs = Tensor::from_vec(rhs_values, (2, 4, 2), Device::Cpu);
+
+    // Act
+    let actual = to_f32(&cuda_lhs.narrow(1, 1, 2).matmul(&cuda_rhs));
+    let expected = to_f32(&cpu_lhs.narrow(1, 1, 2).matmul(&cpu_rhs));
+
+    // Assert
+    assert_close(&actual, &expected, "bf16 strided row matmul on cuda");
 }
 
 #[test]
@@ -426,6 +518,75 @@ fn bf16_log_softmax_forward_and_backward_match_cpu() {
     // Assert
     assert_close(&actual_fwd, &expected_fwd, "bf16 log_softmax fwd on cuda");
     assert_close(&actual_grad, &expected_grad, "bf16 log_softmax bwd on cuda");
+}
+
+#[test]
+fn bf16_softmax_forward_and_backward_match_cpu() {
+    // Arrange
+    if !require_cuda() {
+        return;
+    }
+    let values = vec![1.0, 2.0, 3.0, 0.5, -1.0, 0.0];
+    let weights = vec![1.0, 0.0, -1.0, -1.0, 2.0, 1.0];
+    let cpu = bf16_cpu(values.clone(), (2, 3)).attach();
+    let cuda = bf16_cuda(values, (2, 3)).attach();
+    let expected = to_f32(&cpu.softmax(1));
+
+    // Act
+    let actual = to_f32(&cuda.softmax(1));
+    let cpu_loss = (&cpu.softmax(1) * &bf16_cpu(weights.clone(), (2, 3))).sum(vec![0, 1], true);
+    let cuda_loss = (&cuda.softmax(1) * &bf16_cuda(weights, (2, 3))).sum(vec![0, 1], true);
+    let expected_grad = to_f32(&cpu_loss.backward().unwrap().get(cpu.id()).unwrap());
+    let actual_grad = to_f32(&cuda_loss.backward().unwrap().get(cuda.id()).unwrap());
+
+    // Assert
+    assert_close(&actual, &expected, "bf16 softmax fwd on cuda");
+    assert_close(&actual_grad, &expected_grad, "bf16 softmax bwd on cuda");
+}
+
+#[test]
+fn bf16_wide_softmax_and_log_softmax_match_f32_reference() {
+    // Arrange
+    if !require_cuda() {
+        return;
+    }
+    let width = 2048;
+    let values: Vec<bf16> = (0..2 * width)
+        .map(|i| {
+            if i >= width && i % width > 1024 {
+                bf16::NEG_INFINITY
+            } else {
+                bf16::from_f32(((i * 79 % 101) as f32 - 50.0) / 9.0)
+            }
+        })
+        .collect();
+    let input = Tensor::from_vec(values.clone(), (2, width), Device::Cuda);
+    let mut expected_softmax = Vec::new();
+    let mut expected_log_softmax = Vec::new();
+    for row in values.chunks(width) {
+        let max = row.iter().map(|v| v.to_f32()).fold(f32::NEG_INFINITY, f32::max);
+        let sum: f32 = row.iter().map(|v| (v.to_f32() - max).exp()).sum();
+        for v in row {
+            let log_prob = v.to_f32() - max - sum.ln();
+            expected_log_softmax.push(bf16::from_f32(log_prob).to_f32());
+            expected_softmax.push(bf16::from_f32(log_prob.exp()).to_f32());
+        }
+    }
+
+    // Act
+    let softmax = to_f32(&input.softmax(1));
+    let log_softmax = to_f32(&input.log_softmax(1));
+
+    // Assert
+    for (i, (actual, expected)) in softmax.iter().zip(expected_softmax.iter()).enumerate() {
+        assert!((actual - expected).abs() < 0.002, "softmax[{i}]: {actual} != {expected}");
+    }
+    for (i, (actual, expected)) in log_softmax.iter().zip(expected_log_softmax.iter()).enumerate() {
+        assert!(
+            actual == expected || (actual - expected).abs() < 0.063,
+            "log_softmax[{i}]: {actual} != {expected}"
+        );
+    }
 }
 
 #[test]
@@ -522,6 +683,29 @@ fn bf16_cat_matches_cpu() {
 
     // Assert
     assert_close(&actual, &[1.0, 2.0, 3.0, 4.0], "bf16 cat on cuda");
+}
+
+#[test]
+fn bf16_upload_and_cat_keep_queued_copies_ordered() {
+    // Arrange
+    if !require_cuda() {
+        return;
+    }
+    let mut results = Vec::new();
+
+    // Act
+    for i in 0..256 {
+        let input = Tensor::from_vec(vec![bf16::from_f32(i as f32); 128], (128,), Device::Cuda);
+        let left = input.narrow(0, 0, 64);
+        let right = input.narrow(0, 64, 64);
+        results.push(Tensor::cat(&[left, right], 0));
+    }
+    Device::Cuda.synchronize();
+
+    // Assert
+    for (i, result) in results.iter().enumerate() {
+        assert!(result.to_vec::<bf16>().unwrap().iter().all(|v| v.to_f32() == i as f32));
+    }
 }
 
 #[test]
@@ -658,6 +842,96 @@ fn unfused_rms_norm(x: &Tensor, weight: Option<&Tensor>, eps: f64) -> Tensor {
 }
 
 #[test]
+fn bf16_rms_norm_matches_cpu_with_and_without_weight_and_gradient() {
+    // Arrange
+    if !require_cuda() {
+        return;
+    }
+    let values: Vec<f32> = (0..2 * 128).map(|i| (i % 29) as f32 / 17.0 - 0.8).collect();
+    let weights: Vec<f32> = (0..128).map(|i| (i % 7) as f32 / 8.0 + 0.5).collect();
+    let x_cpu = bf16_cpu(values.clone(), (2, 128)).attach();
+    let x_cuda = bf16_cuda(values, (2, 128)).attach();
+    let w_cpu = Tensor::from_vec(
+        weights.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
+        (128,),
+        Device::Cpu,
+    );
+    let w_cuda = w_cpu.to_device(Device::Cuda).unwrap();
+
+    // Act
+    let expected = x_cpu.fused_rms_norm(Some(&w_cpu), 1e-5);
+    let actual = x_cuda.fused_rms_norm(Some(&w_cuda), 1e-5);
+    let expected_plain = x_cpu.fused_rms_norm(None, 1e-5);
+    let actual_plain = x_cuda.fused_rms_norm(None, 1e-5);
+    let expected_grad =
+        expected.sum(vec![0, 1], false).backward().unwrap().get(x_cpu.id()).unwrap();
+    let actual_grad = actual.sum(vec![0, 1], false).backward().unwrap().get(x_cuda.id()).unwrap();
+
+    // Assert
+    assert_close(&to_f32(&actual), &to_f32(&expected), "bf16 weighted RMSNorm");
+    assert_close(&to_f32(&actual_plain), &to_f32(&expected_plain), "bf16 plain RMSNorm");
+    assert_close(&to_f32(&actual_grad), &to_f32(&expected_grad), "bf16 RMSNorm gradient");
+}
+
+#[test]
+fn f32_rms_norm_matches_cpu_with_and_without_weight() {
+    // Arrange
+    if !require_cuda() {
+        return;
+    }
+    for (rows, cols) in [(3, 300), (2, 128), (1, 7)] {
+        let values: Vec<f32> = (0..rows * cols).map(|i| (i % 17) as f32 / 9.0 - 1.0).collect();
+        let weights: Vec<f32> = (0..cols).map(|i| (i % 5) as f32 / 4.0 + 0.5).collect();
+        let x_cpu = Tensor::from_vec(values.clone(), (rows, cols), Device::Cpu);
+        let x_cuda = Tensor::from_vec(values, (rows, cols), Device::Cuda);
+        let w_cpu = Tensor::from_vec(weights.clone(), (cols,), Device::Cpu);
+        let w_cuda = Tensor::from_vec(weights, (cols,), Device::Cuda);
+
+        // Act
+        let expected_weighted = x_cpu.fused_rms_norm(Some(&w_cpu), 1e-5).to_vec::<f32>().unwrap();
+        let actual_weighted = x_cuda.fused_rms_norm(Some(&w_cuda), 1e-5).to_vec::<f32>().unwrap();
+        let expected_plain = x_cpu.fused_rms_norm(None, 1e-5).to_vec::<f32>().unwrap();
+        let actual_plain = x_cuda.fused_rms_norm(None, 1e-5).to_vec::<f32>().unwrap();
+
+        // Assert
+        assert_close(&actual_weighted, &expected_weighted, "f32 weighted RMSNorm");
+        assert_close(&actual_plain, &expected_plain, "f32 weightless RMSNorm");
+    }
+}
+
+#[test]
+fn f32_rms_norm_backward_matches_cpu() {
+    // Arrange
+    if !require_cuda() {
+        return;
+    }
+    let values: Vec<f32> = (0..256).map(|i| (i % 13) as f32 / 8.0 - 0.5).collect();
+    let weights: Vec<f32> = (0..128).map(|i| (i % 7) as f32 / 6.0 + 0.5).collect();
+    let x_cpu = Tensor::from_vec(values.clone(), (2, 128), Device::Cpu).attach();
+    let x_cuda = Tensor::from_vec(values, (2, 128), Device::Cuda).attach();
+    let w_cpu = Tensor::from_vec(weights.clone(), (128,), Device::Cpu).attach();
+    let w_cuda = Tensor::from_vec(weights, (128,), Device::Cuda).attach();
+
+    // Act
+    let cpu_grads =
+        x_cpu.fused_rms_norm(Some(&w_cpu), 1e-5).sum(vec![0, 1], true).backward().unwrap();
+    let cuda_grads =
+        x_cuda.fused_rms_norm(Some(&w_cuda), 1e-5).sum(vec![0, 1], true).backward().unwrap();
+
+    // Assert
+    assert_close(
+        &cuda_grads.get(x_cuda.id()).unwrap().to_vec::<f32>().unwrap(),
+        &cpu_grads.get(x_cpu.id()).unwrap().to_vec::<f32>().unwrap(),
+        "f32 RMSNorm input gradient",
+    );
+    assert_close(
+        &cuda_grads.get(w_cuda.id()).unwrap().to_vec::<f32>().unwrap(),
+        &cpu_grads.get(w_cpu.id()).unwrap().to_vec::<f32>().unwrap(),
+        "f32 RMSNorm weight gradient",
+    );
+}
+
+#[test]
 fn fused_rms_norm_forward_and_backward_match_unfused() {
     // Arrange: inner width past the 256-thread block with a tail, plus a
     // small even-width case for the QK-norm shape family.
@@ -667,8 +941,7 @@ fn fused_rms_norm_forward_and_backward_match_unfused() {
     for (outer, inner) in [(3usize, 300usize), (2, 128)] {
         let values: Vec<f32> =
             (0..outer * inner).map(|i| ((i * 37) % 101) as f32 / 50.0 - 1.0).collect();
-        let weights: Vec<f32> =
-            (0..inner).map(|i| 0.5 + ((i * 13) % 7) as f32 * 0.1).collect();
+        let weights: Vec<f32> = (0..inner).map(|i| 0.5 + ((i * 13) % 7) as f32 * 0.1).collect();
         let x_cpu = Tensor::from_vec(
             values.iter().map(|&v| bf16::from_f32(v)).collect::<Vec<_>>(),
             vec![outer, inner],
